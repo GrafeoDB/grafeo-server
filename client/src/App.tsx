@@ -101,7 +101,6 @@ export default function App() {
   useEffect(() => {
     const saved = sessionStorage.getItem(`grafeo-editor-tab-${tabState.activeTabId}`);
     editorRef.current?.setContent(saved ?? "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabState.activeTabId]);
 
   const handleAddTab = useCallback(() => {

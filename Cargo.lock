@@ -112,9 +112,9 @@ dependencies = [
 
 [[package]]
 name = "async-compression"
-version = "0.4.37"
+version = "0.4.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d10e4f991a553474232bc0a31799f6d24b034a84c0971d80d2e2f78b2e576e40"
+checksum = "68650b7df54f0293fd061972a0fb05aaf4fc0879d3b3d21a638a182c5c543b9f"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -630,6 +630,8 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a7fe2e4df8b5f880169fb2f8575467ddfc18eee974698a1981e5471d9fc81f"
 dependencies = [
  "bincode",
  "byteorder",
@@ -652,6 +654,8 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57539b2d4f6a24b7eb7fba5cbf8a3e3247c5acfb28b4c209a2069f4334b96481"
 dependencies = [
  "ahash",
  "arcstr",
@@ -673,6 +677,8 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8460615feaec0f5f2e899e2a1383e5c9910bb72fd04c5a1fa5605bfeeec006f"
 dependencies = [
  "ahash",
  "arcstr",
@@ -695,6 +701,8 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51d07117311881b18345e1a68b5b63503e0e4e75ab3b914701aa4b278f38f478"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -715,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
@@ -1121,9 +1129,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "memchr"
-version = "2.7.6"
+version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "memmap2"

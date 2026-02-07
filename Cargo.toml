@@ -1,6 +1,6 @@
 [package]
 name = "grafeo-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.91.1"
 license = "AGPL-3.0-or-later"
@@ -9,9 +9,9 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [dependencies]
-# Grafeo engine (path deps until 0.4.0 is published to crates.io)
-grafeo-engine = { path = "../grafeo/crates/grafeo-engine", features = ["full"] }
-grafeo-common = { path = "../grafeo/crates/grafeo-common" }
+# Grafeo engine
+grafeo-engine = { version = "0.4.0", features = ["full"] }
+grafeo-common = "0.4.0"
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query"] }

@@ -1,28 +1,25 @@
 # --- Stage 1: Build the web UI ---
 FROM node:22-slim AS ui-builder
 WORKDIR /ui
-COPY grafeo-server/client/package.json grafeo-server/client/package-lock.json* ./
+COPY client/package.json client/package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
-COPY grafeo-server/client/ .
+COPY client/ .
 RUN npm run build
 
 # --- Stage 2: Build the Rust binary ---
 FROM rust:1.91-slim AS builder
 RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
 
-# Copy grafeo engine workspace (path dependency)
 WORKDIR /build
-COPY grafeo/ grafeo/
 
-# Copy server source
-COPY grafeo-server/Cargo.toml grafeo-server/Cargo.lock* grafeo-server/
-COPY grafeo-server/src/ grafeo-server/src/
+# Copy manifests first for better layer caching
+COPY Cargo.toml Cargo.lock* ./
+COPY src/ src/
 
 # Copy built UI so rust-embed can include it
-COPY --from=ui-builder /ui/dist grafeo-server/client/dist/
+COPY --from=ui-builder /ui/dist client/dist/
 
 # Build in release mode
-WORKDIR /build/grafeo-server
 RUN cargo build --release && strip target/release/grafeo-server
 
 # --- Stage 3: Minimal runtime image ---
@@ -30,7 +27,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/grafeo-server/target/release/grafeo-server /usr/local/bin/grafeo-server
+COPY --from=builder /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 VOLUME /data
 
