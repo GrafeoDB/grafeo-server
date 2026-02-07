@@ -1,0 +1,46 @@
+.container {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-md);
+  height: var(--statusbar-height);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.info {
+  color: var(--text-secondary);
+}
+
+.error {
+  color: var(--error);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loading {
+  color: var(--accent);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.shortcutButton {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1;
+  transition: all 0.1s;
+}
+
+.shortcutButton:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}

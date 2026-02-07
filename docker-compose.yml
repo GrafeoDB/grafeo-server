@@ -1,0 +1,16 @@
+services:
+  grafeo:
+    build:
+      context: ..
+      dockerfile: grafeo-server/Dockerfile
+    image: grafeodb/grafeo-server:latest
+    ports:
+      - "7474:7474"
+    volumes:
+      - grafeo-data:/data
+    environment:
+      - GRAFEO_SESSION_TTL=300
+    restart: unless-stopped
+
+volumes:
+  grafeo-data:

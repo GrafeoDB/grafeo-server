@@ -1,0 +1,32 @@
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-editor: #0f0f23;
+  --bg-surface: #1e293b;
+  --bg-hover: #2d3a4f;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #4fc3f7;
+  --accent-hover: #29b6f6;
+  --success: #66bb6a;
+  --error: #ef5350;
+  --warning: #ffa726;
+  --border: #334155;
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+
+  --sidebar-width: 260px;
+  --editor-min-height: 120px;
+  --statusbar-height: 32px;
+  --toolbar-height: 40px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+}

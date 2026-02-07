@@ -1,0 +1,91 @@
+[package]
+name = "grafeo-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.1"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/GrafeoDB/grafeo-server"
+authors = ["S.T. Grond"]
+description = "HTTP server for the Grafeo graph database"
+
+[dependencies]
+# Grafeo engine (path deps until 0.4.0 is published to crates.io)
+grafeo-engine = { path = "../grafeo/crates/grafeo-engine", features = ["full"] }
+grafeo-common = { path = "../grafeo/crates/grafeo-common" }
+
+# Web framework
+axum = { version = "0.8", features = ["json", "query"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "6.1"
+
+# Configuration
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+uuid = { version = "1.11", features = ["v4"] }
+
+# OpenAPI documentation
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Static file embedding for the web UI
+rust-embed = "8.5"
+mime_guess = "2.0"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["gzip", "json"] }
+tempfile = "3.22"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+uninlined_format_args = "allow"
+doc_markdown = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+needless_for_each = "allow"  # utoipa OpenApi derive generates for_each
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+items_after_statements = "allow"
+struct_field_names = "allow"
+wildcard_imports = "allow"
+single_match_else = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+manual_let_else = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true

@@ -1,0 +1,82 @@
+.container {
+  display: flex;
+  align-items: center;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 13px;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.1s;
+  border-bottom: 2px solid transparent;
+}
+
+.tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--bg-editor);
+}
+
+.tabName {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.renameInput {
+  width: 80px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  font-size: 12px;
+  padding: 0 4px;
+  outline: none;
+}
+
+.closeButton {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 2px;
+  border-radius: 2px;
+  line-height: 1;
+  opacity: 0;
+  transition: all 0.1s;
+}
+
+.tab:hover .closeButton {
+  opacity: 1;
+}
+
+.closeButton:hover {
+  color: var(--error);
+  background: var(--bg-hover);
+}
+
+.addButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 14px;
+  color: var(--text-muted);
+  transition: all 0.1s;
+  flex-shrink: 0;
+}
+
+.addButton:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}

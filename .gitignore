@@ -1,0 +1,32 @@
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── IDE / Editor ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Environment ───────────────────────────────────────────────────────
+.env
+
+# ── Rust / Cargo ──────────────────────────────────────────────────────
+target/
+**/*.rs.bk
+*.pdb
+
+# ── Client (Node.js) ─────────────────────────────────────────────────
+client/node_modules/
+client/dist/
+
+# ── Coverage & profiling ─────────────────────────────────────────────
+.coverage
+htmlcov/
+coverage/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
