@@ -52,9 +52,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_REQUEST, "bad_request", Some(msg.clone()))
             }
             ApiError::SessionNotFound => (StatusCode::NOT_FOUND, "session_not_found", None),
-            ApiError::NotFound(msg) => {
-                (StatusCode::NOT_FOUND, "not_found", Some(msg.clone()))
-            }
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", Some(msg.clone())),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", Some(msg.clone())),
             ApiError::Timeout => (StatusCode::REQUEST_TIMEOUT, "timeout", None),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),

@@ -53,7 +53,10 @@ async fn request_id_generated_when_absent() {
     let resp = client.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    let request_id = resp.headers().get("x-request-id").expect("missing x-request-id");
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("missing x-request-id");
     // Should be a valid UUID v4
     let id_str = request_id.to_str().unwrap();
     assert_eq!(id_str.len(), 36); // UUID format: 8-4-4-4-12
@@ -72,7 +75,10 @@ async fn request_id_preserved_when_provided() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let request_id = resp.headers().get("x-request-id").expect("missing x-request-id");
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("missing x-request-id");
     assert_eq!(request_id.to_str().unwrap(), "my-custom-id-123");
 }
 
@@ -909,7 +915,12 @@ async fn metrics_endpoint_returns_prometheus_format() {
 
     let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/plain"));
 
     let body = resp.text().await.unwrap();

@@ -39,9 +39,7 @@ pub async fn auth_middleware(
         .and_then(|v| v.to_str().ok());
 
     match auth_header {
-        Some(val) if val.starts_with("Bearer ") && &val[7..] == expected => {
-            Ok(next.run(req).await)
-        }
+        Some(val) if val.starts_with("Bearer ") && &val[7..] == expected => Ok(next.run(req).await),
         _ => Err(ApiError::Unauthorized),
     }
 }

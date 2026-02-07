@@ -248,7 +248,10 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics_endpoint))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(cors_layer(&state))
         .with_state(state.clone());
@@ -256,10 +259,7 @@ pub fn router(state: AppState) -> Router {
     // Mount the web UI, API, and Swagger docs
     ui::router()
         .merge(api)
-        .merge(
-            SwaggerUi::new("/api/docs")
-                .url("/api/openapi.json", ApiDoc::openapi()),
-        )
+        .merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
 }
 
 fn cors_layer(state: &AppState) -> CorsLayer {
@@ -324,7 +324,9 @@ where
             }
         }
     } else {
-        handle.await.map_err(|e| ApiError::Internal(e.to_string()))?
+        handle
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
     }
 }
 
@@ -701,7 +703,13 @@ fn get_session_id(headers: &HeaderMap) -> Result<String, ApiError> {
 fn resolve_tx_db(
     state: &AppState,
     session_id: &str,
-) -> Result<(String, std::sync::Arc<crate::database_manager::DatabaseEntry>), ApiError> {
+) -> Result<
+    (
+        String,
+        std::sync::Arc<crate::database_manager::DatabaseEntry>,
+    ),
+    ApiError,
+> {
     let db_name = state
         .databases()
         .resolve_session(session_id)
@@ -870,9 +878,7 @@ async fn tx_rollback(
     ),
     tag = "Database"
 )]
-async fn list_databases(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn list_databases(State(state): State<AppState>) -> impl IntoResponse {
     let databases = state.databases().list();
     Json(ListDatabasesResponse { databases })
 }

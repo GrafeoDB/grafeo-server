@@ -79,8 +79,7 @@ impl DatabaseManager {
                 let new_path = new_dir.join("grafeo.db");
                 if !new_path.exists() {
                     tracing::info!("Migrating old database layout to default/grafeo.db");
-                    std::fs::rename(&old_path, &new_path)
-                        .expect("failed to migrate database file");
+                    std::fs::rename(&old_path, &new_path).expect("failed to migrate database file");
                     // Also move WAL file if present
                     let old_wal = dir.join("grafeo.db.wal");
                     if old_wal.exists() {
@@ -204,9 +203,7 @@ impl DatabaseManager {
 
         let removed = self.databases.remove(name);
         if removed.is_none() {
-            return Err(ApiError::NotFound(format!(
-                "database '{name}' not found"
-            )));
+            return Err(ApiError::NotFound(format!("database '{name}' not found")));
         }
 
         let (_, entry) = removed.unwrap();
@@ -222,7 +219,9 @@ impl DatabaseManager {
         // Remove on-disk data if persistent
         if let Some(ref dir) = self.data_dir {
             let db_dir = dir.join(name);
-            if db_dir.exists() && let Err(e) = std::fs::remove_dir_all(&db_dir) {
+            if db_dir.exists()
+                && let Err(e) = std::fs::remove_dir_all(&db_dir)
+            {
                 tracing::warn!(name = %name, error = %e, "Failed to remove database directory");
             }
         }
