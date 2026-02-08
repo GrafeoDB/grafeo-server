@@ -2,7 +2,7 @@
 
 HTTP server for the [Grafeo](https://github.com/GrafeoDB/grafeo) graph database. Turns Grafeo's embeddable engine into a standalone database server accessible via REST API and web UI.
 
-Pure Rust, single binary, ~20MB Docker image.
+Pure Rust, single binary, ~40MB Docker image.
 
 ## Quick Start
 
