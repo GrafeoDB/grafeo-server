@@ -67,6 +67,7 @@ export default function App() {
   const [currentDatabase, setCurrentDatabase] = useState(
     () => localStorage.getItem(DB_KEY) || "default",
   );
+  const [databaseType, setDatabaseType] = useState("lpg");
   const editorRef = useRef<QueryEditorHandle>(null);
 
   const activeTab = tabState.tabs.find((t) => t.id === tabState.activeTabId) ?? tabState.tabs[0];
@@ -84,6 +85,15 @@ export default function App() {
       return next;
     });
   }, []);
+
+  // Auto-switch language when database type changes and current language is invalid
+  useEffect(() => {
+    const isRdf = databaseType === "rdf" || databaseType === "owl-schema" || databaseType === "rdfs-schema";
+    const validLangs = isRdf ? new Set(["gql", "sparql"]) : new Set(["gql", "cypher", "graphql", "gremlin"]);
+    if (!validLangs.has(language)) {
+      handleLanguageChange(isRdf ? "sparql" : "gql");
+    }
+  }, [databaseType, language, handleLanguageChange]);
 
   const handleSelectTab = useCallback((id: string) => {
     // Save current content before switching
@@ -145,9 +155,10 @@ export default function App() {
     });
   }, []);
 
-  const handleSelectDatabase = useCallback((name: string) => {
+  const handleSelectDatabase = useCallback((name: string, dbType?: string) => {
     setCurrentDatabase(name);
     localStorage.setItem(DB_KEY, name);
+    if (dbType) setDatabaseType(dbType);
   }, []);
 
   const handleExecute = useCallback(
@@ -241,6 +252,7 @@ export default function App() {
           onCloseTab={handleCloseTab}
           onRenameTab={handleRenameTab}
           currentDatabase={currentDatabase}
+          databaseType={databaseType}
         />
         <ResultsPanel
           result={result}

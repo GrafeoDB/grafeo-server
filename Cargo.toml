@@ -9,7 +9,7 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = []
+default = ["owl-schema", "rdfs-schema", "json-schema"]
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]
 json-schema = ["dep:jsonschema"]
@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 # System info (RAM, disk)
-sysinfo = "0.33"
+sysinfo = "0.38.1"
 
 # OpenAPI documentation
 utoipa = { version = "5", features = ["axum_extras"] }
@@ -61,10 +61,10 @@ rust-embed = "8.5"
 mime_guess = "2.0"
 
 # Schema parsing (feature-gated)
-sophia_turtle = { version = "0.8", optional = true }
-sophia_api = { version = "0.8", optional = true }
-sophia_inmem = { version = "0.8", optional = true }
-jsonschema = { version = "0.28", optional = true }
+sophia_turtle = { version = "0.9", optional = true }
+sophia_api = { version = "0.9", optional = true }
+sophia_inmem = { version = "0.9", optional = true }
+jsonschema = { version = "0.41", optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["gzip", "json"] }

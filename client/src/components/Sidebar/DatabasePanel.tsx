@@ -14,7 +14,7 @@ const TYPE_BADGES: Record<string, string> = {
 
 interface DatabasePanelProps {
   currentDatabase: string;
-  onSelectDatabase: (name: string) => void;
+  onSelectDatabase: (name: string, dbType?: string) => void;
 }
 
 export default function DatabasePanel({
@@ -26,8 +26,15 @@ export default function DatabasePanel({
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    api.db.list().then((res) => setDatabases(res.databases)).catch(() => {});
-  }, []);
+    api.db.list().then((res) => {
+      setDatabases(res.databases);
+      // Resolve type for the currently selected database
+      const current = res.databases.find((d) => d.name === currentDatabase);
+      if (current?.database_type) {
+        onSelectDatabase(currentDatabase, current.database_type);
+      }
+    }).catch(() => {});
+  }, [currentDatabase, onSelectDatabase]);
 
   useEffect(() => {
     refresh();
@@ -41,7 +48,7 @@ export default function DatabasePanel({
     try {
       await api.db.delete(name);
       if (currentDatabase === name) {
-        onSelectDatabase("default");
+        onSelectDatabase("default", "lpg");
       }
       refresh();
     } catch (err) {
@@ -60,7 +67,7 @@ export default function DatabasePanel({
           <li key={db.name} className={styles.dbItem}>
             <button
               className={`${styles.dbButton} ${db.name === currentDatabase ? styles.active : ""}`}
-              onClick={() => onSelectDatabase(db.name)}
+              onClick={() => onSelectDatabase(db.name, db.database_type)}
               title={`${db.node_count} nodes, ${db.edge_count} edges`}
             >
               <span className={styles.dbName}>{db.name}</span>

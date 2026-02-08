@@ -27,22 +27,22 @@ fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
 
     // Try parsing as Turtle first (most common for OWL files)
     let reader = std::io::Cursor::new(content);
-    let triples: Result<Vec<_>, _> = turtle::parse_bufread(reader).collect_triples();
+    let triples: Result<Vec<[sophia_api::term::SimpleTerm<'static>; 3]>, _> =
+        turtle::parse_bufread(reader).collect_triples();
 
-    let triples = triples.map_err(|e| {
-        ApiError::BadRequest(format!("failed to parse OWL schema: {e}"))
-    })?;
+    let triples =
+        triples.map_err(|e| ApiError::BadRequest(format!("failed to parse OWL schema: {e}")))?;
 
     // Insert each triple as a SPARQL INSERT
     let session = db.session();
     for triple in &triples {
-        let s = format_term(triple.s());
-        let p = format_term(triple.p());
-        let o = format_term(triple.o());
+        let s = format_term(&triple[0]);
+        let p = format_term(&triple[1]);
+        let o = format_term(&triple[2]);
         let sparql = format!("INSERT DATA {{ {s} {p} {o} . }}");
-        session.execute_sparql(&sparql).map_err(|e| {
-            ApiError::Internal(format!("failed to insert OWL triple: {e}"))
-        })?;
+        session
+            .execute_sparql(&sparql)
+            .map_err(|e| ApiError::Internal(format!("failed to insert OWL triple: {e}")))?;
     }
 
     tracing::info!(triple_count = triples.len(), "Loaded OWL schema");
@@ -92,24 +92,24 @@ fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
         .get("definitions")
         .or_else(|| schema_value.get("$defs"));
 
-    if let Some(defs) = defs {
-        if let Some(obj) = defs.as_object() {
-            for (type_name, _type_def) in obj {
-                // Create a node with the label matching the type name
-                // This establishes the label in the catalog
-                let cypher = format!(
-                    "CREATE (n:{} {{_schema: true}}) RETURN n",
-                    type_name.replace(' ', "_")
+    if let Some(defs) = defs
+        && let Some(obj) = defs.as_object()
+    {
+        for (type_name, _type_def) in obj {
+            // Create a node with the label matching the type name
+            // This establishes the label in the catalog
+            let cypher = format!(
+                "CREATE (n:{} {{_schema: true}}) RETURN n",
+                type_name.replace(' ', "_")
+            );
+            if let Err(e) = session.execute_cypher(&cypher) {
+                tracing::warn!(
+                    type_name = %type_name,
+                    error = %e,
+                    "Failed to create schema label"
                 );
-                if let Err(e) = session.execute_cypher(&cypher) {
-                    tracing::warn!(
-                        type_name = %type_name,
-                        error = %e,
-                        "Failed to create schema label"
-                    );
-                } else {
-                    label_count += 1;
-                }
+            } else {
+                label_count += 1;
             }
         }
     }
@@ -144,13 +144,23 @@ fn format_term<T: sophia_api::term::Term>(term: &T) -> String {
         TermKind::Literal => {
             let lex = term.lexical_form().unwrap();
             if let Some(lang) = term.language_tag() {
-                format!("\"{}\"@{}", lex, lang)
+                format!("\"{}\"@{}", lex, lang.as_str())
+            } else if let Some(dt) = term.datatype() {
+                format!("\"{}\"^^<{}>", lex, dt)
             } else {
-                let dt = term.datatype().unwrap();
-                format!("\"{}\"^^<{}>", lex, dt.iri().unwrap())
+                format!("\"{}\"", lex)
             }
         }
-        TermKind::BlankNode => format!("_:{}", term.bnode_id().unwrap()),
-        _ => format!("\"{}\"", term.lexical_form().unwrap_or_default()),
+        TermKind::BlankNode => {
+            let id = term.bnode_id().unwrap();
+            format!("_:{}", id.as_str())
+        }
+        _ => {
+            if let Some(lex) = term.lexical_form() {
+                format!("\"{}\"", lex)
+            } else {
+                "\"\"".to_string()
+            }
+        }
     }
 }

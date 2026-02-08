@@ -330,11 +330,11 @@ impl DatabaseManager {
 
         // Schema loading (if applicable)
         if let Some(ref schema_b64) = req.schema_file {
-            let schema_bytes = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                schema_b64,
-            )
-            .map_err(|e| ApiError::BadRequest(format!("invalid base64 in schema_file: {e}")))?;
+            let schema_bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
+                    .map_err(|e| {
+                        ApiError::BadRequest(format!("invalid base64 in schema_file: {e}"))
+                    })?;
 
             let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
             if let Err(e) = schema_result {

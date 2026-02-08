@@ -27,6 +27,7 @@ interface QueryEditorProps {
   onCloseTab: (id: string) => void;
   onRenameTab: (id: string, name: string) => void;
   currentDatabase?: string;
+  databaseType?: string;
 }
 
 export interface QueryEditorHandle {
@@ -34,13 +35,23 @@ export interface QueryEditorHandle {
   getContent: () => string;
 }
 
-const LANGUAGES = [
+const ALL_LANGUAGES = [
   { value: "gql", label: "GQL" },
   { value: "cypher", label: "Cypher" },
   { value: "graphql", label: "GraphQL" },
   { value: "gremlin", label: "Gremlin" },
   { value: "sparql", label: "SPARQL" },
 ];
+
+const LPG_LANGUAGES = new Set(["gql", "cypher", "graphql", "gremlin"]);
+const RDF_LANGUAGES = new Set(["gql", "sparql"]);
+
+function languagesForType(dbType?: string) {
+  if (dbType === "rdf" || dbType === "owl-schema" || dbType === "rdfs-schema") {
+    return ALL_LANGUAGES.filter((l) => RDF_LANGUAGES.has(l.value));
+  }
+  return ALL_LANGUAGES.filter((l) => LPG_LANGUAGES.has(l.value));
+}
 
 function tabStorageKey(tabId: string): string {
   return `grafeo-editor-tab-${tabId}`;
@@ -64,6 +75,7 @@ const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(
       onCloseTab,
       onRenameTab,
       currentDatabase,
+      databaseType,
     },
     ref,
   ) {
@@ -274,7 +286,7 @@ const QueryEditor = forwardRef<QueryEditorHandle, QueryEditorProps>(
             value={language}
             onChange={(e) => onLanguageChange(e.target.value)}
           >
-            {LANGUAGES.map((l) => (
+            {languagesForType(databaseType).map((l) => (
               <option key={l.value} value={l.value}>
                 {l.label}
               </option>
