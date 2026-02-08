@@ -8,6 +8,8 @@ import type {
   DatabaseInfoResponse,
   DatabaseStatsResponse,
   DatabaseSchemaResponse,
+  CreateDatabaseRequest,
+  SystemResources,
 } from "../types/api";
 
 export class GrafeoApiError extends Error {
@@ -106,10 +108,10 @@ export const api = {
   db: {
     list: () => request<ListDatabasesResponse>("/db"),
 
-    create: (name: string) =>
+    create: (req: CreateDatabaseRequest) =>
       request<DatabaseSummary>("/db", {
         method: "POST",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(req),
       }),
 
     delete: (name: string) =>
@@ -125,5 +127,9 @@ export const api = {
 
     schema: (name: string) =>
       request<DatabaseSchemaResponse>(`/db/${encodeURIComponent(name)}/schema`),
+  },
+
+  system: {
+    resources: () => request<SystemResources>("/system/resources"),
   },
 };

@@ -18,7 +18,7 @@ interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
   currentDatabase: string;
-  onSelectDatabase: (name: string) => void;
+  onSelectDatabase: (name: string, dbType?: string) => void;
 }
 
 const EXAMPLES: SavedQuery[] = [

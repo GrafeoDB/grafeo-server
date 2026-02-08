@@ -8,12 +8,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use grafeo_engine::GrafeoDB;
+use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::error::ApiError;
+use crate::routes::{CreateDatabaseRequest, DatabaseType, StorageMode};
 use crate::sessions::SessionManager;
+
+/// Default memory limit for new databases: 512 MB.
+const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 
 /// Name validation: starts with letter, then alphanumeric/underscore/hyphen, max 64 chars.
 fn is_valid_name(name: &str) -> bool {
@@ -28,10 +32,49 @@ fn is_valid_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// A single database instance with its own session manager.
+/// Parses a WAL durability string into an engine `DurabilityMode`.
+fn parse_durability(s: &str) -> Result<DurabilityMode, ApiError> {
+    match s.to_lowercase().as_str() {
+        "sync" => Ok(DurabilityMode::Sync),
+        "batch" => Ok(DurabilityMode::default()), // Batch with default params
+        "adaptive" => Ok(DurabilityMode::Adaptive {
+            target_interval_ms: 100,
+        }),
+        "nosync" => Ok(DurabilityMode::NoSync),
+        other => Err(ApiError::BadRequest(format!(
+            "invalid wal_durability '{other}': expected \"sync\", \"batch\", \"adaptive\", or \"nosync\""
+        ))),
+    }
+}
+
+/// Creation-time metadata stored alongside each database.
+#[derive(Clone)]
+pub struct DatabaseMetadata {
+    pub database_type: String,
+    pub storage_mode: String,
+    pub backward_edges: bool,
+    pub threads: usize,
+}
+
+impl Default for DatabaseMetadata {
+    fn default() -> Self {
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Self {
+            database_type: "lpg".to_string(),
+            storage_mode: "in-memory".to_string(),
+            backward_edges: true,
+            threads: num_cpus,
+        }
+    }
+}
+
+/// A single database instance with its own session manager and metadata.
 pub struct DatabaseEntry {
     pub db: GrafeoDB,
     pub sessions: SessionManager,
+    pub metadata: DatabaseMetadata,
 }
 
 /// Thread-safe registry of named database instances.
@@ -54,6 +97,8 @@ pub struct DatabaseSummary {
     pub edge_count: usize,
     /// Whether the database uses persistent storage.
     pub persistent: bool,
+    /// Database type: "lpg", "rdf", "owl-schema", "rdfs-schema", "json-schema".
+    pub database_type: String,
 }
 
 impl DatabaseManager {
@@ -100,11 +145,20 @@ impl DatabaseManager {
                             tracing::info!(name = %name, "Opening database");
                             match GrafeoDB::open(db_file.to_str().unwrap()) {
                                 Ok(db) => {
+                                    let metadata = DatabaseMetadata {
+                                        database_type: format!("{}", db.graph_model()),
+                                        storage_mode: "persistent".to_string(),
+                                        backward_edges: true,
+                                        threads: std::thread::available_parallelism()
+                                            .map(|n| n.get())
+                                            .unwrap_or(1),
+                                    };
                                     mgr.databases.insert(
                                         name,
                                         Arc::new(DatabaseEntry {
                                             db,
                                             sessions: SessionManager::new(),
+                                            metadata,
                                         }),
                                     );
                                 }
@@ -131,6 +185,10 @@ impl DatabaseManager {
                     Arc::new(DatabaseEntry {
                         db,
                         sessions: SessionManager::new(),
+                        metadata: DatabaseMetadata {
+                            storage_mode: "persistent".to_string(),
+                            ..Default::default()
+                        },
                     }),
                 );
             }
@@ -142,6 +200,7 @@ impl DatabaseManager {
                 Arc::new(DatabaseEntry {
                     db: GrafeoDB::new_in_memory(),
                     sessions: SessionManager::new(),
+                    metadata: DatabaseMetadata::default(),
                 }),
             );
         }
@@ -154,8 +213,11 @@ impl DatabaseManager {
         self.databases.get(name).map(|e| Arc::clone(e.value()))
     }
 
-    /// Creates a new named database. Returns error if name is invalid or already exists.
-    pub fn create(&self, name: &str) -> Result<(), ApiError> {
+    /// Creates a new named database from a full request. Returns error if name
+    /// is invalid, already exists, or options are incompatible with server config.
+    pub fn create(&self, req: &CreateDatabaseRequest) -> Result<(), ApiError> {
+        let name = &req.name;
+
         if !is_valid_name(name) {
             return Err(ApiError::BadRequest(format!(
                 "invalid database name '{name}': must start with a letter, contain only \
@@ -163,30 +225,144 @@ impl DatabaseManager {
             )));
         }
 
-        if self.databases.contains_key(name) {
+        if self.databases.contains_key(name.as_str()) {
             return Err(ApiError::Conflict(format!(
                 "database '{name}' already exists"
             )));
         }
 
-        let db = if let Some(ref dir) = self.data_dir {
-            let db_dir = dir.join(name);
-            std::fs::create_dir_all(&db_dir)
-                .map_err(|e| ApiError::Internal(format!("failed to create directory: {e}")))?;
-            let db_path = db_dir.join("grafeo.db");
-            tracing::info!(name = %name, "Creating persistent database");
-            GrafeoDB::open(db_path.to_str().unwrap())
-                .map_err(|e| ApiError::Internal(format!("failed to create database: {e}")))?
-        } else {
-            tracing::info!(name = %name, "Creating in-memory database");
-            GrafeoDB::new_in_memory()
+        // Validate: schema types require their feature flag
+        #[cfg(not(feature = "owl-schema"))]
+        if req.database_type == DatabaseType::OwlSchema {
+            return Err(ApiError::BadRequest(
+                "OWL Schema databases require the server to be compiled with the 'owl-schema' feature".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "rdfs-schema"))]
+        if req.database_type == DatabaseType::RdfsSchema {
+            return Err(ApiError::BadRequest(
+                "RDFS Schema databases require the server to be compiled with the 'rdfs-schema' feature".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "json-schema"))]
+        if req.database_type == DatabaseType::JsonSchema {
+            return Err(ApiError::BadRequest(
+                "JSON Schema databases require the server to be compiled with the 'json-schema' feature".to_string(),
+            ));
+        }
+
+        // Validate: schema types require a schema file
+        if req.database_type.requires_schema_file() && req.schema_file.is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "database type '{}' requires a schema_file",
+                req.database_type
+            )));
+        }
+
+        // Build engine Config
+        let graph_model = req.database_type.graph_model();
+        let memory_limit = req
+            .options
+            .memory_limit_bytes
+            .unwrap_or(DEFAULT_MEMORY_LIMIT);
+        let backward_edges = req.options.backward_edges.unwrap_or(true);
+        let threads = req.options.threads.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+
+        let mut config = match req.storage_mode {
+            StorageMode::InMemory => Config::in_memory(),
+            StorageMode::Persistent => {
+                let dir = self.data_dir.as_ref().ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "persistent storage requires the server to be started with --data-dir"
+                            .to_string(),
+                    )
+                })?;
+                let db_dir = dir.join(name.as_str());
+                std::fs::create_dir_all(&db_dir)
+                    .map_err(|e| ApiError::Internal(format!("failed to create directory: {e}")))?;
+                let db_path = db_dir.join("grafeo.db");
+                Config::persistent(db_path.to_str().unwrap())
+            }
+        };
+
+        config = config
+            .with_graph_model(graph_model)
+            .with_memory_limit(memory_limit)
+            .with_threads(threads);
+
+        if !backward_edges {
+            config = config.without_backward_edges();
+        }
+
+        if req.database_type == DatabaseType::JsonSchema {
+            config = config.with_schema_constraints();
+        }
+
+        // WAL settings
+        if let Some(wal_enabled) = req.options.wal_enabled
+            && !wal_enabled
+        {
+            config.wal_enabled = false;
+        }
+
+        if let Some(ref durability_str) = req.options.wal_durability {
+            config = config.with_wal_durability(parse_durability(durability_str)?);
+        }
+
+        if let Some(ref spill_path) = req.options.spill_path {
+            config = config.with_spill_path(spill_path);
+        }
+
+        tracing::info!(
+            name = %name,
+            database_type = %req.database_type,
+            storage_mode = ?req.storage_mode,
+            memory_limit = memory_limit,
+            "Creating database"
+        );
+
+        let db = GrafeoDB::with_config(config)
+            .map_err(|e| ApiError::Internal(format!("failed to create database: {e}")))?;
+
+        // Schema loading (if applicable)
+        if let Some(ref schema_b64) = req.schema_file {
+            let schema_bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
+                    .map_err(|e| {
+                        ApiError::BadRequest(format!("invalid base64 in schema_file: {e}"))
+                    })?;
+
+            let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
+            if let Err(e) = schema_result {
+                // Rollback: close and remove the database
+                let _ = db.close();
+                if req.storage_mode == StorageMode::Persistent
+                    && let Some(ref dir) = self.data_dir
+                {
+                    let db_dir = dir.join(name.as_str());
+                    let _ = std::fs::remove_dir_all(db_dir);
+                }
+                return Err(e);
+            }
+        }
+
+        let metadata = DatabaseMetadata {
+            database_type: req.database_type.as_str().to_string(),
+            storage_mode: req.storage_mode.as_str().to_string(),
+            backward_edges,
+            threads,
         };
 
         self.databases.insert(
-            name.to_string(),
+            name.clone(),
             Arc::new(DatabaseEntry {
                 db,
                 sessions: SessionManager::new(),
+                metadata,
             }),
         );
 
@@ -237,12 +413,13 @@ impl DatabaseManager {
             .iter()
             .map(|entry| {
                 let name = entry.key().clone();
-                let db = &entry.value().db;
+                let e = entry.value();
                 DatabaseSummary {
                     name,
-                    node_count: db.node_count(),
-                    edge_count: db.edge_count(),
-                    persistent: db.path().is_some(),
+                    node_count: e.db.node_count(),
+                    edge_count: e.db.edge_count(),
+                    persistent: e.db.path().is_some(),
+                    database_type: e.metadata.database_type.clone(),
                 }
             })
             .collect();
@@ -253,6 +430,14 @@ impl DatabaseManager {
     /// Returns the data directory, if configured.
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
+    }
+
+    /// Returns the total memory allocated across all databases.
+    pub fn total_allocated_memory(&self) -> usize {
+        self.databases
+            .iter()
+            .filter_map(|e| e.value().db.memory_limit())
+            .sum()
     }
 
     /// Registers a session ID as belonging to a specific database.
@@ -282,8 +467,6 @@ impl DatabaseManager {
         // Also clean up session_db_map entries whose sessions no longer exist
         self.session_db_map.retain(|session_id, db_name| {
             if let Some(entry) = self.databases.get(db_name.as_str()) {
-                // Check if session still exists by trying to get it (without touching TTL)
-                // Since we just cleaned expired, if session is gone from manager it's expired
                 entry.sessions.exists(session_id)
             } else {
                 false
@@ -296,6 +479,7 @@ impl DatabaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::DatabaseOptions;
 
     #[test]
     fn test_name_validation() {
@@ -316,18 +500,32 @@ mod tests {
         let mgr = DatabaseManager::new(None);
         assert!(mgr.get("default").is_some());
 
-        // Create
-        mgr.create("test").unwrap();
+        // Create with minimal request (just name)
+        let req = CreateDatabaseRequest {
+            name: "test".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        };
+        mgr.create(&req).unwrap();
         assert!(mgr.get("test").is_some());
 
+        // Check metadata
+        let entry = mgr.get("test").unwrap();
+        assert_eq!(entry.metadata.database_type, "lpg");
+        assert_eq!(entry.metadata.storage_mode, "in-memory");
+
         // Duplicate
-        assert!(mgr.create("test").is_err());
+        assert!(mgr.create(&req).is_err());
 
         // List
         let list = mgr.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "default");
         assert_eq!(list[1].name, "test");
+        assert_eq!(list[1].database_type, "lpg");
 
         // Delete
         mgr.delete("test").unwrap();
@@ -345,5 +543,20 @@ mod tests {
 
         mgr.unregister_session("sess-1");
         assert!(mgr.resolve_session("sess-1").is_none());
+    }
+
+    #[test]
+    fn test_persistent_rejected_without_data_dir() {
+        let mgr = DatabaseManager::new(None);
+        let req = CreateDatabaseRequest {
+            name: "persist-test".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::Persistent,
+            options: DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        };
+        let err = mgr.create(&req).unwrap_err();
+        assert!(format!("{err:?}").contains("data-dir"));
     }
 }

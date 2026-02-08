@@ -881,6 +881,271 @@ async fn transaction_on_specific_database() {
 }
 
 // ---------------------------------------------------------------------------
+// Database creation options (v0.2.0)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_database_with_options() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create with explicit type and options
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "custom-db",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "memory_limit_bytes": 128 * 1024 * 1024,
+                "backward_edges": false,
+                "wal_enabled": false
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "custom-db");
+    assert_eq!(body["database_type"], "lpg");
+
+    // Verify info endpoint reflects settings
+    let resp = client
+        .get(format!("{base}/db/custom-db"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["database_type"], "lpg");
+    assert_eq!(body["storage_mode"], "in-memory");
+    assert_eq!(body["backward_edges"], false);
+}
+
+#[tokio::test]
+async fn create_rdf_database() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "rdf-store",
+            "database_type": "Rdf"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["database_type"], "rdf");
+
+    // SPARQL should work on an RDF database
+    let resp = client
+        .post(format!("{base}/sparql"))
+        .json(&json!({
+            "query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1",
+            "database": "rdf-store"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List should show type badge
+    let resp = client.get(format!("{base}/db")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let dbs = body["databases"].as_array().unwrap();
+    let rdf_db = dbs.iter().find(|d| d["name"] == "rdf-store").unwrap();
+    assert_eq!(rdf_db["database_type"], "rdf");
+}
+
+#[tokio::test]
+async fn persistent_rejected_without_data_dir() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "persist-fail",
+            "storage_mode": "Persistent"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["detail"].as_str().unwrap().contains("data-dir"));
+}
+
+#[tokio::test]
+async fn system_resources_endpoint() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/system/resources"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["total_memory_bytes"].as_u64().unwrap() > 0);
+    assert!(body["available_memory_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(body["persistent_available"], false); // in-memory server
+
+    let types = body["available_types"].as_array().unwrap();
+    assert!(types.iter().any(|t| t == "Lpg"));
+
+    // Defaults should be present
+    let defaults = &body["defaults"];
+    assert!(defaults["memory_limit_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(defaults["backward_edges"], true);
+    assert!(defaults["threads"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn system_resources_updates_after_create_delete() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Get initial allocated memory
+    let resp = client
+        .get(format!("{base}/system/resources"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let initial_allocated = body["allocated_memory_bytes"].as_u64().unwrap();
+
+    // Create a new database
+    client
+        .post(format!("{base}/db"))
+        .json(&json!({"name": "alloc-test"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Allocated memory should increase
+    let resp = client
+        .get(format!("{base}/system/resources"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let after_create = body["allocated_memory_bytes"].as_u64().unwrap();
+    assert!(after_create > initial_allocated);
+
+    // Delete the database
+    client
+        .delete(format!("{base}/db/alloc-test"))
+        .send()
+        .await
+        .unwrap();
+
+    // Allocated memory should go back down
+    let resp = client
+        .get(format!("{base}/system/resources"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let after_delete = body["allocated_memory_bytes"].as_u64().unwrap();
+    assert_eq!(after_delete, initial_allocated);
+}
+
+#[tokio::test]
+async fn database_info_includes_new_fields() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Default database should have all new metadata fields
+    let resp = client
+        .get(format!("{base}/db/default"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["database_type"], "lpg");
+    assert_eq!(body["storage_mode"], "in-memory");
+    assert_eq!(body["backward_edges"], true);
+    assert!(body["threads"].is_u64());
+}
+
+#[tokio::test]
+async fn create_with_wal_durability_options() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create with WAL durability option - creation should succeed
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "wal-test",
+            "options": {
+                "wal_durability": "sync"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify the database was created and is queryable
+    let resp = client
+        .get(format!("{base}/db/wal-test"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "wal-test");
+}
+
+#[tokio::test]
+async fn create_with_invalid_durability_returns_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "bad-wal",
+            "options": {
+                "wal_durability": "invalid-mode"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn openapi_includes_system_resources_path() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+
+    let paths = body["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/system/resources"));
+}
+
+// ---------------------------------------------------------------------------
 // Compression
 // ---------------------------------------------------------------------------
 
