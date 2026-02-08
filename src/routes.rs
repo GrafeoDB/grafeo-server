@@ -96,7 +96,144 @@ pub struct HealthResponse {
 #[derive(Deserialize, ToSchema)]
 pub struct CreateDatabaseRequest {
     /// Name for the new database.
-    name: String,
+    pub name: String,
+    /// Database type: determines graph model and schema handling.
+    #[serde(default)]
+    pub database_type: DatabaseType,
+    /// Storage mode: in-memory (default) or persistent.
+    #[serde(default)]
+    pub storage_mode: StorageMode,
+    /// Resource and tuning options.
+    #[serde(default)]
+    pub options: DatabaseOptions,
+    /// Base64-encoded schema file content (OWL/RDFS/JSON Schema).
+    #[serde(default)]
+    pub schema_file: Option<String>,
+    /// Original filename for format detection.
+    #[serde(default)]
+    pub schema_filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, Default, PartialEq, Eq)]
+pub enum DatabaseType {
+    /// Labeled Property Graph (default). Supports GQL, Cypher, Gremlin, GraphQL.
+    #[default]
+    Lpg,
+    /// RDF triple store. Supports SPARQL.
+    Rdf,
+    /// RDF with OWL ontology loaded from schema file.
+    OwlSchema,
+    /// RDF with RDFS schema loaded from schema file.
+    RdfsSchema,
+    /// LPG with JSON Schema constraints.
+    JsonSchema,
+}
+
+impl DatabaseType {
+    /// Returns the engine GraphModel for this database type.
+    pub fn graph_model(self) -> grafeo_engine::GraphModel {
+        match self {
+            Self::Lpg | Self::JsonSchema => grafeo_engine::GraphModel::Lpg,
+            Self::Rdf | Self::OwlSchema | Self::RdfsSchema => grafeo_engine::GraphModel::Rdf,
+        }
+    }
+
+    /// Whether this type requires a schema file upload.
+    pub fn requires_schema_file(self) -> bool {
+        matches!(self, Self::OwlSchema | Self::RdfsSchema | Self::JsonSchema)
+    }
+
+    /// Display name for API responses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lpg => "lpg",
+            Self::Rdf => "rdf",
+            Self::OwlSchema => "owl-schema",
+            Self::RdfsSchema => "rdfs-schema",
+            Self::JsonSchema => "json-schema",
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, Default, PartialEq, Eq)]
+pub enum StorageMode {
+    /// Fast, ephemeral storage. Data lost on restart.
+    #[default]
+    InMemory,
+    /// WAL-backed durable storage. Requires --data-dir.
+    Persistent,
+}
+
+impl StorageMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InMemory => "in-memory",
+            Self::Persistent => "persistent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct DatabaseOptions {
+    /// Memory limit in bytes. Default: 512 MB.
+    #[serde(default)]
+    pub memory_limit_bytes: Option<usize>,
+    /// Enable write-ahead log. Default: true for persistent, false for in-memory.
+    #[serde(default)]
+    pub wal_enabled: Option<bool>,
+    /// WAL durability mode: "sync", "batch" (default), "adaptive", "nosync".
+    #[serde(default)]
+    pub wal_durability: Option<String>,
+    /// Maintain backward edges. Default: true. Disable to save ~50% adjacency memory.
+    #[serde(default)]
+    pub backward_edges: Option<bool>,
+    /// Worker threads for query execution. Default: CPU count.
+    #[serde(default)]
+    pub threads: Option<usize>,
+    /// Optional path for out-of-core spill processing.
+    #[serde(default)]
+    pub spill_path: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SystemResources {
+    /// Total system RAM in bytes.
+    pub total_memory_bytes: u64,
+    /// Memory already allocated to existing databases.
+    pub allocated_memory_bytes: u64,
+    /// Max available for a new DB (80% system RAM - allocated).
+    pub available_memory_bytes: u64,
+    /// Disk space available at data_dir partition (None if no data_dir).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_disk_bytes: Option<u64>,
+    /// Whether persistent storage is available (data_dir is set).
+    pub persistent_available: bool,
+    /// Available database types based on compiled features.
+    pub available_types: Vec<String>,
+    /// Default values for database options.
+    pub defaults: ResourceDefaults,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ResourceDefaults {
+    /// Default memory limit in bytes (512 MB).
+    pub memory_limit_bytes: u64,
+    /// Default storage mode.
+    pub storage_mode: String,
+    /// Default WAL enabled state.
+    pub wal_enabled: bool,
+    /// Default WAL durability mode.
+    pub wal_durability: String,
+    /// Default backward edges setting.
+    pub backward_edges: bool,
+    /// Default thread count.
+    pub threads: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -119,6 +256,17 @@ pub struct DatabaseInfoResponse {
     version: String,
     /// Whether WAL is enabled.
     wal_enabled: bool,
+    /// Database type: "lpg", "rdf", "owl-schema", "rdfs-schema", "json-schema".
+    database_type: String,
+    /// Storage mode: "in-memory" or "persistent".
+    storage_mode: String,
+    /// Configured memory limit in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_limit_bytes: Option<usize>,
+    /// Whether backward edges are enabled.
+    backward_edges: bool,
+    /// Number of worker threads.
+    threads: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -186,6 +334,7 @@ pub struct EdgeTypeInfo {
     ),
     paths(
         health,
+        system_resources,
         query,
         cypher,
         graphql,
@@ -206,9 +355,11 @@ pub struct EdgeTypeInfo {
         schemas(
             QueryRequest, QueryResponse, TxBeginRequest,
             TransactionResponse, HealthResponse, ErrorBody,
-            CreateDatabaseRequest, ListDatabasesResponse, DatabaseSummary,
+            CreateDatabaseRequest, DatabaseType, StorageMode, DatabaseOptions,
+            ListDatabasesResponse, DatabaseSummary,
             DatabaseInfoResponse, DatabaseStatsResponse, DatabaseSchemaResponse,
             LabelInfo, EdgeTypeInfo,
+            SystemResources, ResourceDefaults,
         )
     ),
     tags(
@@ -245,6 +396,7 @@ pub fn router(state: AppState) -> Router {
         .route("/db/{name}/schema", get(database_schema))
         // System
         .route("/health", get(health))
+        .route("/system/resources", get(system_resources))
         .route("/metrics", get(metrics_endpoint))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -371,10 +523,81 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_version: "0.4.0".to_string(),
+        engine_version: "0.4.2".to_string(),
         persistent,
         uptime_seconds: state.uptime_secs(),
         active_sessions,
+    })
+}
+
+/// Get system resource availability.
+///
+/// Returns total/available memory, disk space, available database types,
+/// and default values for the create database dialog.
+#[utoipa::path(
+    get,
+    path = "/system/resources",
+    responses(
+        (status = 200, description = "System resource info", body = SystemResources),
+    ),
+    tag = "System"
+)]
+async fn system_resources(State(state): State<AppState>) -> impl IntoResponse {
+    use sysinfo::System;
+
+    let sys = System::new_all();
+    let total_memory_bytes = sys.total_memory();
+    let allocated_memory_bytes = state.databases().total_allocated_memory() as u64;
+    let max_available = total_memory_bytes.saturating_mul(80) / 100;
+    let available_memory_bytes = max_available.saturating_sub(allocated_memory_bytes);
+
+    let available_disk_bytes = state.databases().data_dir().and_then(|dir| {
+        // Use sysinfo disk info to find available space for the data_dir partition
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let dir_canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        disks
+            .iter()
+            .filter(|d| dir_canonical.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map(|d| d.available_space())
+    });
+
+    let persistent_available = state.databases().data_dir().is_some();
+
+    let mut available_types = vec!["Lpg".to_string()];
+    // The engine "full" feature includes rdf
+    available_types.push("Rdf".to_string());
+    #[cfg(feature = "owl-schema")]
+    available_types.push("OwlSchema".to_string());
+    #[cfg(feature = "rdfs-schema")]
+    {
+        // rdfs-schema implies owl-schema, but add explicitly if not already present
+        if !available_types.contains(&"RdfsSchema".to_string()) {
+            available_types.push("RdfsSchema".to_string());
+        }
+    }
+    #[cfg(feature = "json-schema")]
+    available_types.push("JsonSchema".to_string());
+
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    Json(SystemResources {
+        total_memory_bytes,
+        allocated_memory_bytes,
+        available_memory_bytes,
+        available_disk_bytes,
+        persistent_available,
+        available_types,
+        defaults: ResourceDefaults {
+            memory_limit_bytes: 512 * 1024 * 1024, // 512 MB
+            storage_mode: "InMemory".to_string(),
+            wal_enabled: false,
+            wal_durability: "batch".to_string(),
+            backward_edges: true,
+            threads: num_cpus,
+        },
     })
 }
 
@@ -885,15 +1108,16 @@ async fn list_databases(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Create a new database.
 ///
-/// Creates a named database. Name must start with a letter, contain only
-/// alphanumeric characters, underscores, or hyphens, and be at most 64 characters.
+/// Creates a named database with optional type, storage mode, and resource settings.
+/// Name must start with a letter, contain only alphanumeric characters, underscores,
+/// or hyphens, and be at most 64 characters.
 #[utoipa::path(
     post,
     path = "/db",
     request_body = CreateDatabaseRequest,
     responses(
         (status = 200, description = "Database created", body = DatabaseSummary),
-        (status = 400, description = "Invalid database name", body = ErrorBody),
+        (status = 400, description = "Invalid request", body = ErrorBody),
         (status = 409, description = "Database already exists", body = ErrorBody),
     ),
     tag = "Database"
@@ -903,7 +1127,8 @@ async fn create_database(
     Json(req): Json<CreateDatabaseRequest>,
 ) -> Result<Json<DatabaseSummary>, ApiError> {
     let name = req.name.clone();
-    state.databases().create(&name)?;
+    let db_type = req.database_type;
+    state.databases().create(&req)?;
 
     let entry = state
         .databases()
@@ -915,6 +1140,7 @@ async fn create_database(
         node_count: entry.db.node_count(),
         edge_count: entry.db.edge_count(),
         persistent: entry.db.path().is_some(),
+        database_type: db_type.as_str().to_string(),
     }))
 }
 
@@ -967,6 +1193,7 @@ async fn database_info(
         .ok_or_else(|| ApiError::NotFound(format!("database '{name}' not found")))?;
 
     let info = entry.db.info();
+    let metadata = &entry.metadata;
     Ok(Json(DatabaseInfoResponse {
         name,
         node_count: info.node_count,
@@ -974,6 +1201,11 @@ async fn database_info(
         persistent: info.is_persistent,
         version: info.version,
         wal_enabled: info.wal_enabled,
+        database_type: metadata.database_type.clone(),
+        storage_mode: metadata.storage_mode.clone(),
+        memory_limit_bytes: entry.db.memory_limit(),
+        backward_edges: metadata.backward_edges,
+        threads: metadata.threads,
     }))
 }
 

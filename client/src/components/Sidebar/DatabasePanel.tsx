@@ -1,7 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, GrafeoApiError } from "../../api/client";
 import type { DatabaseSummary } from "../../types/api";
+import CreateDatabaseDialog from "./CreateDatabaseDialog";
 import styles from "./DatabasePanel.module.css";
+
+const TYPE_BADGES: Record<string, string> = {
+  lpg: "LPG",
+  rdf: "RDF",
+  "owl-schema": "OWL",
+  "rdfs-schema": "RDFS",
+  "json-schema": "JSON",
+};
 
 interface DatabasePanelProps {
   currentDatabase: string;
@@ -13,7 +22,7 @@ export default function DatabasePanel({
   onSelectDatabase,
 }: DatabasePanelProps) {
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
-  const [newName, setNewName] = useState("");
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -23,23 +32,6 @@ export default function DatabasePanel({
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  const handleCreate = async () => {
-    const name = newName.trim();
-    if (!name) return;
-    setError(null);
-    try {
-      await api.db.create(name);
-      setNewName("");
-      refresh();
-    } catch (err) {
-      if (err instanceof GrafeoApiError) {
-        setError(err.detail);
-      } else {
-        setError(String(err));
-      }
-    }
-  };
 
   const handleDelete = async (name: string) => {
     if (!window.confirm(`Delete database "${name}"? This cannot be undone.`)) {
@@ -72,8 +64,15 @@ export default function DatabasePanel({
               title={`${db.node_count} nodes, ${db.edge_count} edges`}
             >
               <span className={styles.dbName}>{db.name}</span>
-              <span className={styles.dbCounts}>
-                {db.node_count}n/{db.edge_count}e
+              <span className={styles.dbMeta}>
+                {db.database_type && db.database_type !== "lpg" && (
+                  <span className={styles.typeBadge}>
+                    {TYPE_BADGES[db.database_type] ?? db.database_type}
+                  </span>
+                )}
+                <span className={styles.dbCounts}>
+                  {db.node_count}n/{db.edge_count}e
+                </span>
               </span>
             </button>
             <button
@@ -88,26 +87,20 @@ export default function DatabasePanel({
         ))}
       </ul>
 
-      <div className={styles.createRow}>
-        <input
-          className={styles.createInput}
-          placeholder="New database..."
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleCreate();
-          }}
-        />
-        <button
-          className={styles.createButton}
-          onClick={handleCreate}
-          disabled={!newName.trim()}
-        >
-          Create
-        </button>
-      </div>
+      <button
+        className={styles.newDbButton}
+        onClick={() => setDialogOpen(true)}
+      >
+        + New Database
+      </button>
 
       {error && <div className={styles.error}>{error}</div>}
+
+      <CreateDatabaseDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onCreated={refresh}
+      />
     </>
   );
 }

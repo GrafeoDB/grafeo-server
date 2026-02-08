@@ -10,6 +10,7 @@ pub mod error;
 pub mod metrics;
 pub mod request_id;
 pub mod routes;
+pub mod schema;
 pub mod sessions;
 pub mod state;
 mod ui;

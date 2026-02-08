@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-08
+
+### Added
+
+- **Database creation options** - `POST /db` now accepts `database_type`, `storage_mode`, `options`, `schema_file`, and `schema_filename` fields
+- **Database types** - LPG (default), RDF, OWL Schema, RDFS Schema, JSON Schema
+- **Storage mode** - per-database in-memory or persistent (mixed mode supported)
+- **Resource configuration** - memory limit, WAL durability mode, backward edges toggle, thread count
+- **Schema file uploads** - base64-encoded OWL/RDFS/JSON Schema files parsed and loaded on creation (feature-gated: `owl-schema`, `rdfs-schema`, `json-schema`)
+- **`GET /system/resources` endpoint** - returns system RAM, allocated memory, available disk, compiled database types, and resource defaults
+- **`DatabaseMetadata`** - creation-time metadata stored alongside each database entry
+- **Studio UI: CreateDatabaseDialog** - full-form modal with database type radio group, storage mode toggle, memory slider, WAL/durability controls, backward edges toggle, thread selector, and schema file upload
+- **Studio UI: database type badges** - non-LPG databases show a type badge (RDF, OWL, RDFS, JSON) in the sidebar list
+- **9 new integration tests** - database creation with options, RDF database creation, persistent rejection without data-dir, system resources endpoint, resource allocation tracking, database info metadata, WAL durability options, invalid durability validation, OpenAPI path verification
+
 ### Changed
 
-- Bumped grafeo-engine to 0.4.1, grafeo-common to 0.4.1
+- Bumped grafeo-engine to 0.4.3, grafeo-common to 0.4.3
+- `DatabaseSummary` response now includes `database_type` field
+- `DatabaseInfoResponse` now includes `database_type`, `storage_mode`, `memory_limit_bytes`, `backward_edges`, `threads` fields
+- DatabasePanel sidebar replaced inline name+create input with "New Database" button opening CreateDatabaseDialog
+- New dependencies: `sysinfo` (system resource detection), `base64` (schema file decoding)
+- Optional dependencies: `sophia_turtle`, `sophia_api`, `sophia_inmem` (OWL/RDFS parsing), `jsonschema` (JSON Schema validation)
 
 ## [0.1.2] - 2026-02-07
 
@@ -89,7 +109,8 @@ Initial release.
 - **Pre-commit hooks** (prek) - fmt, clippy, deny, typos
 - **Integration test suite** - health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/GrafeoDB/grafeo-server/releases/tag/v0.1.0
