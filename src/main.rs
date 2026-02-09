@@ -11,17 +11,24 @@ use grafeo_server::config::Config;
 async fn main() {
     let config = Config::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
-        )
-        .init();
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+
+    if config.log_format == "json" {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     let state = AppState::new(&config);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         persistent = config.data_dir.is_some(),
+        tls = config.tls_enabled(),
         "Grafeo Server starting",
     );
 
@@ -32,9 +39,7 @@ async fn main() {
         .await
         .expect("failed to bind");
 
-    tracing::info!(%addr, "Grafeo Server ready");
-
-    // Spawn session cleanup task
+    // Spawn session + rate-limiter cleanup task
     let cleanup_state = state.clone();
     let session_ttl = config.session_ttl;
     tokio::spawn(async move {
@@ -44,13 +49,35 @@ async fn main() {
             if removed > 0 {
                 tracing::info!(removed, "Cleaned up expired sessions");
             }
+            cleanup_state.rate_limiter().cleanup();
         }
     });
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    #[cfg(feature = "tls")]
+    if config.tls_enabled() {
+        let tls_config = grafeo_server::tls::load_rustls_config(
+            config.tls_cert.as_ref().unwrap(),
+            config.tls_key.as_ref().unwrap(),
+        )
+        .expect("failed to load TLS configuration");
+
+        tracing::info!(%addr, "Grafeo Server ready (HTTPS)");
+
+        grafeo_server::tls::serve_tls(listener, tls_config, app, shutdown_signal()).await;
+
+        tracing::info!("Grafeo Server shut down");
+        return;
+    }
+
+    tracing::info!(%addr, "Grafeo Server ready");
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
 
     tracing::info!("Grafeo Server shut down");
 }

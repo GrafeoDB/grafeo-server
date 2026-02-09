@@ -3,10 +3,12 @@
 //! Each test starts an in-memory server on an ephemeral port and uses reqwest
 //! to exercise the endpoints.
 
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite;
 
 /// Boots an in-memory Grafeo server on an OS-assigned port.
 /// Returns the base URL (e.g. "http://127.0.0.1:12345").
@@ -19,7 +21,12 @@ async fn spawn_server() -> String {
     let addr: SocketAddr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     format!("http://{addr}")
@@ -1230,9 +1237,10 @@ async fn query_with_timeout_zero_disables() {
 }
 
 // ---------------------------------------------------------------------------
-// Authentication
+// Authentication (feature-gated)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "auth")]
 async fn spawn_server_with_auth(token: &str) -> String {
     let state = grafeo_server::AppState::new_in_memory_with_auth(300, token.to_string());
     let app = grafeo_server::router(state);
@@ -1241,12 +1249,18 @@ async fn spawn_server_with_auth(token: &str) -> String {
     let addr: SocketAddr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     format!("http://{addr}")
 }
 
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn auth_required_when_configured() {
     let base = spawn_server_with_auth("secret-token").await;
@@ -1282,6 +1296,7 @@ async fn auth_required_when_configured() {
     assert_eq!(resp.status(), 200);
 }
 
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn health_exempt_from_auth() {
     let base = spawn_server_with_auth("secret-token").await;
@@ -1291,6 +1306,7 @@ async fn health_exempt_from_auth() {
     assert_eq!(resp.status(), 200);
 }
 
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn metrics_exempt_from_auth() {
     let base = spawn_server_with_auth("secret-token").await;
@@ -1300,6 +1316,7 @@ async fn metrics_exempt_from_auth() {
     assert_eq!(resp.status(), 200);
 }
 
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn no_auth_when_not_configured() {
     let base = spawn_server().await;
@@ -1313,4 +1330,371 @@ async fn no_auth_when_not_configured() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn api_key_auth_works() {
+    let base = spawn_server_with_auth("secret-token").await;
+    let client = Client::new();
+
+    // X-API-Key header accepted
+    let resp = client
+        .post(format!("{base}/query"))
+        .header("X-API-Key", "secret-token")
+        .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Wrong API key -> 401
+    let resp = client
+        .post(format!("{base}/query"))
+        .header("X-API-Key", "wrong-key")
+        .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[cfg(feature = "auth")]
+async fn spawn_server_with_basic_auth(user: &str, password: &str) -> String {
+    let state = grafeo_server::AppState::new_in_memory_with_basic_auth(
+        300,
+        user.to_string(),
+        password.to_string(),
+    );
+    let app = grafeo_server::router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    format!("http://{addr}")
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn basic_auth_works() {
+    let base = spawn_server_with_basic_auth("admin", "s3cret").await;
+    let client = Client::new();
+
+    // No auth -> 401
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Correct Basic auth -> 200
+    use base64::Engine as _;
+    let creds = base64::engine::general_purpose::STANDARD.encode("admin:s3cret");
+    let resp = client
+        .post(format!("{base}/query"))
+        .header("Authorization", format!("Basic {creds}"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn basic_auth_wrong_password_returns_401() {
+    let base = spawn_server_with_basic_auth("admin", "s3cret").await;
+    let client = Client::new();
+
+    use base64::Engine as _;
+    let creds = base64::engine::general_purpose::STANDARD.encode("admin:wrong");
+    let resp = client
+        .post(format!("{base}/query"))
+        .header("Authorization", format!("Basic {creds}"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn basic_auth_exempt_paths() {
+    let base = spawn_server_with_basic_auth("admin", "s3cret").await;
+    let client = Client::new();
+
+    // Health is always exempt
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Metrics is always exempt
+    let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Batch queries
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batch_query_empty() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn batch_query_multiple_writes() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Batch: create two nodes, then count
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({
+            "queries": [
+                {"query": "CREATE (n:BatchTest {name: 'Alice'})"},
+                {"query": "CREATE (n:BatchTest {name: 'Bob'})"},
+                {"query": "MATCH (n:BatchTest) RETURN count(n) AS cnt"}
+            ],
+            "language": "cypher"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+
+    // The third query should see both nodes (same transaction)
+    assert_eq!(results[2]["rows"][0][0], 2);
+}
+
+#[tokio::test]
+async fn batch_query_rolls_back_on_error() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // First: create a node via normal query
+    client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "CREATE (n:Survivor {id: 1})"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Batch: create a node, then fail with bad syntax
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({
+            "queries": [
+                {"query": "CREATE (n:Ghost {id: 99})"},
+                {"query": "THIS IS NOT VALID SYNTAX"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["detail"].as_str().unwrap().contains("index 1"));
+
+    // Ghost node should not exist (rolled back)
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Ghost) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0);
+}
+
+#[tokio::test]
+async fn batch_query_on_specific_database() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create a database
+    client
+        .post(format!("{base}/db"))
+        .json(&json!({"name": "batch_test_db"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Batch on that database
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({
+            "queries": [
+                {"query": "CREATE (n:X {val: 42})"},
+                {"query": "MATCH (n:X) RETURN n.val AS v"}
+            ],
+            "database": "batch_test_db"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["results"][1]["rows"][0][0], 42);
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+async fn spawn_server_with_rate_limit(max_requests: u64) -> String {
+    let state = grafeo_server::AppState::new_in_memory_with_rate_limit(
+        300,
+        max_requests,
+        std::time::Duration::from_secs(60),
+    );
+    let app = grafeo_server::router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn rate_limit_returns_429_when_exceeded() {
+    let base = spawn_server_with_rate_limit(3).await;
+    let client = Client::new();
+
+    // First 3 requests should succeed
+    for _ in 0..3 {
+        let resp = client.get(format!("{base}/health")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // 4th request should be rate-limited
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "too_many_requests");
+}
+
+#[tokio::test]
+async fn rate_limit_disabled_when_zero() {
+    // Default spawn_server has rate_limit = 0 (disabled)
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Many requests should all succeed
+    for _ in 0..20 {
+        let resp = client.get(format!("{base}/health")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn websocket_query() {
+    let base = spawn_server().await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("WebSocket connect failed");
+
+    // Send a query
+    let msg = json!({
+        "type": "query",
+        "id": "q1",
+        "query": "MATCH (n) RETURN count(n)"
+    });
+    ws.send(tungstenite::Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Receive result
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "result");
+    assert_eq!(body["id"], "q1");
+    assert!(body["columns"].is_array());
+    assert!(body["rows"].is_array());
+}
+
+#[tokio::test]
+async fn websocket_ping_pong() {
+    let base = spawn_server().await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+#[tokio::test]
+async fn websocket_bad_message() {
+    let base = spawn_server().await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text("not json".into()))
+        .await
+        .unwrap();
+
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"], "bad_request");
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn websocket_auth_required() {
+    let base = spawn_server_with_auth("secret-token").await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    // Without auth header → upgrade should fail with 401
+    let result = tokio_tungstenite::connect_async(&ws_url).await;
+    assert!(result.is_err());
 }

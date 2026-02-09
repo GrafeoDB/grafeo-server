@@ -1,6 +1,6 @@
 [package]
 name = "grafeo-server"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91.1"
 license = "AGPL-3.0-or-later"
@@ -9,18 +9,21 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["owl-schema", "rdfs-schema", "json-schema"]
+default = ["owl-schema", "rdfs-schema"]
+full = ["owl-schema", "rdfs-schema", "json-schema", "auth", "tls"]
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]
 json-schema = ["dep:jsonschema"]
+auth = ["dep:subtle"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
 
 [dependencies]
 # Grafeo engine
-grafeo-engine = { version = "0.4.3", features = ["full"] }
-grafeo-common = "0.4.3"
+grafeo-engine = { version = "0.4.4", features = ["full"] }
+grafeo-common = "0.4.4"
 
 # Web framework
-axum = { version = "0.8", features = ["json", "query"] }
+axum = { version = "0.8", features = ["json", "query", "ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
 
@@ -48,6 +51,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
 uuid = { version = "1.11", features = ["v4"] }
+futures-util = "0.3"
+
+# Security (feature-gated)
+subtle = { version = "2", optional = true }
 
 # System info (RAM, disk)
 sysinfo = "0.38.1"
@@ -66,8 +73,17 @@ sophia_api = { version = "0.9", optional = true }
 sophia_inmem = { version = "0.9", optional = true }
 jsonschema = { version = "0.41", optional = true }
 
+# TLS (feature-gated)
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["gzip", "json"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
 tempfile = "3.22"
 
 [lints.rust]

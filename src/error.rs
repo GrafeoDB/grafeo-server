@@ -29,8 +29,13 @@ pub enum ApiError {
     Timeout,
 
     /// Missing or invalid authentication token.
+    #[cfg(feature = "auth")]
     #[error("unauthorized")]
     Unauthorized,
+
+    /// Rate limit exceeded.
+    #[error("too many requests")]
+    TooManyRequests,
 
     /// Internal server error.
     #[error("internal error: {0}")]
@@ -55,7 +60,9 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", Some(msg.clone())),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", Some(msg.clone())),
             ApiError::Timeout => (StatusCode::REQUEST_TIMEOUT, "timeout", None),
+            #[cfg(feature = "auth")]
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),
+            ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", None),
             ApiError::Internal(msg) => {
                 tracing::error!(%msg, "internal server error");
                 (
