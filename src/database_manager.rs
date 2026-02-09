@@ -440,6 +440,14 @@ impl DatabaseManager {
             .sum()
     }
 
+    /// Returns the total number of active transaction sessions across all databases.
+    pub fn total_active_sessions(&self) -> usize {
+        self.databases
+            .iter()
+            .map(|e| e.value().sessions.active_count())
+            .sum()
+    }
+
     /// Registers a session ID as belonging to a specific database.
     pub fn register_session(&self, session_id: &str, db_name: &str) {
         self.session_db_map

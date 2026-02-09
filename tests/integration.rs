@@ -391,7 +391,7 @@ async fn openapi_json_returns_valid_spec() {
     // OpenAPI 3.1.x spec
     assert!(body["openapi"].as_str().unwrap().starts_with("3.1"));
     assert_eq!(body["info"]["title"], "Grafeo Server API");
-    assert_eq!(body["info"]["version"], "0.2.0");
+    assert_eq!(body["info"]["version"], env!("CARGO_PKG_VERSION"));
 
     // Check that all expected paths are present
     let paths = body["paths"].as_object().unwrap();

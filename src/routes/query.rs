@@ -73,6 +73,35 @@ pub fn run_query(
     })
 }
 
+/// Shared implementation for all auto-commit query endpoints.
+async fn execute_auto_commit(
+    state: &AppState,
+    mut req: QueryRequest,
+    lang_override: Option<(&str, Language)>,
+) -> Result<Json<QueryResponse>, ApiError> {
+    if let Some((name, _)) = lang_override {
+        req.language = Some(name.to_string());
+    }
+    let db_name = resolve_db_name(req.database.as_ref()).to_string();
+    let entry = state
+        .databases()
+        .get(&db_name)
+        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
+
+    let timeout = effective_timeout(state, req.timeout_ms);
+    let lang =
+        lang_override.map_or_else(|| determine_language(req.language.as_deref()), |(_, l)| l);
+
+    let result = run_with_timeout(timeout, move || {
+        let session = entry.db.session();
+        run_query(&session, &req)
+    })
+    .await;
+
+    record_metrics(state, lang, &result);
+    Ok(Json(result?))
+}
+
 /// Execute a query (auto-commit).
 ///
 /// Runs a query in the specified language (defaults to GQL).
@@ -93,29 +122,10 @@ pub async fn query(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let lang = determine_language(req.language.as_deref());
-
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
-    .await;
-
-    record_metrics(&state, lang, &result);
-    Ok(Json(result?))
+    execute_auto_commit(&state, req, None).await
 }
 
 /// Execute a Cypher query (auto-commit).
-///
-/// Convenience endpoint — the `language` field is ignored; queries
-/// are always interpreted as Cypher.
 #[utoipa::path(
     post,
     path = "/cypher",
@@ -129,30 +139,12 @@ pub async fn query(
 )]
 pub async fn cypher(
     State(state): State<AppState>,
-    Json(mut req): Json<QueryRequest>,
+    Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    req.language = Some("cypher".to_string());
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
-    .await;
-
-    record_metrics(&state, Language::Cypher, &result);
-    Ok(Json(result?))
+    execute_auto_commit(&state, req, Some(("cypher", Language::Cypher))).await
 }
 
 /// Execute a GraphQL query (auto-commit).
-///
-/// Convenience endpoint — the `language` field is ignored; queries
-/// are always interpreted as GraphQL.
 #[utoipa::path(
     post,
     path = "/graphql",
@@ -166,30 +158,12 @@ pub async fn cypher(
 )]
 pub async fn graphql(
     State(state): State<AppState>,
-    Json(mut req): Json<QueryRequest>,
+    Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    req.language = Some("graphql".to_string());
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
-    .await;
-
-    record_metrics(&state, Language::Graphql, &result);
-    Ok(Json(result?))
+    execute_auto_commit(&state, req, Some(("graphql", Language::Graphql))).await
 }
 
 /// Execute a Gremlin query (auto-commit).
-///
-/// Convenience endpoint — the `language` field is ignored; queries
-/// are always interpreted as Gremlin.
 #[utoipa::path(
     post,
     path = "/gremlin",
@@ -203,30 +177,12 @@ pub async fn graphql(
 )]
 pub async fn gremlin(
     State(state): State<AppState>,
-    Json(mut req): Json<QueryRequest>,
+    Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    req.language = Some("gremlin".to_string());
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
-    .await;
-
-    record_metrics(&state, Language::Gremlin, &result);
-    Ok(Json(result?))
+    execute_auto_commit(&state, req, Some(("gremlin", Language::Gremlin))).await
 }
 
 /// Execute a SPARQL query (auto-commit).
-///
-/// Convenience endpoint — the `language` field is ignored; queries
-/// are always interpreted as SPARQL.
 #[utoipa::path(
     post,
     path = "/sparql",
@@ -240,22 +196,7 @@ pub async fn gremlin(
 )]
 pub async fn sparql(
     State(state): State<AppState>,
-    Json(mut req): Json<QueryRequest>,
+    Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    req.language = Some("sparql".to_string());
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
-    .await;
-
-    record_metrics(&state, Language::Sparql, &result);
-    Ok(Json(result?))
+    execute_auto_commit(&state, req, Some(("sparql", Language::Sparql))).await
 }
