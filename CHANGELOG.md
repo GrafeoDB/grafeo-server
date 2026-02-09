@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Route modularization** — split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`
+- **TRY DRY** — consolidated 4 near-identical query handlers into shared `execute_auto_commit`; inlined single-use batch helper; removed dead `contains` guard in system resources; extracted `total_active_sessions()` to `DatabaseManager`
+- **Build-time engine version** — `build.rs` extracts grafeo-engine version from `Cargo.lock` at compile time (`GRAFEO_ENGINE_VERSION` env var), eliminating hardcoded version strings
 - Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]` — `json-schema` now opt-in
 - Authentication is now feature-gated behind `auth` — users who don't need auth get a simpler build
 - `--cors-origins` default changed from allowing the dev server origin to denying all cross-origin requests
