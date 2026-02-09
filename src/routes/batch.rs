@@ -7,9 +7,7 @@ use crate::state::AppState;
 
 use super::helpers::{effective_timeout, resolve_db_name, run_with_timeout};
 use super::query::run_query;
-use super::types::{
-    BatchQueryItem, BatchQueryRequest, BatchQueryResponse, QueryRequest, QueryResponse,
-};
+use super::types::{BatchQueryRequest, BatchQueryResponse, QueryRequest, QueryResponse};
 
 /// Execute a batch of queries in a single transaction.
 ///
@@ -55,7 +53,13 @@ pub async fn batch_query(
         let mut results: Vec<QueryResponse> = Vec::with_capacity(req.queries.len());
 
         for (idx, item) in req.queries.iter().enumerate() {
-            let query_req = item_to_query_request(item);
+            let query_req = QueryRequest {
+                query: item.query.clone(),
+                language: item.language.clone(),
+                params: item.params.clone(),
+                database: None,
+                timeout_ms: None,
+            };
             match run_query(&session, &query_req) {
                 Ok(resp) => results.push(resp),
                 Err(e) => {
@@ -81,15 +85,4 @@ pub async fn batch_query(
     .await?;
 
     Ok(Json(result))
-}
-
-/// Converts a `BatchQueryItem` into a `QueryRequest` for `run_query`.
-fn item_to_query_request(item: &BatchQueryItem) -> QueryRequest {
-    QueryRequest {
-        query: item.query.clone(),
-        language: item.language.clone(),
-        params: item.params.clone(),
-        database: None,
-        timeout_ms: None,
-    }
 }

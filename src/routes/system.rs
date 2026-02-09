@@ -21,21 +21,13 @@ use super::types::{HealthResponse, ResourceDefaults, SystemResources};
 )]
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let dbs = state.databases();
-    let persistent = dbs.data_dir().is_some();
-    let active_sessions: usize = dbs
-        .list()
-        .iter()
-        .filter_map(|s| dbs.get(&s.name))
-        .map(|e| e.sessions.active_count())
-        .sum();
-
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_version: grafeo_engine::VERSION.to_string(),
-        persistent,
+        engine_version: env!("GRAFEO_ENGINE_VERSION").to_string(),
+        persistent: dbs.data_dir().is_some(),
         uptime_seconds: state.uptime_secs(),
-        active_sessions,
+        active_sessions: dbs.total_active_sessions(),
     })
 }
 
@@ -72,16 +64,11 @@ pub async fn system_resources(State(state): State<AppState>) -> impl IntoRespons
 
     let persistent_available = state.databases().data_dir().is_some();
 
-    let mut available_types = vec!["Lpg".to_string()];
-    available_types.push("Rdf".to_string());
+    let mut available_types = vec!["Lpg".to_string(), "Rdf".to_string()];
     #[cfg(feature = "owl-schema")]
     available_types.push("OwlSchema".to_string());
     #[cfg(feature = "rdfs-schema")]
-    {
-        if !available_types.contains(&"RdfsSchema".to_string()) {
-            available_types.push("RdfsSchema".to_string());
-        }
-    }
+    available_types.push("RdfsSchema".to_string());
     #[cfg(feature = "json-schema")]
     available_types.push("JsonSchema".to_string());
 
@@ -111,20 +98,14 @@ pub async fn system_resources(State(state): State<AppState>) -> impl IntoRespons
 pub async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoResponse {
     let dbs = state.databases();
     let db_list = dbs.list();
-    let databases_total = db_list.len();
     let nodes_total: usize = db_list.iter().map(|d| d.node_count).sum();
     let edges_total: usize = db_list.iter().map(|d| d.edge_count).sum();
-    let active_sessions: usize = db_list
-        .iter()
-        .filter_map(|s| dbs.get(&s.name))
-        .map(|e| e.sessions.active_count())
-        .sum();
 
     let body = state.metrics().render(
-        databases_total,
+        db_list.len(),
         nodes_total,
         edges_total,
-        active_sessions,
+        dbs.total_active_sessions(),
         state.uptime_secs(),
     );
 
