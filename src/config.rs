@@ -22,7 +22,8 @@ pub struct Config {
     #[arg(long, default_value_t = 300, env = "GRAFEO_SESSION_TTL")]
     pub session_ttl: u64,
 
-    /// CORS allowed origins (comma-separated). Empty for no CORS.
+    /// CORS allowed origins (comma-separated). Omit to deny cross-origin requests.
+    /// Use "*" to allow all origins (not recommended for production).
     #[arg(long, env = "GRAFEO_CORS_ORIGINS", value_delimiter = ',')]
     pub cors_origins: Vec<String>,
 
@@ -30,18 +31,55 @@ pub struct Config {
     #[arg(long, default_value_t = 30, env = "GRAFEO_QUERY_TIMEOUT")]
     pub query_timeout: u64,
 
-    /// Bearer token for API authentication. If set, non-exempt endpoints require it.
+    /// Bearer token / API key for authentication. If set, non-exempt endpoints
+    /// require `Authorization: Bearer <token>` or `X-API-Key: <token>`.
+    #[cfg(feature = "auth")]
     #[arg(long, env = "GRAFEO_AUTH_TOKEN")]
     pub auth_token: Option<String>,
+
+    /// Username for HTTP Basic authentication. Requires --auth-password.
+    #[cfg(feature = "auth")]
+    #[arg(long, env = "GRAFEO_AUTH_USER", requires = "auth_password")]
+    pub auth_user: Option<String>,
+
+    /// Password for HTTP Basic authentication. Requires --auth-user.
+    #[cfg(feature = "auth")]
+    #[arg(long, env = "GRAFEO_AUTH_PASSWORD", requires = "auth_user")]
+    pub auth_password: Option<String>,
 
     /// Log level.
     #[arg(long, default_value = "info", env = "GRAFEO_LOG_LEVEL")]
     pub log_level: String,
+
+    /// Log format: "pretty" (default, human-readable) or "json" (structured).
+    #[arg(long, default_value = "pretty", env = "GRAFEO_LOG_FORMAT")]
+    pub log_format: String,
+
+    /// Rate limit: max requests per window per IP. 0 = disabled.
+    #[arg(long, default_value_t = 0, env = "GRAFEO_RATE_LIMIT")]
+    pub rate_limit: u64,
+
+    /// Rate limit window in seconds.
+    #[arg(long, default_value_t = 60, env = "GRAFEO_RATE_LIMIT_WINDOW")]
+    pub rate_limit_window: u64,
+
+    /// Path to TLS certificate file (PEM format). Enables HTTPS.
+    #[arg(long, env = "GRAFEO_TLS_CERT", requires = "tls_key")]
+    pub tls_cert: Option<String>,
+
+    /// Path to TLS private key file (PEM format). Requires --tls-cert.
+    #[arg(long, env = "GRAFEO_TLS_KEY", requires = "tls_cert")]
+    pub tls_key: Option<String>,
 }
 
 impl Config {
     /// Parses configuration from CLI args and env vars.
     pub fn parse() -> Self {
         <Self as Parser>::parse()
+    }
+
+    /// Returns true if TLS is configured.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert.is_some() && self.tls_key.is_some()
     }
 }

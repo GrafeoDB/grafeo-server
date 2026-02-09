@@ -13,7 +13,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::error::ApiError;
-use crate::routes::{CreateDatabaseRequest, DatabaseType, StorageMode};
+use crate::routes::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
 use crate::sessions::SessionManager;
 
 /// Default memory limit for new databases: 512 MB.
@@ -479,7 +479,7 @@ impl DatabaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::DatabaseOptions;
+    use crate::routes::types::DatabaseOptions;
 
     #[test]
     fn test_name_validation() {

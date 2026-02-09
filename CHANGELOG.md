@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-09
+
+### Added
+
+- **Feature flags** — Cargo features for optional functionality: `auth`, `tls`, `json-schema`, `full` (enables all)
+- **Authentication** (feature: `auth`) — bearer token (`Authorization: Bearer <token>` / `X-API-Key`), HTTP Basic auth, constant-time comparison via `subtle`; `/health`, `/metrics`, and `/studio/` exempt from auth
+- **Rate limiting** — per-IP fixed-window rate limiter with configurable max requests and window duration; `X-Forwarded-For` aware; background cleanup of stale entries
+- **Structured logging** — `--log-format json` option for machine-parseable structured log output alongside the default human-readable `pretty` format
+- **Batch query endpoint** — `POST /batch` executes multiple queries in a single request within an implicit transaction; atomic rollback on any failure
+- **WebSocket streaming** — `GET /ws` for interactive query execution over persistent connections; JSON-tagged protocol with query, result, error, ping/pong message types; request correlation via optional `id` field
+- **TLS support** (feature: `tls`) — built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware
+- **CORS hardening** — deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning
+- **Request ID tracking** — `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID
+- **AGPL-3.0-or-later LICENSE file**
+- **9 new integration tests** — WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests
+
+### Changed
+
+- **Route modularization** — split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`
+- Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]` — `json-schema` now opt-in
+- Authentication is now feature-gated behind `auth` — users who don't need auth get a simpler build
+- `--cors-origins` default changed from allowing the dev server origin to denying all cross-origin requests
+- New dependencies: `futures-util` (WebSocket streams)
+- New optional dependencies: `subtle` (auth), `tokio-rustls`, `rustls`, `rustls-pemfile`, `hyper`, `hyper-util` (TLS)
+- New dev dependencies: `tokio-tungstenite` (WebSocket tests)
+- 60 integration tests total (with `--features auth`), 51 without auth
+
 ## [0.2.0] - 2026-02-08
 
 ### Added
@@ -109,7 +136,8 @@ Initial release.
 - **Pre-commit hooks** (prek) - fmt, clippy, deny, typos
 - **Integration test suite** - health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.0...v0.1.1
