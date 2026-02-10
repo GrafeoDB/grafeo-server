@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64",
