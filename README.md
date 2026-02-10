@@ -1,3 +1,8 @@
+[![CI](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/GrafeoDB/grafeo-server/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo-server)
+[![Crates.io](https://img.shields.io/crates/v/grafeo-server.svg)](https://crates.io/crates/grafeo-server)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 # Grafeo Server
 
 HTTP server for the [Grafeo](https://github.com/GrafeoDB/grafeo) graph database. Turns Grafeo's embeddable engine into a standalone database server accessible via REST API and web UI.
