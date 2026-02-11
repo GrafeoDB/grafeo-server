@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /v
 
 WORKDIR /build
 
-# Copy manifests first for better layer caching
-COPY Cargo.toml Cargo.lock* ./
+# Copy manifests and build script first for better layer caching
+COPY Cargo.toml Cargo.lock* build.rs ./
 COPY src/ src/
 
 # Copy built UI so rust-embed can include it

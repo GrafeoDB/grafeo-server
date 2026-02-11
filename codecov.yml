@@ -1,0 +1,33 @@
+# Codecov configuration
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  precision: 2
+  round: down
+  range: "60...90"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+        informational: true
+    patch:
+      default:
+        target: 70%
+        threshold: 5%
+        informational: true
+
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+  require_changes: true
+  require_base: false
+  require_head: true
+
+ignore:
+  - "**/tests/**"
+  - "client/**"
+  - "scripts/**"
+  - "docs/**"
+  - "examples/**"
