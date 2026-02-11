@@ -19,8 +19,8 @@ tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep
 
 [dependencies]
 # Grafeo engine
-grafeo-engine = { version = "0.4.4", features = ["full"] }
-grafeo-common = "0.4.4"
+grafeo-engine = { version = "0.5", features = ["full"] }
+grafeo-common = "0.5"
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query", "ws"] }
