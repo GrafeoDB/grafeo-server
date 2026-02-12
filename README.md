@@ -7,21 +7,37 @@
 
 HTTP server for the [Grafeo](https://github.com/GrafeoDB/grafeo) graph database. Turns Grafeo's embeddable engine into a standalone database server accessible via REST API and web UI.
 
-Pure Rust, single binary, ~40MB Docker image.
+Pure Rust, single binary. Available in three Docker image variants to match your deployment needs.
 
 ## Quick Start
 
 ### Docker Hub
 
 ```bash
+# Standard — all query languages, AI/search features, web UI
 docker run -p 7474:7474 grafeo/grafeo-server
-```
 
-Or with persistent storage:
-
-```bash
+# With persistent storage
 docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /data
 ```
+
+Three image variants are available:
+
+| Variant | Tag | Languages | AI/Search | Web UI | Use Case |
+|---------|-----|-----------|-----------|--------|----------|
+| **lite** | `grafeo-server:lite` | GQL only | No | No | Sidecar, CI, embedded |
+| **standard** | `grafeo-server:latest` | All 6 | Yes | Yes | General purpose |
+| **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes | Production, AI/RAG |
+
+```bash
+# Lite — GQL only, no web UI, smallest image
+docker run -p 7474:7474 grafeo/grafeo-server:lite
+
+# Full — everything including auth, TLS, ONNX embeddings
+docker run -p 7474:7474 grafeo/grafeo-server:full
+```
+
+Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -221,7 +237,9 @@ grafeo-server --data-dir /data --tls-cert /certs/cert.pem --tls-key /certs/key.p
 
 ## Feature Flags
 
-Grafeo Server uses Cargo feature flags to keep the default build lean. Optional features can be enabled at compile time:
+Grafeo Server uses Cargo feature flags to control both server capabilities and which engine features are compiled in. The default build includes all query languages, AI/search, and schema parsing — matching the **standard** Docker image.
+
+### Server Features
 
 | Feature | Description | Default |
 |---------|-------------|---------|
@@ -230,17 +248,72 @@ Grafeo Server uses Cargo feature flags to keep the default build lean. Optional 
 | `json-schema` | JSON Schema validation for database creation | No |
 | `auth` | Bearer token and HTTP Basic authentication | No |
 | `tls` | Built-in HTTPS via rustls | No |
-| `full` | All features above | No |
+
+### Engine: Query Languages
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `gql` | GQL (ISO/IEC 39075) | Yes |
+| `cypher` | Cypher (openCypher 9.0) | Yes |
+| `sparql` | SPARQL (W3C 1.1) — implies `rdf` | Yes |
+| `gremlin` | Gremlin (Apache TinkerPop) | Yes |
+| `graphql` | GraphQL | Yes |
+| `sql-pgq` | SQL/PGQ (SQL:2023 GRAPH_TABLE) | Yes |
+| `all-languages` | All of the above | Yes |
+
+### Engine: Storage & AI
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `storage` | parallel + wal + spill + mmap | Yes |
+| `ai` | vector-index + text-index + hybrid-search + cdc | Yes |
+| `rdf` | RDF graph model support | Yes |
+| `embed` | ONNX embedding generation (~17MB) | No |
+
+### Presets
+
+| Preset | Contents |
+|--------|----------|
+| `default` | all-languages + ai + rdf + storage + owl-schema + rdfs-schema |
+| `full` | Everything (default + embed + json-schema + auth + tls) |
 
 ```bash
-# Default build (owl-schema + rdfs-schema)
+# Default build (standard)
 cargo build --release
+
+# Lite — GQL + core storage only
+cargo build --release --no-default-features --features "gql,storage"
 
 # With authentication
 cargo build --release --features auth
 
-# Everything enabled
+# Everything
 cargo build --release --features full
+```
+
+### Docker Build Targets
+
+The Dockerfile supports three build targets matching these presets:
+
+```bash
+docker build --target lite     -t grafeo-server:lite .
+docker build --target standard -t grafeo-server:standard .   # default
+docker build --target full     -t grafeo-server:full .
+```
+
+### Feature Discovery
+
+The `/health` endpoint reports which features are compiled into the running server:
+
+```json
+{
+  "status": "ok",
+  "features": {
+    "languages": ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"],
+    "engine": ["parallel", "wal", "spill", "mmap", "rdf", "vector-index", "text-index", "hybrid-search", "cdc"],
+    "server": ["owl-schema", "rdfs-schema"]
+  }
+}
 ```
 
 ## Development

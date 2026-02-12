@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 
 use crate::state::AppState;
 
-use super::types::{HealthResponse, ResourceDefaults, SystemResources};
+use super::types::{EnabledFeatures, HealthResponse, ResourceDefaults, SystemResources};
 
 /// Check server health.
 ///
@@ -28,6 +28,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         persistent: dbs.data_dir().is_some(),
         uptime_seconds: state.uptime_secs(),
         active_sessions: dbs.total_active_sessions(),
+        features: EnabledFeatures::detect(),
     })
 }
 
@@ -64,6 +65,7 @@ pub async fn system_resources(State(state): State<AppState>) -> impl IntoRespons
 
     let persistent_available = state.databases().data_dir().is_some();
 
+    #[allow(unused_mut)]
     let mut available_types = vec!["Lpg".to_string(), "Rdf".to_string()];
     #[cfg(feature = "owl-schema")]
     available_types.push("OwlSchema".to_string());

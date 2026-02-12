@@ -9,18 +9,52 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["owl-schema", "rdfs-schema"]
-full = ["owl-schema", "rdfs-schema", "json-schema", "auth", "tls"]
+default = ["all-languages", "ai", "rdf", "storage", "owl-schema", "rdfs-schema"]
+
+# Server-specific features
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]
 json-schema = ["dep:jsonschema"]
 auth = ["dep:subtle"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
 
+# Engine: query languages
+gql = ["grafeo-engine/gql"]
+cypher = ["grafeo-engine/cypher"]
+sparql = ["grafeo-engine/sparql", "rdf"]
+gremlin = ["grafeo-engine/gremlin"]
+graphql = ["grafeo-engine/graphql"]
+sql-pgq = ["grafeo-engine/sql-pgq"]
+all-languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
+
+# Engine: storage & execution
+parallel = ["grafeo-engine/parallel"]
+wal = ["grafeo-engine/wal"]
+spill = ["grafeo-engine/spill"]
+mmap = ["grafeo-engine/mmap"]
+storage = ["parallel", "wal", "spill", "mmap"]
+
+# Engine: search & AI
+vector-index = ["grafeo-engine/vector-index"]
+text-index = ["grafeo-engine/text-index"]
+hybrid-search = ["grafeo-engine/hybrid-search"]
+cdc = ["grafeo-engine/cdc"]
+embed = ["grafeo-engine/embed"]
+ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
+
+# Engine: data models
+rdf = ["grafeo-engine/rdf"]
+
+# Everything (server + engine)
+full = [
+    "all-languages", "ai", "rdf", "storage", "embed",
+    "owl-schema", "rdfs-schema", "json-schema", "auth", "tls",
+]
+
 [dependencies]
 # Grafeo engine
-grafeo-engine = { version = "0.5", features = ["full"] }
-grafeo-common = "0.5"
+grafeo-engine = { version = "0.5.1", default-features = false }
+grafeo-common = "0.5.1"
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query", "ws"] }
