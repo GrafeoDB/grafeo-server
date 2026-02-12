@@ -11,11 +11,15 @@ env:
 
 jobs:
   publish-docker:
-    name: Build & Push
+    name: Build & Push (${{ matrix.variant }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [lite, standard, full]
     steps:
       - uses: actions/checkout@v4
 
@@ -36,18 +40,30 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # Compute Docker tags based on variant
+      - name: Compute tags
+        id: tags
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          VARIANT="${{ matrix.variant }}"
+          if [ "$VARIANT" = "standard" ]; then
+            echo "TAGS=${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAGS=${{ env.IMAGE_NAME }}:${VERSION}-${VARIANT},${{ env.IMAGE_NAME }}:${VARIANT}" >> "$GITHUB_OUTPUT"
+          fi
+
       # Build and push multi-arch image
       - uses: docker/build-push-action@v6
         with:
           context: .
+          target: ${{ matrix.variant }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.TAGS }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
           labels: |
-            org.opencontainers.image.title=Grafeo Server
+            org.opencontainers.image.title=Grafeo Server (${{ matrix.variant }})
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
             org.opencontainers.image.source=https://github.com/GrafeoDB/grafeo-server
+            org.opencontainers.image.description=Grafeo graph database server — ${{ matrix.variant }} variant

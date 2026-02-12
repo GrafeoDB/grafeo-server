@@ -1,0 +1,18 @@
+# Exclude everything by default, then whitelist what we need
+**
+
+# Grafeo-server source
+!grafeo-server/Cargo.toml
+!grafeo-server/Cargo.lock
+!grafeo-server/build.rs
+!grafeo-server/src/
+!grafeo-server/client/
+
+# Grafeo workspace crates (path dependencies)
+!grafeo/Cargo.toml
+!grafeo/Cargo.lock
+!grafeo/crates/
+
+# But exclude all target dirs and node_modules within whitelisted paths
+grafeo/crates/**/target/
+grafeo-server/client/node_modules/

@@ -34,6 +34,14 @@ fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
     }
 }
 
+/// Returns an error for a query language that is not compiled into this build.
+#[allow(dead_code)]
+fn language_not_enabled(lang: &str) -> ApiError {
+    ApiError::BadRequest(format!(
+        "language '{lang}' is not enabled in this server build"
+    ))
+}
+
 /// Executes a query on the given engine session, dispatching by language.
 pub fn run_query(
     session: &grafeo_engine::Session,
@@ -44,18 +52,42 @@ pub fn run_query(
             serde_json::from_value(params_json.clone())
                 .map_err(|e| ApiError::BadRequest(format!("invalid params: {e}")))?;
         match req.language.as_deref() {
+            #[cfg(feature = "cypher")]
             Some("cypher") => session.execute_cypher(&req.query),
+            #[cfg(not(feature = "cypher"))]
+            Some("cypher") => return Err(language_not_enabled("cypher")),
+            #[cfg(feature = "graphql")]
             Some("graphql") => session.execute_graphql_with_params(&req.query, params),
+            #[cfg(not(feature = "graphql"))]
+            Some("graphql") => return Err(language_not_enabled("graphql")),
+            #[cfg(feature = "gremlin")]
             Some("gremlin") => session.execute_gremlin_with_params(&req.query, params),
+            #[cfg(not(feature = "gremlin"))]
+            Some("gremlin") => return Err(language_not_enabled("gremlin")),
+            #[cfg(feature = "sparql")]
             Some("sparql") => session.execute_sparql(&req.query),
+            #[cfg(not(feature = "sparql"))]
+            Some("sparql") => return Err(language_not_enabled("sparql")),
             _ => session.execute_with_params(&req.query, params),
         }
     } else {
         match req.language.as_deref() {
+            #[cfg(feature = "cypher")]
             Some("cypher") => session.execute_cypher(&req.query),
+            #[cfg(not(feature = "cypher"))]
+            Some("cypher") => return Err(language_not_enabled("cypher")),
+            #[cfg(feature = "graphql")]
             Some("graphql") => session.execute_graphql(&req.query),
+            #[cfg(not(feature = "graphql"))]
+            Some("graphql") => return Err(language_not_enabled("graphql")),
+            #[cfg(feature = "gremlin")]
             Some("gremlin") => session.execute_gremlin(&req.query),
+            #[cfg(not(feature = "gremlin"))]
+            Some("gremlin") => return Err(language_not_enabled("gremlin")),
+            #[cfg(feature = "sparql")]
             Some("sparql") => session.execute_sparql(&req.query),
+            #[cfg(not(feature = "sparql"))]
+            Some("sparql") => return Err(language_not_enabled("sparql")),
             _ => session.execute(&req.query),
         }
     }

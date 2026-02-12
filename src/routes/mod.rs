@@ -61,7 +61,7 @@ use crate::ui;
     components(
         schemas(
             types::QueryRequest, types::QueryResponse, types::TxBeginRequest,
-            types::TransactionResponse, types::HealthResponse, ErrorBody,
+            types::TransactionResponse, types::HealthResponse, types::EnabledFeatures, ErrorBody,
             types::CreateDatabaseRequest, types::DatabaseType, types::StorageMode,
             types::DatabaseOptions, types::ListDatabasesResponse, DatabaseSummary,
             types::DatabaseInfoResponse, types::DatabaseStatsResponse,
