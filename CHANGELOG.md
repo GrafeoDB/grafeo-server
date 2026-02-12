@@ -5,6 +5,13 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-02-12
+
+### Added
+
+- **Multi-variant Docker images** — three build targets: `lite` (no UI, GQL + storage only), `standard` (with UI, default features), and `full` (with UI, all features including auth and TLS)
+- **Docker build fix** — corrected `Dockerfile.dockerignore` paths for current build context (was referencing parent-directory layout)
+
 ## [0.2.1] - 2026-02-11
 
 ### Added
