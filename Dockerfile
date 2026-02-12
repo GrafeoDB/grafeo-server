@@ -19,9 +19,9 @@ RUN npm run build
 
 # --- Stage: Shared Rust base ---
 FROM rust:1.91-slim AS rust-base
-RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl g++ cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY Cargo.toml Cargo.lock* build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 
 # --- Build: lite (no UI, GQL + core storage only) ---
