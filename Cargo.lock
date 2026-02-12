@@ -984,6 +984,8 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e245d0b2aef9552b7f4cc20e37fd348fc294058d190aa2f210bd62539e860b39"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1006,6 +1008,8 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f03e67268440cc0445677ef0486563d7c150c96991389cd3642fed3087875aac"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1027,6 +1031,8 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38568e74aaa423fb60db0839ce189672a55ac9aba9732d788a845a951ea2a7e7"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1051,6 +1057,8 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ceaa8b1132493ad596055a309e206231db4309b1b1facbfd0e8d12866df92e3"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2960,7 +2968,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
