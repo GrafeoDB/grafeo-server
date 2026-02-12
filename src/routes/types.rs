@@ -12,7 +12,7 @@ pub struct QueryRequest {
     /// Optional query parameters (JSON object).
     #[serde(default)]
     pub params: Option<serde_json::Value>,
-    /// Query language: "gql" (default), "cypher", "graphql", "gremlin", "sparql".
+    /// Query language: "gql" (default), "cypher", "graphql", "gremlin", "sparql", "sql-pgq".
     /// Ignored by language-specific convenience endpoints.
     #[serde(default)]
     pub language: Option<String>,
@@ -387,7 +387,7 @@ pub struct BatchQueryRequest {
 pub struct BatchQueryItem {
     /// The query string to execute.
     pub query: String,
-    /// Query language: "gql" (default), "cypher", "graphql", "gremlin", "sparql".
+    /// Query language: "gql" (default), "cypher", "graphql", "gremlin", "sparql", "sql-pgq".
     #[serde(default)]
     pub language: Option<String>,
     /// Optional query parameters (JSON object).

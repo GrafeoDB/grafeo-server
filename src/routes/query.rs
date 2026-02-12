@@ -68,6 +68,10 @@ pub fn run_query(
             Some("sparql") => session.execute_sparql(&req.query),
             #[cfg(not(feature = "sparql"))]
             Some("sparql") => return Err(language_not_enabled("sparql")),
+            #[cfg(feature = "sql-pgq")]
+            Some("sql" | "sql-pgq") => session.execute_sql_with_params(&req.query, params),
+            #[cfg(not(feature = "sql-pgq"))]
+            Some("sql" | "sql-pgq") => return Err(language_not_enabled("sql-pgq")),
             _ => session.execute_with_params(&req.query, params),
         }
     } else {
@@ -88,6 +92,10 @@ pub fn run_query(
             Some("sparql") => session.execute_sparql(&req.query),
             #[cfg(not(feature = "sparql"))]
             Some("sparql") => return Err(language_not_enabled("sparql")),
+            #[cfg(feature = "sql-pgq")]
+            Some("sql" | "sql-pgq") => session.execute_sql(&req.query),
+            #[cfg(not(feature = "sql-pgq"))]
+            Some("sql" | "sql-pgq") => return Err(language_not_enabled("sql-pgq")),
             _ => session.execute(&req.query),
         }
     }
@@ -231,4 +239,26 @@ pub async fn sparql(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     execute_auto_commit(&state, req, Some(("sparql", Language::Sparql))).await
+}
+
+/// Execute a SQL/PGQ query (auto-commit).
+///
+/// SQL/PGQ (Property Graph Queries) extends SQL with graph pattern matching.
+/// Also supports CALL procedure syntax for graph algorithms.
+#[utoipa::path(
+    post,
+    path = "/sql",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "Query executed successfully", body = QueryResponse),
+        (status = 400, description = "Bad request", body = ErrorBody),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Query"
+)]
+pub async fn sql(
+    State(state): State<AppState>,
+    Json(req): Json<QueryRequest>,
+) -> Result<Json<QueryResponse>, ApiError> {
+    execute_auto_commit(&state, req, Some(("sql-pgq", Language::SqlPgq))).await
 }

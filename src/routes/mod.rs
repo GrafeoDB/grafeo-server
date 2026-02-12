@@ -34,8 +34,8 @@ use crate::ui;
 #[openapi(
     info(
         title = "Grafeo Server API",
-        description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, and SPARQL query languages with both auto-commit and explicit transaction modes.\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.2.3",
+        description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
+        version = "0.2.4",
         license(name = "AGPL-3.0-or-later"),
     ),
     paths(
@@ -46,6 +46,7 @@ use crate::ui;
         query::graphql,
         query::gremlin,
         query::sparql,
+        query::sql,
         batch::batch_query,
         transaction::tx_begin,
         transaction::tx_query,
@@ -92,6 +93,7 @@ pub fn router(state: AppState) -> Router {
         .route("/graphql", post(query::graphql))
         .route("/gremlin", post(query::gremlin))
         .route("/sparql", post(query::sparql))
+        .route("/sql", post(query::sql))
         .route("/batch", post(batch::batch_query))
         // WebSocket
         .route("/ws", get(websocket::ws_handler))
