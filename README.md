@@ -1,7 +1,9 @@
 [![CI](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo-server/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo-server)
-[![Crates.io](https://img.shields.io/crates/v/grafeo-server.svg)](https://crates.io/crates/grafeo-server)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Docker standard](https://img.shields.io/docker/v/grafeo/grafeo-server/latest?label=standard&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
+[![Docker lite](https://img.shields.io/docker/v/grafeo/grafeo-server/lite?label=lite&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
+[![Docker full](https://img.shields.io/docker/v/grafeo/grafeo-server/full?label=full&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
 # Grafeo Server
 
@@ -37,7 +39,7 @@ docker run -p 7474:7474 grafeo/grafeo-server:lite
 docker run -p 7474:7474 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-full`.
+Versioned tags: `grafeo-server:0.2.4`, `grafeo-server:0.2.4-lite`, `grafeo-server:0.2.4-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -91,6 +93,11 @@ curl -X POST http://localhost:7474/gremlin \
   -H "Content-Type: application/json" \
   -d '{"query": "g.V().hasLabel('\''Person'\'').values('\''name'\'')"}'
 
+# SQL/PGQ
+curl -X POST http://localhost:7474/sql \
+  -H "Content-Type: application/json" \
+  -d '{"query": "CALL grafeo.procedures() YIELD name, description"}'
+
 # SPARQL (operates on the RDF triple store, separate from the property graph)
 curl -X POST http://localhost:7474/sparql \
   -H "Content-Type: application/json" \
@@ -100,6 +107,29 @@ curl -X POST http://localhost:7474/sparql \
   -H "Content-Type: application/json" \
   -d '{"query": "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?name WHERE { ?p a foaf:Person . ?p foaf:name ?name }"}'
 ```
+
+### Graph Algorithms (CALL Procedures)
+
+All query endpoints support `CALL` procedures for 22+ built-in graph algorithms:
+
+```bash
+# List all available algorithms
+curl -X POST http://localhost:7474/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "CALL grafeo.procedures() YIELD name, description"}'
+
+# PageRank
+curl -X POST http://localhost:7474/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "CALL grafeo.pagerank({damping: 0.85}) YIELD node_id, score"}'
+
+# Connected components via Cypher
+curl -X POST http://localhost:7474/cypher \
+  -H "Content-Type: application/json" \
+  -d '{"query": "CALL grafeo.connected_components() YIELD node_id, component_id"}'
+```
+
+Available algorithms include: PageRank, BFS, DFS, Dijkstra, Bellman-Ford, Connected Components, Strongly Connected Components, Louvain, Label Propagation, Betweenness/Closeness/Degree Centrality, Clustering Coefficient, Topological Sort, Kruskal, Prim, Max Flow, Min-Cost Flow, Articulation Points, Bridges, K-Core, and more.
 
 ### Batch Queries
 
