@@ -1698,3 +1698,206 @@ async fn websocket_auth_required() {
     let result = tokio_tungstenite::connect_async(&ws_url).await;
     assert!(result.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// CALL Procedures (v0.2.4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn call_procedures_list_via_gql() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // List all available procedures
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "CALL grafeo.procedures() YIELD name, description"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let columns = body["columns"].as_array().unwrap();
+    assert!(columns.iter().any(|c| c == "name"));
+    assert!(columns.iter().any(|c| c == "description"));
+
+    let rows = body["rows"].as_array().unwrap();
+    assert!(!rows.is_empty(), "should list at least one procedure");
+
+    // Verify known algorithms are present
+    let names: Vec<&str> = rows.iter().filter_map(|r| r[0].as_str()).collect();
+    assert!(
+        names.contains(&"grafeo.pagerank"),
+        "pagerank should be registered"
+    );
+    assert!(names.contains(&"grafeo.bfs"), "bfs should be registered");
+    assert!(
+        names.contains(&"grafeo.connected_components"),
+        "wcc should be registered"
+    );
+}
+
+#[tokio::test]
+async fn call_pagerank_via_gql() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed a small graph via Cypher
+    client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CREATE (:Page {name: 'A'})-[:LINKS_TO]->(:Page {name: 'B'})-[:LINKS_TO]->(:Page {name: 'C'})"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Run PageRank via CALL (GQL)
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "CALL grafeo.pagerank({damping: 0.85, iterations: 20}) YIELD node_id, score"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let columns = body["columns"].as_array().unwrap();
+    assert!(columns.iter().any(|c| c == "node_id"));
+    assert!(columns.iter().any(|c| c == "score"));
+
+    let rows = body["rows"].as_array().unwrap();
+    assert!(
+        !rows.is_empty(),
+        "pagerank should return results for seeded graph"
+    );
+}
+
+#[tokio::test]
+async fn call_connected_components_via_cypher() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed graph with two components
+    client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CREATE (:Node {name: 'C'})"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Run WCC via CALL (Cypher)
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CALL grafeo.connected_components() YIELD node_id, component_id"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let columns = body["columns"].as_array().unwrap();
+    assert!(columns.iter().any(|c| c == "node_id"));
+    assert!(columns.iter().any(|c| c == "component_id"));
+
+    let rows = body["rows"].as_array().unwrap();
+    assert!(rows.len() >= 3, "should return a row per node");
+}
+
+#[tokio::test]
+async fn call_unknown_procedure_returns_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "CALL grafeo.nonexistent_algorithm() YIELD x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// SQL/PGQ endpoint (v0.2.4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sql_endpoint_call_procedures() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // List procedures via SQL/PGQ endpoint
+    let resp = client
+        .post(format!("{base}/sql"))
+        .json(&json!({"query": "CALL grafeo.procedures() YIELD name, description"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert!(!rows.is_empty());
+}
+
+#[tokio::test]
+async fn sql_pgq_via_query_language_field() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Use the /query endpoint with language: "sql-pgq"
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "CALL grafeo.procedures() YIELD name, description",
+            "language": "sql-pgq"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(!body["rows"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn openapi_includes_sql_path() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+
+    let paths = body["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/sql"));
+}
+
+#[tokio::test]
+async fn metrics_tracks_sql_pgq() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Run a SQL/PGQ query
+    client
+        .post(format!("{base}/sql"))
+        .json(&json!({"query": "CALL grafeo.procedures() YIELD name"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Check metrics include sql-pgq counter
+    let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("language=\"sql-pgq\""));
+}

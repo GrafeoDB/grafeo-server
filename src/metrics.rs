@@ -31,6 +31,7 @@ pub enum Language {
     Graphql,
     Gremlin,
     Sparql,
+    SqlPgq,
 }
 
 impl Language {
@@ -41,16 +42,18 @@ impl Language {
             Self::Graphql => "graphql",
             Self::Gremlin => "gremlin",
             Self::Sparql => "sparql",
+            Self::SqlPgq => "sql-pgq",
         }
     }
 }
 
-const ALL_LANGUAGES: [Language; 5] = [
+const ALL_LANGUAGES: [Language; 6] = [
     Language::Gql,
     Language::Cypher,
     Language::Graphql,
     Language::Gremlin,
     Language::Sparql,
+    Language::SqlPgq,
 ];
 
 /// Application-wide metrics collected via atomic counters.
@@ -60,6 +63,7 @@ pub struct Metrics {
     graphql: LanguageMetrics,
     gremlin: LanguageMetrics,
     sparql: LanguageMetrics,
+    sql_pgq: LanguageMetrics,
 }
 
 impl Default for Metrics {
@@ -76,6 +80,7 @@ impl Metrics {
             graphql: LanguageMetrics::new(),
             gremlin: LanguageMetrics::new(),
             sparql: LanguageMetrics::new(),
+            sql_pgq: LanguageMetrics::new(),
         }
     }
 
@@ -86,6 +91,7 @@ impl Metrics {
             Language::Graphql => &self.graphql,
             Language::Gremlin => &self.gremlin,
             Language::Sparql => &self.sparql,
+            Language::SqlPgq => &self.sql_pgq,
         }
     }
 
@@ -227,6 +233,7 @@ pub fn determine_language(lang: Option<&str>) -> Language {
         Some("graphql") => Language::Graphql,
         Some("gremlin") => Language::Gremlin,
         Some("sparql") => Language::Sparql,
+        Some("sql" | "sql-pgq") => Language::SqlPgq,
         _ => Language::Gql,
     }
 }

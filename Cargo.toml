@@ -1,6 +1,6 @@
 [package]
 name = "grafeo-server"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -53,8 +53,8 @@ full = [
 
 [dependencies]
 # Grafeo engine
-grafeo-engine = { version = "0.5.1", default-features = false }
-grafeo-common = "0.5.1"
+grafeo-engine = { version = "0.5.3", default-features = false }
+grafeo-common = "0.5.3"
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query", "ws"] }
