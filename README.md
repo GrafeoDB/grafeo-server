@@ -3,7 +3,7 @@
 [![Docker standard](https://img.shields.io/docker/v/grafeo/grafeo-server/latest?label=standard&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
 [![Docker lite](https://img.shields.io/docker/v/grafeo/grafeo-server/lite?label=lite&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
 [![Docker full](https://img.shields.io/docker/v/grafeo/grafeo-server/full?label=full&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
-[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 # Grafeo Server
 
@@ -380,4 +380,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and pu
 
 ## License
 
-AGPL-3.0-or-later
+Apache-2.0
