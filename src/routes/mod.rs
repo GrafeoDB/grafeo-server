@@ -36,7 +36,7 @@ use crate::ui;
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
         version = "0.2.4",
-        license(name = "AGPL-3.0-or-later"),
+        license(name = "Apache-2.0"),
     ),
     paths(
         system::health,

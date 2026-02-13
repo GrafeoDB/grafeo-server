@@ -167,4 +167,4 @@ File issues at [github.com/GrafeoDB/grafeo-server/issues](https://github.com/Gra
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under AGPL-3.0-or-later.
+By contributing, you agree that your contributions will be licensed under Apache-2.0.
