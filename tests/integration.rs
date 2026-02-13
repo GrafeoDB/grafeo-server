@@ -1726,13 +1726,16 @@ async fn call_procedures_list_via_gql() {
     assert!(!rows.is_empty(), "should list at least one procedure");
 
     // Verify known algorithms are present
-    let names: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r[0].as_str())
-        .collect();
-    assert!(names.contains(&"pagerank"), "pagerank should be registered");
-    assert!(names.contains(&"bfs"), "bfs should be registered");
-    assert!(names.contains(&"connected_components"), "wcc should be registered");
+    let names: Vec<&str> = rows.iter().filter_map(|r| r[0].as_str()).collect();
+    assert!(
+        names.contains(&"grafeo.pagerank"),
+        "pagerank should be registered"
+    );
+    assert!(names.contains(&"grafeo.bfs"), "bfs should be registered");
+    assert!(
+        names.contains(&"grafeo.connected_components"),
+        "wcc should be registered"
+    );
 }
 
 #[tokio::test]
@@ -1740,10 +1743,10 @@ async fn call_pagerank_via_gql() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    // Seed a small graph
+    // Seed a small graph via Cypher
     client
-        .post(format!("{base}/query"))
-        .json(&json!({"query": "INSERT (:Page {name: 'A'})-[:LINKS_TO]->(:Page {name: 'B'})-[:LINKS_TO]->(:Page {name: 'C'})"}))
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CREATE (:Page {name: 'A'})-[:LINKS_TO]->(:Page {name: 'B'})-[:LINKS_TO]->(:Page {name: 'C'})"}))
         .send()
         .await
         .unwrap();
@@ -1763,7 +1766,10 @@ async fn call_pagerank_via_gql() {
     assert!(columns.iter().any(|c| c == "score"));
 
     let rows = body["rows"].as_array().unwrap();
-    assert!(!rows.is_empty(), "pagerank should return results for seeded graph");
+    assert!(
+        !rows.is_empty(),
+        "pagerank should return results for seeded graph"
+    );
 }
 
 #[tokio::test]
