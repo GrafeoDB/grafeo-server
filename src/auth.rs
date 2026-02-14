@@ -66,8 +66,7 @@ pub async fn auth_middleware(
 
     // Try HTTP Basic auth
     if let Some(encoded) = auth_header_ref.and_then(|v| v.strip_prefix("Basic "))
-        && let Ok(decoded_bytes) =
-            base64::engine::general_purpose::STANDARD.decode(encoded)
+        && let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
         && let Ok(decoded_str) = std::str::from_utf8(&decoded_bytes)
         && let Some((user, pass)) = decoded_str.split_once(':')
         && auth_provider.check_basic(user, pass)

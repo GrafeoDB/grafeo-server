@@ -94,9 +94,7 @@ mod http_impl {
                 ServiceError::BadRequest(msg) => {
                     (StatusCode::BAD_REQUEST, "bad_request", Some(msg.clone()))
                 }
-                ServiceError::SessionNotFound => {
-                    (StatusCode::NOT_FOUND, "session_not_found", None)
-                }
+                ServiceError::SessionNotFound => (StatusCode::NOT_FOUND, "session_not_found", None),
                 ServiceError::NotFound(msg) => {
                     (StatusCode::NOT_FOUND, "not_found", Some(msg.clone()))
                 }

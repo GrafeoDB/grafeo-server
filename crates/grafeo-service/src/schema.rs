@@ -44,9 +44,9 @@ fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
         let p = format_term(&triple[1]);
         let o = format_term(&triple[2]);
         let sparql = format!("INSERT DATA {{ {s} {p} {o} . }}");
-        session.execute_sparql(&sparql).map_err(|e| {
-            ServiceError::Internal(format!("failed to insert OWL triple: {e}"))
-        })?;
+        session
+            .execute_sparql(&sparql)
+            .map_err(|e| ServiceError::Internal(format!("failed to insert OWL triple: {e}")))?;
     }
 
     tracing::info!(triple_count = triples.len(), "Loaded OWL schema");

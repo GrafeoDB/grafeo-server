@@ -100,13 +100,11 @@ impl DatabaseManager {
             let old_path = dir.join("grafeo.db");
             if old_path.exists() {
                 let new_dir = dir.join("default");
-                std::fs::create_dir_all(&new_dir)
-                    .expect("failed to create default db directory");
+                std::fs::create_dir_all(&new_dir).expect("failed to create default db directory");
                 let new_path = new_dir.join("grafeo.db");
                 if !new_path.exists() {
                     tracing::info!("Migrating old database layout to default/grafeo.db");
-                    std::fs::rename(&old_path, &new_path)
-                        .expect("failed to migrate database file");
+                    std::fs::rename(&old_path, &new_path).expect("failed to migrate database file");
                     // Also move WAL file if present
                     let old_wal = dir.join("grafeo.db.wal");
                     if old_wal.exists() {
@@ -135,10 +133,8 @@ impl DatabaseManager {
                                             .map(|n| n.get())
                                             .unwrap_or(1),
                                     };
-                                    mgr.databases.insert(
-                                        name,
-                                        Arc::new(DatabaseEntry { db, metadata }),
-                                    );
+                                    mgr.databases
+                                        .insert(name, Arc::new(DatabaseEntry { db, metadata }));
                                 }
                                 Err(e) => {
                                     tracing::error!(name = %name, error = %e, "Failed to open database, skipping");
@@ -156,8 +152,8 @@ impl DatabaseManager {
                     .expect("failed to create default db directory");
                 let db_path = default_dir.join("grafeo.db");
                 tracing::info!("Creating default persistent database");
-                let db = GrafeoDB::open(db_path.to_str().unwrap())
-                    .expect("failed to create default db");
+                let db =
+                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db");
                 mgr.databases.insert(
                     "default".to_string(),
                     Arc::new(DatabaseEntry {
@@ -312,8 +308,7 @@ impl DatabaseManager {
                         ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
                     })?;
 
-            let schema_result =
-                crate::schema::load_schema(req.database_type, &schema_bytes, &db);
+            let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
             if let Err(e) = schema_result {
                 // Rollback: close and remove the database
                 let _ = db.close();
@@ -334,10 +329,8 @@ impl DatabaseManager {
             threads,
         };
 
-        self.databases.insert(
-            name.clone(),
-            Arc::new(DatabaseEntry { db, metadata }),
-        );
+        self.databases
+            .insert(name.clone(), Arc::new(DatabaseEntry { db, metadata }));
 
         Ok(())
     }
