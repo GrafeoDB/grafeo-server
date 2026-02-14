@@ -1901,3 +1901,161 @@ async fn metrics_tracks_sql_pgq() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("language=\"sql-pgq\""));
 }
+
+// ---------------------------------------------------------------------------
+// GQL Wire Protocol (v0.3.0)
+// ---------------------------------------------------------------------------
+
+/// Boots an in-memory Grafeo server with both HTTP and GWP (gRPC) ports.
+/// Returns `(http_base_url, gwp_endpoint)`.
+#[cfg(feature = "gwp")]
+async fn spawn_server_with_gwp() -> (String, String) {
+    let state = grafeo_server::AppState::new_in_memory(300);
+    let app = grafeo_server::router(state.clone());
+
+    // HTTP
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr: SocketAddr = http_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            http_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // GWP (gRPC)
+    let gwp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gwp_addr: SocketAddr = gwp_listener.local_addr().unwrap();
+    // Drop the listener so tonic can bind the same port
+    drop(gwp_listener);
+    let backend = grafeo_server::gwp::GrafeoBackend::new(state);
+    tokio::spawn(async move {
+        gwp::server::GqlServer::serve(backend, gwp_addr)
+            .await
+            .unwrap();
+    });
+    // Give the gRPC server a moment to bind
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    (
+        format!("http://{http_addr}"),
+        format!("http://{gwp_addr}"),
+    )
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_session_create_and_close() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .expect("GWP connect failed");
+
+    let session = conn
+        .create_session()
+        .await
+        .expect("GWP create_session failed");
+
+    let session_id = session.session_id().to_owned();
+    assert!(!session_id.is_empty(), "session ID should not be empty");
+
+    session.close().await.expect("GWP close_session failed");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_execute_query() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let http_client = Client::new();
+
+    // Seed data via HTTP (Cypher CREATE)
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({"query": "CREATE (:GwpTest {name: 'Alice'})-[:KNOWS]->(:GwpTest {name: 'Bob'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Query via GWP
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "MATCH (n:GwpTest) RETURN n.name ORDER BY n.name",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("GWP execute failed");
+
+    let columns = cursor.column_names().await.unwrap();
+    assert!(!columns.is_empty(), "should have column names");
+
+    let rows = cursor.collect_rows().await.unwrap();
+    assert_eq!(rows.len(), 2, "should find 2 GwpTest nodes");
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_transaction_commit() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    // Begin transaction, create a node, commit
+    let mut tx = session.begin_transaction().await.unwrap();
+    let mut cursor = tx
+        .execute(
+            "CREATE (:TxTest {val: 42})",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let _ = cursor.collect_rows().await.unwrap();
+    tx.commit().await.unwrap();
+
+    // Verify committed data is visible
+    let mut cursor = session
+        .execute(
+            "MATCH (n:TxTest) RETURN n.val",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    assert_eq!(rows.len(), 1, "committed node should be visible");
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_health_reports_gwp_feature() {
+    let (http, _gwp) = spawn_server_with_gwp().await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{http}/health")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+
+    let server_features = body["features"]["server"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        server_features.contains(&"gwp"),
+        "health should report gwp feature; got: {server_features:?}"
+    );
+}

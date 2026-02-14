@@ -25,11 +25,11 @@ docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /da
 
 Three image variants are available:
 
-| Variant | Tag | Languages | AI/Search | Web UI | Use Case |
-|---------|-----|-----------|-----------|--------|----------|
-| **lite** | `grafeo-server:lite` | GQL only | No | No | Sidecar, CI, embedded |
-| **standard** | `grafeo-server:latest` | All 6 | Yes | Yes | General purpose |
-| **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes | Production, AI/RAG |
+| Variant | Tag | Languages | AI/Search | GWP | Web UI | Use Case |
+|---------|-----|-----------|-----------|-----|--------|----------|
+| **lite** | `grafeo-server:lite` | GQL only | No | No | No | Sidecar, CI, embedded |
+| **standard** | `grafeo-server:latest` | All 6 | Yes | Yes (:7687) | Yes | General purpose |
+| **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes (:7687) | Yes | Production, AI/RAG |
 
 ```bash
 # Lite - GQL only, no web UI, smallest image
@@ -39,7 +39,7 @@ docker run -p 7474:7474 grafeo/grafeo-server:lite
 docker run -p 7474:7474 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.2.4`, `grafeo-server:0.2.4-lite`, `grafeo-server:0.2.4-full`.
+Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -49,7 +49,7 @@ See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-
 docker compose up -d
 ```
 
-The server is available at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`.
+The server is available at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`. GWP (gRPC) on `localhost:7687`.
 
 ### From source
 
@@ -188,6 +188,28 @@ Connect to `ws://localhost:7474/ws` for interactive query execution over a persi
 
 The `id` field is optional and echoed back for request/response correlation.
 
+### GQL Wire Protocol (GWP)
+
+The standard and full builds include a gRPC-based binary wire protocol on port 7687, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) Rust client or any gRPC client.
+
+```rust
+use gwp::client::GqlConnection;
+use std::collections::HashMap;
+
+let conn = GqlConnection::connect("http://localhost:7687").await?;
+let mut session = conn.create_session().await?;
+
+let mut cursor = session.execute(
+    "MATCH (n:Person) RETURN n.name",
+    HashMap::new(),
+).await?;
+
+let rows = cursor.collect_rows().await?;
+session.close().await?;
+```
+
+Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7687).
+
 ### Health Check
 
 ```bash
@@ -209,6 +231,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_DATA_DIR` | `--data-dir` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
+| `GRAFEO_GWP_PORT` | `--gwp-port` | `7687` | GQL Wire Protocol (gRPC) port |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
@@ -276,6 +299,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 | `owl-schema` | OWL/Turtle schema parsing for database creation | Yes |
 | `rdfs-schema` | RDFS schema support (implies `owl-schema`) | Yes |
 | `json-schema` | JSON Schema validation for database creation | No |
+| `gwp` | GQL Wire Protocol (gRPC) on port 7687 | Yes |
 | `auth` | Bearer token and HTTP Basic authentication | No |
 | `tls` | Built-in HTTPS via rustls | No |
 
@@ -304,7 +328,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 
 | Preset | Contents |
 |--------|----------|
-| `default` | all-languages + ai + rdf + storage + owl-schema + rdfs-schema |
+| `default` | all-languages + ai + rdf + storage + owl-schema + rdfs-schema + gwp |
 | `full` | Everything (default + embed + json-schema + auth + tls) |
 
 ```bash
@@ -341,7 +365,7 @@ The `/health` endpoint reports which features are compiled into the running serv
   "features": {
     "languages": ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"],
     "engine": ["parallel", "wal", "spill", "mmap", "rdf", "vector-index", "text-index", "hybrid-search", "cdc"],
-    "server": ["owl-schema", "rdfs-schema"]
+    "server": ["owl-schema", "rdfs-schema", "gwp"]
   }
 }
 ```

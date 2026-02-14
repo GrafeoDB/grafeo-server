@@ -5,6 +5,29 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-14
+
+### Added
+
+- **GQL Wire Protocol (GWP)**: binary gRPC wire protocol on port 7687 (feature-gated: `gwp`, default on)
+  - Full `GqlBackend` implementation bridging `gwp` crate to grafeo-engine
+  - Persistent sessions with database switching via `SessionProperty::Graph`
+  - Bidirectional value conversion between `grafeo_common::Value` and `gwp::types::Value`
+  - Streaming `ResultStream` with header, row batch, and summary frames
+  - Transaction support (begin, commit, rollback) via `spawn_blocking`
+  - `--gwp-port` CLI flag / `GRAFEO_GWP_PORT` env var (default: 7687)
+- **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection
+- **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`
+
+### Changed
+
+- Bumped version to 0.3.0
+- `gwp` added to default features and `full` preset
+- `/health` endpoint now reports `"gwp"` in server features
+- Dockerfile exposes both ports 7474 and 7687
+- New dependencies: `gwp` 0.1, `tonic` 0.12 (both feature-gated)
+- 63 integration tests total (4 new GWP tests)
+
 ## [0.2.4] - 2026-02-13
 
 ### Added
@@ -165,7 +188,8 @@ Initial release.
 - **Pre-commit hooks** (prek) - fmt, clippy, deny, typos
 - **Integration test suite** - health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.1...v0.2.2
