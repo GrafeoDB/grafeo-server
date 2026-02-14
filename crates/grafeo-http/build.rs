@@ -9,9 +9,10 @@ fn main() {
             println!("cargo::rerun-if-changed={}", candidate.display());
             break contents;
         }
-        if !dir.pop() {
-            panic!("Cargo.lock not found in any ancestor of {manifest_dir}");
-        }
+        assert!(
+            dir.pop(),
+            "Cargo.lock not found in any ancestor of {manifest_dir}"
+        );
     };
     let version = extract_dep_version(&lock_contents, "grafeo-engine")
         .expect("grafeo-engine not found in Cargo.lock");
