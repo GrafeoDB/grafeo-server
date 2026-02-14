@@ -19,8 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection
 - **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`
 - **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI — lightweight image for microservices
+- **4 Docker variants**: lite, gwp, standard (default), full
 
 ### Changed
+
+- GWP is introduced as an opt-in protocol alongside HTTP in this release. Once stability is proven, GWP will become the standard protocol from 0.4.x onwards, with the `gwp` Docker variant promoted to the recommended deployment for wire-protocol clients.
 
 - Bumped version to 0.3.0
 - `gwp` added to default features and `full` preset
