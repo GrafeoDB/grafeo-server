@@ -1,62 +1,62 @@
-//! Shared helper functions for route handlers.
+//! Shared helper functions for HTTP route handlers.
+//!
+//! Bridges grafeo-service types (engine `Value`, `QueryResult`) to HTTP JSON types.
 
-use std::time::Duration;
+use std::collections::HashMap;
+
+use grafeo_engine::database::QueryResult;
 
 use crate::error::ApiError;
-use crate::metrics::Language;
-use crate::state::AppState;
 
 use super::types::QueryResponse;
 
-/// Resolves the database name from the request, defaulting to "default".
-pub fn resolve_db_name(database: Option<&String>) -> &str {
-    database.map_or("default", |s| s.as_str())
-}
-
-/// Computes the effective timeout for a query.
-pub fn effective_timeout(state: &AppState, req_timeout_ms: Option<u64>) -> Option<Duration> {
-    match req_timeout_ms {
-        Some(0) => None,
-        Some(ms) => Some(Duration::from_millis(ms)),
-        None => {
-            let global = state.query_timeout();
-            if global.is_zero() { None } else { Some(global) }
+/// Converts a Grafeo `Value` to a JSON value.
+pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
+    use grafeo_common::Value;
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int64(i) => serde_json::json!(i),
+        Value::Float64(f) => serde_json::json!(f),
+        Value::String(s) => serde_json::Value::String(s.to_string()),
+        Value::Bytes(b) => serde_json::json!(b.as_ref()),
+        Value::Timestamp(t) => serde_json::Value::String(format!("{t:?}")),
+        Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        Value::Map(map) => {
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.to_string(), value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(obj)
         }
+        Value::Vector(v) => serde_json::json!(v.as_ref()),
     }
 }
 
-/// Runs a blocking task with an optional timeout.
-pub async fn run_with_timeout<F, T>(timeout: Option<Duration>, task: F) -> Result<T, ApiError>
-where
-    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
-    T: Send + 'static,
-{
-    let handle = tokio::task::spawn_blocking(task);
-    if let Some(dur) = timeout {
-        match tokio::time::timeout(dur, handle).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => Err(ApiError::Internal(e.to_string())),
-            Err(_) => {
-                tracing::warn!("query timed out after {dur:?}");
-                Err(ApiError::Timeout)
-            }
-        }
-    } else {
-        handle
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+/// Converts an engine `QueryResult` to an HTTP `QueryResponse` with JSON values.
+pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
+    QueryResponse {
+        columns: result.columns.clone(),
+        rows: result
+            .rows
+            .iter()
+            .map(|row| row.iter().map(value_to_json).collect())
+            .collect(),
+        execution_time_ms: result.execution_time_ms,
+        rows_scanned: result.rows_scanned,
     }
 }
 
-/// Records query metrics after execution.
-pub fn record_metrics(state: &AppState, lang: Language, result: &Result<QueryResponse, ApiError>) {
-    match result {
-        Ok(resp) => {
-            let dur_us = resp.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
-            state.metrics().record_query(lang, dur_us);
+/// Converts optional JSON params to engine param format.
+pub fn convert_json_params(
+    params: Option<&serde_json::Value>,
+) -> Result<Option<HashMap<String, grafeo_common::Value>>, ApiError> {
+    match params {
+        Some(v) => {
+            let map: HashMap<String, grafeo_common::Value> = serde_json::from_value(v.clone())
+                .map_err(|e| ApiError::bad_request(format!("invalid params: {e}")))?;
+            Ok(Some(map))
         }
-        Err(_) => {
-            state.metrics().record_query_error(lang);
-        }
+        None => Ok(None),
     }
 }

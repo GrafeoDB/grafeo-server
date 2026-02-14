@@ -1,17 +1,16 @@
 //! Transaction management endpoints.
-
-use std::sync::Arc;
+//!
+//! Session lifecycle is delegated to `grafeo_service::query::QueryService`.
 
 use axum::extract::{Json, State};
 use axum::http::HeaderMap;
 
-use crate::database_manager::DatabaseEntry;
+use grafeo_service::query::QueryService;
+
 use crate::error::{ApiError, ErrorBody};
-use crate::metrics::determine_language;
 use crate::state::AppState;
 
-use super::helpers::{effective_timeout, record_metrics, run_with_timeout};
-use super::query::run_query;
+use super::helpers::{convert_json_params, query_result_to_response};
 use super::types::{QueryRequest, QueryResponse, TransactionResponse, TxBeginRequest};
 
 fn get_session_id(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -19,25 +18,7 @@ fn get_session_id(headers: &HeaderMap) -> Result<String, ApiError> {
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or(ApiError::BadRequest(
-            "missing X-Session-Id header".to_string(),
-        ))
-}
-
-/// Resolves the database entry for an existing transaction session.
-fn resolve_tx_db(
-    state: &AppState,
-    session_id: &str,
-) -> Result<(String, Arc<DatabaseEntry>), ApiError> {
-    let db_name = state
-        .databases()
-        .resolve_session(session_id)
-        .ok_or(ApiError::SessionNotFound)?;
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or(ApiError::SessionNotFound)?;
-    Ok((db_name, entry))
+        .ok_or_else(|| ApiError::bad_request("missing X-Session-Id header"))
 }
 
 /// Begin a new transaction.
@@ -63,26 +44,10 @@ pub async fn tx_begin(
     let db_name = body
         .as_ref()
         .and_then(|b| b.database.as_deref())
-        .unwrap_or("default")
-        .to_string();
+        .unwrap_or("default");
 
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
-
-    let databases = state.databases();
-    let session_id = tokio::task::spawn_blocking(move || {
-        let mut engine_session = entry.db.session();
-        engine_session
-            .begin_tx()
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Ok::<_, ApiError>(entry.sessions.create(engine_session))
-    })
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))??;
-
-    databases.register_session(&session_id, &db_name);
+    let session_id =
+        QueryService::begin_tx(state.databases(), state.sessions(), db_name).await?;
 
     Ok(Json(TransactionResponse {
         session_id,
@@ -113,25 +78,22 @@ pub async fn tx_query(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
-    let ttl = state.session_ttl();
-    let (_, entry) = resolve_tx_db(&state, &session_id)?;
+    let params = convert_json_params(req.params.as_ref())?;
+    let timeout = state.effective_timeout(req.timeout_ms);
 
-    let session_arc = entry
-        .sessions
-        .get(&session_id, ttl)
-        .ok_or(ApiError::SessionNotFound)?;
+    let result = QueryService::tx_execute(
+        state.sessions(),
+        state.metrics(),
+        &session_id,
+        state.session_ttl(),
+        &req.query,
+        req.language.as_deref(),
+        params,
+        timeout,
+    )
+    .await?;
 
-    let timeout = effective_timeout(&state, req.timeout_ms);
-    let lang = determine_language(req.language.as_deref());
-
-    let result = run_with_timeout(timeout, move || {
-        let session = session_arc.lock();
-        run_query(&session.engine_session, &req)
-    })
-    .await;
-
-    record_metrics(&state, lang, &result);
-    Ok(Json(result?))
+    Ok(Json(query_result_to_response(&result)))
 }
 
 /// Commit a transaction.
@@ -156,26 +118,8 @@ pub async fn tx_commit(
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
-    let ttl = state.session_ttl();
-    let (_, entry) = resolve_tx_db(&state, &session_id)?;
 
-    let session_arc = entry
-        .sessions
-        .get(&session_id, ttl)
-        .ok_or(ApiError::SessionNotFound)?;
-
-    tokio::task::spawn_blocking(move || {
-        let mut session = session_arc.lock();
-        session
-            .engine_session
-            .commit()
-            .map_err(|e| ApiError::Internal(e.to_string()))
-    })
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))??;
-
-    entry.sessions.remove(&session_id);
-    state.databases().unregister_session(&session_id);
+    QueryService::commit(state.sessions(), &session_id, state.session_ttl()).await?;
 
     Ok(Json(TransactionResponse {
         session_id,
@@ -205,26 +149,8 @@ pub async fn tx_rollback(
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
-    let ttl = state.session_ttl();
-    let (_, entry) = resolve_tx_db(&state, &session_id)?;
 
-    let session_arc = entry
-        .sessions
-        .get(&session_id, ttl)
-        .ok_or(ApiError::SessionNotFound)?;
-
-    tokio::task::spawn_blocking(move || {
-        let mut session = session_arc.lock();
-        session
-            .engine_session
-            .rollback()
-            .map_err(|e| ApiError::Internal(e.to_string()))
-    })
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))??;
-
-    entry.sessions.remove(&session_id);
-    state.databases().unregister_session(&session_id);
+    QueryService::rollback(state.sessions(), &session_id, state.session_ttl()).await?;
 
     Ok(Json(TransactionResponse {
         session_id,

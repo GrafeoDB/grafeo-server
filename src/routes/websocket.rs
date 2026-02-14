@@ -5,12 +5,12 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 
-use crate::error::ApiError;
-use crate::metrics::determine_language;
+use grafeo_service::error::ServiceError;
+use grafeo_service::query::QueryService;
+
 use crate::state::AppState;
 
-use super::helpers::{effective_timeout, record_metrics, resolve_db_name, run_with_timeout};
-use super::query::run_query;
+use super::helpers::{convert_json_params, query_result_to_response};
 use super::types::{QueryRequest, WsClientMessage, WsServerMessage};
 
 /// WebSocket upgrade handler.
@@ -82,36 +82,40 @@ where
 
 /// Executes a query and returns a `WsServerMessage`.
 async fn process_query(state: &AppState, id: Option<String>, req: QueryRequest) -> WsServerMessage {
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = match state.databases().get(&db_name) {
-        Some(e) => e,
-        None => {
+    let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
+    let params = match convert_json_params(req.params.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
             return WsServerMessage::Error {
                 id,
-                error: "not_found".to_string(),
-                detail: Some(format!("database '{db_name}' not found")),
+                error: "bad_request".to_string(),
+                detail: Some(e.to_string()),
             };
         }
     };
+    let timeout = state.effective_timeout(req.timeout_ms);
 
-    let timeout = effective_timeout(state, req.timeout_ms);
-    let lang = determine_language(req.language.as_deref());
-
-    let result = run_with_timeout(timeout, move || {
-        let session = entry.db.session();
-        run_query(&session, &req)
-    })
+    let result = QueryService::execute(
+        state.databases(),
+        state.metrics(),
+        db_name,
+        &req.query,
+        req.language.as_deref(),
+        params,
+        timeout,
+    )
     .await;
 
-    record_metrics(state, lang, &result);
-
     match result {
-        Ok(response) => WsServerMessage::Result { id, response },
+        Ok(qr) => WsServerMessage::Result {
+            id,
+            response: query_result_to_response(&qr),
+        },
         Err(e) => {
             let (error, detail) = match &e {
-                ApiError::BadRequest(msg) => ("bad_request".to_string(), Some(msg.clone())),
-                ApiError::Timeout => ("timeout".to_string(), None),
-                ApiError::NotFound(msg) => ("not_found".to_string(), Some(msg.clone())),
+                ServiceError::BadRequest(msg) => ("bad_request".to_string(), Some(msg.clone())),
+                ServiceError::Timeout => ("timeout".to_string(), None),
+                ServiceError::NotFound(msg) => ("not_found".to_string(), Some(msg.clone())),
                 _ => ("internal_error".to_string(), Some(e.to_string())),
             };
             WsServerMessage::Error { id, error, detail }

@@ -1,3 +1,4 @@
+#![cfg(feature = "http")]
 //! Integration tests for the Grafeo Server HTTP API.
 //!
 //! Each test starts an in-memory server on an ephemeral port and uses reqwest

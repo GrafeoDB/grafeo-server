@@ -1,13 +1,17 @@
 //! Batch query endpoint — execute multiple queries in a single transaction.
+//!
+//! Delegates to `grafeo_service::query::QueryService::batch_execute`.
 
 use axum::extract::{Json, State};
+
+use grafeo_service::query::QueryService;
+use grafeo_service::types::BatchQuery;
 
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
-use super::helpers::{effective_timeout, resolve_db_name, run_with_timeout};
-use super::query::run_query;
-use super::types::{BatchQueryRequest, BatchQueryResponse, QueryRequest, QueryResponse};
+use super::helpers::{convert_json_params, query_result_to_response};
+use super::types::{BatchQueryRequest, BatchQueryResponse};
 
 /// Execute a batch of queries in a single transaction.
 ///
@@ -36,53 +40,35 @@ pub async fn batch_query(
         }));
     }
 
-    let db_name = resolve_db_name(req.database.as_ref()).to_string();
-    let entry = state
-        .databases()
-        .get(&db_name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{db_name}' not found")))?;
+    let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
+    let timeout = state.effective_timeout(req.timeout_ms);
 
-    let timeout = effective_timeout(&state, req.timeout_ms);
-
-    let result = run_with_timeout(timeout, move || {
-        let mut session = entry.db.session();
-        session
-            .begin_tx()
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        let mut results: Vec<QueryResponse> = Vec::with_capacity(req.queries.len());
-
-        for (idx, item) in req.queries.iter().enumerate() {
-            let query_req = QueryRequest {
-                query: item.query.clone(),
+    // Convert HTTP batch items to service BatchQuery (JSON params → engine params)
+    let batch_queries: Vec<BatchQuery> = req
+        .queries
+        .iter()
+        .map(|item| {
+            let params = convert_json_params(item.params.as_ref())?;
+            Ok(BatchQuery {
+                statement: item.query.clone(),
                 language: item.language.clone(),
-                params: item.params.clone(),
-                database: None,
-                timeout_ms: None,
-            };
-            match run_query(&session, &query_req) {
-                Ok(resp) => results.push(resp),
-                Err(e) => {
-                    let _ = session.rollback();
-                    return Err(ApiError::BadRequest(format!(
-                        "query at index {idx} failed: {e}"
-                    )));
-                }
-            }
-        }
-
-        session
-            .commit()
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        let total_ms: f64 = results.iter().filter_map(|r| r.execution_time_ms).sum();
-
-        Ok(BatchQueryResponse {
-            results,
-            total_execution_time_ms: total_ms,
+                params,
+            })
         })
-    })
-    .await?;
+        .collect::<Result<Vec<_>, ApiError>>()?;
 
-    Ok(Json(result))
+    let results =
+        QueryService::batch_execute(state.databases(), state.metrics(), db_name, batch_queries, timeout)
+            .await?;
+
+    let responses: Vec<_> = results.iter().map(query_result_to_response).collect();
+    let total_ms: f64 = results
+        .iter()
+        .filter_map(|r| r.execution_time_ms)
+        .sum();
+
+    Ok(Json(BatchQueryResponse {
+        results: responses,
+        total_execution_time_ms: total_ms,
+    }))
 }
