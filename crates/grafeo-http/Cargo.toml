@@ -1,0 +1,55 @@
+[package]
+name = "grafeo-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP/REST transport adapter for Grafeo Server"
+
+[dependencies]
+grafeo-service = { workspace = true }
+grafeo-engine = { workspace = true }
+grafeo-common = { workspace = true }
+
+# Web framework
+axum = { version = "0.8", features = ["json", "query", "ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
+
+# OpenAPI documentation
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# System info
+sysinfo = "0.38.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = "1.0"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+base64 = { workspace = true }
+futures-util = "0.3"
+tokio = { workspace = true }
+
+# TLS (optional)
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
+
+[features]
+default = []
+auth = ["grafeo-service/auth"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
+
+[lints]
+workspace = true

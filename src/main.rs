@@ -5,9 +5,10 @@
 //! - `gwp`   — GQL Wire Protocol (gRPC) on the GWP port (default 7687)
 //! - both    — HTTP as primary, GWP spawned alongside
 
-use grafeo_server::AppState;
 use grafeo_server::config::Config;
 
+use grafeo_service::types::EnabledFeatures;
+use grafeo_service::{ServiceConfig, ServiceState};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -26,7 +27,21 @@ async fn main() {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
-    let state = AppState::new(&config);
+    let service_config = ServiceConfig {
+        data_dir: config.data_dir.clone(),
+        session_ttl: config.session_ttl,
+        query_timeout: config.query_timeout,
+        rate_limit: config.rate_limit,
+        rate_limit_window: config.rate_limit_window,
+        #[cfg(feature = "auth")]
+        auth_token: config.auth_token.clone(),
+        #[cfg(feature = "auth")]
+        auth_user: config.auth_user.clone(),
+        #[cfg(feature = "auth")]
+        auth_password: config.auth_password.clone(),
+    };
+
+    let service = ServiceState::new(&service_config);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -35,7 +50,7 @@ async fn main() {
     );
 
     // Spawn session + rate-limiter cleanup task
-    let cleanup_state = state.clone();
+    let cleanup_state = service.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -54,9 +69,9 @@ async fn main() {
     {
         let gwp_addr =
             std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.gwp_port);
-        let backend = grafeo_server::gwp::GrafeoBackend::new(state);
+        let backend = grafeo_gwp::GrafeoBackend::new(service);
         tracing::info!(%gwp_addr, "GWP server ready (standalone)");
-        if let Err(e) = gwp::server::GqlServer::serve(backend, gwp_addr).await {
+        if let Err(e) = grafeo_gwp::serve(backend, gwp_addr).await {
             tracing::error!("GWP server error: {e}");
         }
         tracing::info!("Grafeo Server shut down");
@@ -70,7 +85,19 @@ async fn main() {
     {
         let addr =
             std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.port);
-        let app = grafeo_server::router(state.clone());
+
+        let features = detect_features();
+        let app_state =
+            grafeo_http::AppState::new(service.clone(), config.cors_origins.clone(), features);
+
+        let mut app = grafeo_http::router(app_state);
+
+        // Merge Studio UI routes if enabled
+        #[cfg(feature = "studio")]
+        {
+            app = grafeo_studio::router().merge(app);
+        }
+
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .expect("failed to bind");
@@ -78,12 +105,12 @@ async fn main() {
         // Spawn GWP alongside HTTP if both features are enabled
         #[cfg(feature = "gwp")]
         {
-            let gwp_state = state.clone();
+            let gwp_state = service.clone();
             let gwp_addr = std::net::SocketAddr::new(addr.ip(), config.gwp_port);
             tokio::spawn(async move {
-                let backend = grafeo_server::gwp::GrafeoBackend::new(gwp_state);
+                let backend = grafeo_gwp::GrafeoBackend::new(gwp_state);
                 tracing::info!(%gwp_addr, "GWP (gRPC) server ready");
-                if let Err(e) = gwp::server::GqlServer::serve(backend, gwp_addr).await {
+                if let Err(e) = grafeo_gwp::serve(backend, gwp_addr).await {
                     tracing::error!("GWP server error: {e}");
                 }
             });
@@ -91,7 +118,7 @@ async fn main() {
 
         #[cfg(feature = "tls")]
         if config.tls_enabled() {
-            let tls_config = grafeo_server::tls::load_rustls_config(
+            let tls_config = grafeo_http::tls::load_rustls_config(
                 config.tls_cert.as_ref().unwrap(),
                 config.tls_key.as_ref().unwrap(),
             )
@@ -99,7 +126,7 @@ async fn main() {
 
             tracing::info!(%addr, "Grafeo Server ready (HTTPS)");
 
-            grafeo_server::tls::serve_tls(listener, tls_config, app, shutdown_signal()).await;
+            grafeo_http::tls::serve_tls(listener, tls_config, app, shutdown_signal()).await;
 
             tracing::info!("Grafeo Server shut down");
             return;
@@ -122,6 +149,91 @@ async fn main() {
     #[cfg(not(any(feature = "http", feature = "gwp")))]
     {
         tracing::error!("No transport features enabled. Enable 'http' and/or 'gwp'.");
+    }
+}
+
+/// Detects compiled feature flags at build time.
+///
+/// This function runs in the binary crate which has all feature flags,
+/// so `cfg!()` checks work correctly. The result is passed to transport
+/// crates that need to report enabled features (e.g. health endpoint).
+fn detect_features() -> EnabledFeatures {
+    let mut languages = Vec::new();
+    if cfg!(feature = "gql") {
+        languages.push("gql".to_string());
+    }
+    if cfg!(feature = "cypher") {
+        languages.push("cypher".to_string());
+    }
+    if cfg!(feature = "sparql") {
+        languages.push("sparql".to_string());
+    }
+    if cfg!(feature = "gremlin") {
+        languages.push("gremlin".to_string());
+    }
+    if cfg!(feature = "graphql") {
+        languages.push("graphql".to_string());
+    }
+    if cfg!(feature = "sql-pgq") {
+        languages.push("sql-pgq".to_string());
+    }
+
+    let mut engine = Vec::new();
+    if cfg!(feature = "parallel") {
+        engine.push("parallel".to_string());
+    }
+    if cfg!(feature = "wal") {
+        engine.push("wal".to_string());
+    }
+    if cfg!(feature = "spill") {
+        engine.push("spill".to_string());
+    }
+    if cfg!(feature = "mmap") {
+        engine.push("mmap".to_string());
+    }
+    if cfg!(feature = "rdf") {
+        engine.push("rdf".to_string());
+    }
+    if cfg!(feature = "vector-index") {
+        engine.push("vector-index".to_string());
+    }
+    if cfg!(feature = "text-index") {
+        engine.push("text-index".to_string());
+    }
+    if cfg!(feature = "hybrid-search") {
+        engine.push("hybrid-search".to_string());
+    }
+    if cfg!(feature = "cdc") {
+        engine.push("cdc".to_string());
+    }
+    if cfg!(feature = "embed") {
+        engine.push("embed".to_string());
+    }
+
+    let mut server = Vec::new();
+    if cfg!(feature = "auth") {
+        server.push("auth".to_string());
+    }
+    if cfg!(feature = "tls") {
+        server.push("tls".to_string());
+    }
+    if cfg!(feature = "owl-schema") {
+        server.push("owl-schema".to_string());
+    }
+    if cfg!(feature = "rdfs-schema") {
+        server.push("rdfs-schema".to_string());
+    }
+    if cfg!(feature = "json-schema") {
+        server.push("json-schema".to_string());
+    }
+    if cfg!(feature = "gwp") {
+        server.push("gwp".to_string());
+    }
+
+    EnabledFeatures {
+        languages,
+        engine,
+        server,
     }
 }
 

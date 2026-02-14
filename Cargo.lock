@@ -1023,6 +1023,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafeo-bolt"
+version = "0.4.0"
+
+[[package]]
 name = "grafeo-common"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1097,42 +1101,68 @@ dependencies = [
 ]
 
 [[package]]
-name = "grafeo-server"
+name = "grafeo-gwp"
 version = "0.4.0"
 dependencies = [
- "axum",
- "base64 0.22.1",
- "clap",
  "dashmap",
- "futures-util",
  "grafeo-common",
  "grafeo-engine",
  "grafeo-service",
  "gwp",
+ "parking_lot",
+ "tokio",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "grafeo-http"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "grafeo-common",
+ "grafeo-engine",
+ "grafeo-service",
  "hyper",
  "hyper-util",
- "mime_guess",
- "parking_lot",
- "reqwest",
- "rust-embed",
  "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
  "sysinfo",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
- "tonic",
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+]
+
+[[package]]
+name = "grafeo-server"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "grafeo-gwp",
+ "grafeo-http",
+ "grafeo-service",
+ "grafeo-studio",
+ "gwp",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1156,6 +1186,15 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "grafeo-studio"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "mime_guess",
+ "rust-embed",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+[package]
+name = "grafeo-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded web UI for Grafeo Server (static file serving via rust-embed)"
+
+[dependencies]
+axum = { version = "0.8" }
+rust-embed = "8.5"
+mime_guess = "2.0"
+
+[lints]
+workspace = true

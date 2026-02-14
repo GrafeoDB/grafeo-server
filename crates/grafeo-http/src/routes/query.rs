@@ -7,11 +7,10 @@ use axum::extract::{Json, State};
 
 use grafeo_service::query::QueryService;
 
+use crate::encode::{convert_json_params, query_result_to_response};
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
-
-use super::helpers::{convert_json_params, query_result_to_response};
-use super::types::{QueryRequest, QueryResponse};
+use crate::types::{QueryRequest, QueryResponse};
 
 /// Shared implementation for all auto-commit query endpoints.
 async fn execute_query(

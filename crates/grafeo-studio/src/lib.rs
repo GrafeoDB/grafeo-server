@@ -1,4 +1,4 @@
-//! Embedded web UI served from compiled-in static files.
+//! Grafeo Studio — embedded web UI served from compiled-in static files.
 //!
 //! The `client/dist/` directory is embedded at compile time using `rust-embed`.
 //! If the directory doesn't exist at build time (no UI built), endpoints
@@ -11,7 +11,7 @@ use axum::routing::get;
 use rust_embed::Embed;
 
 #[derive(Embed)]
-#[folder = "client/dist/"]
+#[folder = "../../client/dist/"]
 #[prefix = ""]
 struct UiAssets;
 

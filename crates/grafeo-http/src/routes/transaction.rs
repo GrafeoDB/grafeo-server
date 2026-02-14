@@ -7,11 +7,10 @@ use axum::http::HeaderMap;
 
 use grafeo_service::query::QueryService;
 
+use crate::encode::{convert_json_params, query_result_to_response};
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
-
-use super::helpers::{convert_json_params, query_result_to_response};
-use super::types::{QueryRequest, QueryResponse, TransactionResponse, TxBeginRequest};
+use crate::types::{QueryRequest, QueryResponse, TransactionResponse, TxBeginRequest};
 
 fn get_session_id(headers: &HeaderMap) -> Result<String, ApiError> {
     headers

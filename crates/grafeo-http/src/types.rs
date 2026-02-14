@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 pub use grafeo_service::types::{
-    CreateDatabaseRequest, DatabaseOptions, DatabaseSummary, DatabaseType, StorageMode,
+    CreateDatabaseRequest, DatabaseOptions, DatabaseSummary, DatabaseType, EnabledFeatures,
+    StorageMode,
 };
 
 #[derive(Deserialize, ToSchema)]
@@ -71,98 +72,6 @@ pub struct HealthResponse {
     pub active_sessions: usize,
     /// Compiled feature flags for this build.
     pub features: EnabledFeatures,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct EnabledFeatures {
-    /// Query language support.
-    pub languages: Vec<String>,
-    /// Engine capabilities.
-    pub engine: Vec<String>,
-    /// Server capabilities.
-    pub server: Vec<String>,
-}
-
-impl EnabledFeatures {
-    pub fn detect() -> Self {
-        let mut languages = Vec::new();
-        if cfg!(feature = "gql") {
-            languages.push("gql".to_string());
-        }
-        if cfg!(feature = "cypher") {
-            languages.push("cypher".to_string());
-        }
-        if cfg!(feature = "sparql") {
-            languages.push("sparql".to_string());
-        }
-        if cfg!(feature = "gremlin") {
-            languages.push("gremlin".to_string());
-        }
-        if cfg!(feature = "graphql") {
-            languages.push("graphql".to_string());
-        }
-        if cfg!(feature = "sql-pgq") {
-            languages.push("sql-pgq".to_string());
-        }
-
-        let mut engine = Vec::new();
-        if cfg!(feature = "parallel") {
-            engine.push("parallel".to_string());
-        }
-        if cfg!(feature = "wal") {
-            engine.push("wal".to_string());
-        }
-        if cfg!(feature = "spill") {
-            engine.push("spill".to_string());
-        }
-        if cfg!(feature = "mmap") {
-            engine.push("mmap".to_string());
-        }
-        if cfg!(feature = "rdf") {
-            engine.push("rdf".to_string());
-        }
-        if cfg!(feature = "vector-index") {
-            engine.push("vector-index".to_string());
-        }
-        if cfg!(feature = "text-index") {
-            engine.push("text-index".to_string());
-        }
-        if cfg!(feature = "hybrid-search") {
-            engine.push("hybrid-search".to_string());
-        }
-        if cfg!(feature = "cdc") {
-            engine.push("cdc".to_string());
-        }
-        if cfg!(feature = "embed") {
-            engine.push("embed".to_string());
-        }
-
-        let mut server = Vec::new();
-        if cfg!(feature = "auth") {
-            server.push("auth".to_string());
-        }
-        if cfg!(feature = "tls") {
-            server.push("tls".to_string());
-        }
-        if cfg!(feature = "owl-schema") {
-            server.push("owl-schema".to_string());
-        }
-        if cfg!(feature = "rdfs-schema") {
-            server.push("rdfs-schema".to_string());
-        }
-        if cfg!(feature = "json-schema") {
-            server.push("json-schema".to_string());
-        }
-        if cfg!(feature = "gwp") {
-            server.push("gwp".to_string());
-        }
-
-        Self {
-            languages,
-            engine,
-            server,
-        }
-    }
 }
 
 #[derive(Serialize, ToSchema)]

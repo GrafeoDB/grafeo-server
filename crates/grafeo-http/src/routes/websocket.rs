@@ -8,10 +8,9 @@ use futures_util::{SinkExt, StreamExt};
 use grafeo_service::error::ServiceError;
 use grafeo_service::query::QueryService;
 
+use crate::encode::{convert_json_params, query_result_to_response};
 use crate::state::AppState;
-
-use super::helpers::{convert_json_params, query_result_to_response};
-use super::types::{QueryRequest, WsClientMessage, WsServerMessage};
+use crate::types::{QueryRequest, WsClientMessage, WsServerMessage};
 
 /// WebSocket upgrade handler.
 ///

@@ -1,19 +1,19 @@
-//! Application state: wraps `ServiceState` with HTTP-specific fields.
+//! HTTP application state: wraps `ServiceState` with HTTP-specific fields.
 //!
 //! `AppState` provides transparent access to all `ServiceState` methods
-//! via `Deref`, and adds transport-specific config like CORS origins.
+//! via `Deref`, and adds transport-specific config like CORS origins and
+//! compiled feature flags.
 
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use grafeo_service::{ServiceConfig, ServiceState};
+use grafeo_service::ServiceState;
+use grafeo_service::types::EnabledFeatures;
 
-use crate::config::Config;
-
-/// Shared application state, cloneable across handlers.
+/// Shared HTTP application state, cloneable across handlers.
 ///
-/// Wraps `ServiceState` (business logic) and adds transport-specific fields.
+/// Wraps `ServiceState` (business logic) and adds HTTP-specific fields.
 /// All `ServiceState` methods are available directly via `Deref`.
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +23,7 @@ pub struct AppState {
 struct AppInner {
     service: ServiceState,
     cors_origins: Vec<String>,
+    enabled_features: EnabledFeatures,
 }
 
 impl Deref for AppState {
@@ -34,26 +35,17 @@ impl Deref for AppState {
 }
 
 impl AppState {
-    /// Creates a new application state from config.
-    pub fn new(config: &Config) -> Self {
-        let service_config = ServiceConfig {
-            data_dir: config.data_dir.clone(),
-            session_ttl: config.session_ttl,
-            query_timeout: config.query_timeout,
-            rate_limit: config.rate_limit,
-            rate_limit_window: config.rate_limit_window,
-            #[cfg(feature = "auth")]
-            auth_token: config.auth_token.clone(),
-            #[cfg(feature = "auth")]
-            auth_user: config.auth_user.clone(),
-            #[cfg(feature = "auth")]
-            auth_password: config.auth_password.clone(),
-        };
-
+    /// Creates a new HTTP application state.
+    pub fn new(
+        service: ServiceState,
+        cors_origins: Vec<String>,
+        enabled_features: EnabledFeatures,
+    ) -> Self {
         Self {
             inner: Arc::new(AppInner {
-                service: ServiceState::new(&service_config),
-                cors_origins: config.cors_origins.clone(),
+                service,
+                cors_origins,
+                enabled_features,
             }),
         }
     }
@@ -64,6 +56,7 @@ impl AppState {
             inner: Arc::new(AppInner {
                 service: ServiceState::new_in_memory(session_ttl),
                 cors_origins: vec![],
+                enabled_features: EnabledFeatures::default(),
             }),
         }
     }
@@ -75,6 +68,7 @@ impl AppState {
             inner: Arc::new(AppInner {
                 service: ServiceState::new_in_memory_with_auth(session_ttl, auth_token),
                 cors_origins: vec![],
+                enabled_features: EnabledFeatures::default(),
             }),
         }
     }
@@ -86,6 +80,7 @@ impl AppState {
             inner: Arc::new(AppInner {
                 service: ServiceState::new_in_memory_with_basic_auth(session_ttl, user, password),
                 cors_origins: vec![],
+                enabled_features: EnabledFeatures::default(),
             }),
         }
     }
@@ -104,6 +99,7 @@ impl AppState {
                     window,
                 ),
                 cors_origins: vec![],
+                enabled_features: EnabledFeatures::default(),
             }),
         }
     }
@@ -111,6 +107,11 @@ impl AppState {
     /// Returns the configured CORS allowed origins.
     pub fn cors_origins(&self) -> &[String] {
         &self.inner.cors_origins
+    }
+
+    /// Returns the compiled feature flags.
+    pub fn enabled_features(&self) -> &EnabledFeatures {
+        &self.inner.enabled_features
     }
 
     /// Returns a reference to the underlying service state.

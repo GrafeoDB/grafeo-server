@@ -5,8 +5,7 @@ use axum::response::IntoResponse;
 
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
-
-use super::types::{
+use crate::types::{
     CreateDatabaseRequest, DatabaseInfoResponse, DatabaseSchemaResponse, DatabaseStatsResponse,
     DatabaseSummary, EdgeTypeInfo, LabelInfo, ListDatabasesResponse,
 };

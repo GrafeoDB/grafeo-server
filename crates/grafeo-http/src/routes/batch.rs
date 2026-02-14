@@ -7,11 +7,10 @@ use axum::extract::{Json, State};
 use grafeo_service::query::QueryService;
 use grafeo_service::types::BatchQuery;
 
+use crate::encode::{convert_json_params, query_result_to_response};
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
-
-use super::helpers::{convert_json_params, query_result_to_response};
-use super::types::{BatchQueryRequest, BatchQueryResponse};
+use crate::types::{BatchQueryRequest, BatchQueryResponse};
 
 /// Execute a batch of queries in a single transaction.
 ///

@@ -1,17 +1,26 @@
-//! HTTP API routes for Grafeo Server.
+//! Grafeo HTTP — REST API transport adapter for Grafeo Server.
+//!
+//! Provides the HTTP/REST interface including:
+//! - Query endpoints (GQL, Cypher, GraphQL, Gremlin, SPARQL, SQL/PGQ)
+//! - Transaction management (begin/query/commit/rollback)
+//! - Batch queries
+//! - WebSocket endpoint
+//! - Database management (create/delete/list/info)
+//! - System/health endpoints
+//! - OpenAPI/Swagger UI
+//! - Rate limiting, auth, request-ID middleware
 
-mod batch;
-mod database;
-mod helpers;
-mod query;
-mod system;
-mod transaction;
+pub mod encode;
+pub mod error;
+pub mod middleware;
+pub mod routes;
+pub mod state;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
-mod websocket;
 
 use axum::Router;
 use axum::http::{HeaderValue, Method};
-use axum::middleware;
 use axum::routing::{delete, get, post};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
@@ -19,12 +28,10 @@ use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::error::ErrorBody;
-use crate::rate_limit::rate_limit_middleware;
-use crate::request_id::request_id_middleware;
-use crate::state::AppState;
-
+use error::ErrorBody;
 use types::DatabaseSummary;
+
+pub use state::AppState;
 
 // ---------------------------------------------------------------------------
 // OpenAPI
@@ -39,25 +46,25 @@ use types::DatabaseSummary;
         license(name = "Apache-2.0"),
     ),
     paths(
-        system::health,
-        system::system_resources,
-        query::query,
-        query::cypher,
-        query::graphql,
-        query::gremlin,
-        query::sparql,
-        query::sql,
-        batch::batch_query,
-        transaction::tx_begin,
-        transaction::tx_query,
-        transaction::tx_commit,
-        transaction::tx_rollback,
-        database::list_databases,
-        database::create_database,
-        database::delete_database,
-        database::database_info,
-        database::database_stats,
-        database::database_schema,
+        routes::system::health,
+        routes::system::system_resources,
+        routes::query::query,
+        routes::query::cypher,
+        routes::query::graphql,
+        routes::query::gremlin,
+        routes::query::sparql,
+        routes::query::sql,
+        routes::batch::batch_query,
+        routes::transaction::tx_begin,
+        routes::transaction::tx_query,
+        routes::transaction::tx_commit,
+        routes::transaction::tx_rollback,
+        routes::database::list_databases,
+        routes::database::create_database,
+        routes::database::delete_database,
+        routes::database::database_info,
+        routes::database::database_stats,
+        routes::database::database_schema,
     ),
     components(
         schemas(
@@ -78,77 +85,75 @@ use types::DatabaseSummary;
         (name = "System", description = "System and health endpoints"),
     )
 )]
-pub struct ApiDoc;
+struct ApiDoc;
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
-/// Builds the main application router.
+/// Builds the HTTP API router.
+///
+/// Call this from the binary crate to get a fully-wired axum `Router`.
+/// Optionally merge Studio UI routes before serving.
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         // Query endpoints
-        .route("/query", post(query::query))
-        .route("/cypher", post(query::cypher))
-        .route("/graphql", post(query::graphql))
-        .route("/gremlin", post(query::gremlin))
-        .route("/sparql", post(query::sparql))
-        .route("/sql", post(query::sql))
-        .route("/batch", post(batch::batch_query))
+        .route("/query", post(routes::query::query))
+        .route("/cypher", post(routes::query::cypher))
+        .route("/graphql", post(routes::query::graphql))
+        .route("/gremlin", post(routes::query::gremlin))
+        .route("/sparql", post(routes::query::sparql))
+        .route("/sql", post(routes::query::sql))
+        .route("/batch", post(routes::batch::batch_query))
         // WebSocket
-        .route("/ws", get(websocket::ws_handler))
+        .route("/ws", get(routes::websocket::ws_handler))
         // Transaction endpoints
-        .route("/tx/begin", post(transaction::tx_begin))
-        .route("/tx/query", post(transaction::tx_query))
-        .route("/tx/commit", post(transaction::tx_commit))
-        .route("/tx/rollback", post(transaction::tx_rollback))
+        .route("/tx/begin", post(routes::transaction::tx_begin))
+        .route("/tx/query", post(routes::transaction::tx_query))
+        .route("/tx/commit", post(routes::transaction::tx_commit))
+        .route("/tx/rollback", post(routes::transaction::tx_rollback))
         // Database management
         .route(
             "/db",
-            get(database::list_databases).post(database::create_database),
+            get(routes::database::list_databases).post(routes::database::create_database),
         )
         .route(
             "/db/{name}",
-            delete(database::delete_database).get(database::database_info),
+            delete(routes::database::delete_database).get(routes::database::database_info),
         )
-        .route("/db/{name}/stats", get(database::database_stats))
-        .route("/db/{name}/schema", get(database::database_schema))
+        .route("/db/{name}/stats", get(routes::database::database_stats))
+        .route("/db/{name}/schema", get(routes::database::database_schema))
         // System
-        .route("/health", get(system::health))
-        .route("/system/resources", get(system::system_resources))
-        .route("/metrics", get(system::metrics_endpoint))
+        .route("/health", get(routes::system::health))
+        .route("/system/resources", get(routes::system::system_resources))
+        .route("/metrics", get(routes::system::metrics_endpoint))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
     #[cfg(feature = "auth")]
-    let api = api.layer(middleware::from_fn_with_state(
+    let api = api.layer(axum::middleware::from_fn_with_state(
         state.clone(),
-        crate::auth::auth_middleware,
+        middleware::auth::auth_middleware,
     ));
 
     let api = api
-        .layer(middleware::from_fn_with_state(
+        .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            rate_limit_middleware,
+            middleware::rate_limit::rate_limit_middleware,
         ))
-        .layer(middleware::from_fn(request_id_middleware))
+        .layer(axum::middleware::from_fn(
+            middleware::request_id::request_id_middleware,
+        ))
         .layer(cors_layer(&state))
-        .with_state(state.clone());
+        .with_state(state);
 
-    // Studio UI: embedded React app via rust-embed
-    #[cfg(feature = "studio")]
-    let app = crate::ui::router().merge(api);
-    #[cfg(not(feature = "studio"))]
-    let app = api;
-
-    app.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
+    api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
 }
 
 fn cors_layer(state: &AppState) -> CorsLayer {
     let origins = state.cors_origins();
 
     // No origins configured → no CORS headers (deny cross-origin by default).
-    // Use --cors-origins "*" for permissive or specify exact origins.
     if origins.is_empty() {
         return CorsLayer::new();
     }

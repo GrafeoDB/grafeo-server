@@ -5,8 +5,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::state::AppState;
-
-use super::types::{EnabledFeatures, HealthResponse, ResourceDefaults, SystemResources};
+use crate::types::{HealthResponse, ResourceDefaults, SystemResources};
 
 /// Check server health.
 ///
@@ -28,7 +27,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         persistent: dbs.data_dir().is_some(),
         uptime_seconds: state.uptime_secs(),
         active_sessions: state.sessions().active_count(),
-        features: EnabledFeatures::detect(),
+        features: state.enabled_features().clone(),
     })
 }
 
@@ -65,14 +64,21 @@ pub async fn system_resources(State(state): State<AppState>) -> impl IntoRespons
 
     let persistent_available = state.databases().data_dir().is_some();
 
-    #[allow(unused_mut)]
+    // Available types are determined by the server features passed through AppState.
+    // The binary crate populates EnabledFeatures which we could inspect,
+    // but for now just report the always-available types plus schema types
+    // based on the features list.
+    let features = state.enabled_features();
     let mut available_types = vec!["Lpg".to_string(), "Rdf".to_string()];
-    #[cfg(feature = "owl-schema")]
-    available_types.push("OwlSchema".to_string());
-    #[cfg(feature = "rdfs-schema")]
-    available_types.push("RdfsSchema".to_string());
-    #[cfg(feature = "json-schema")]
-    available_types.push("JsonSchema".to_string());
+    if features.server.iter().any(|s| s == "owl-schema") {
+        available_types.push("OwlSchema".to_string());
+    }
+    if features.server.iter().any(|s| s == "rdfs-schema") {
+        available_types.push("RdfsSchema".to_string());
+    }
+    if features.server.iter().any(|s| s == "json-schema") {
+        available_types.push("JsonSchema".to_string());
+    }
 
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
