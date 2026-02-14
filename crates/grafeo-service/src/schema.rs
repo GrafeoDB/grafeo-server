@@ -5,12 +5,16 @@
 
 use grafeo_engine::GrafeoDB;
 
-use crate::error::ApiError;
+use crate::error::ServiceError;
 use crate::types::DatabaseType;
 
 /// Dispatches schema loading based on database type. No-op for types that
 /// don't use schemas (Lpg, Rdf).
-pub fn load_schema(db_type: DatabaseType, content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
+pub fn load_schema(
+    db_type: DatabaseType,
+    content: &[u8],
+    db: &GrafeoDB,
+) -> Result<(), ServiceError> {
     match db_type {
         DatabaseType::Lpg | DatabaseType::Rdf => Ok(()),
         DatabaseType::OwlSchema => load_owl(content, db),
@@ -21,7 +25,7 @@ pub fn load_schema(db_type: DatabaseType, content: &[u8], db: &GrafeoDB) -> Resu
 
 /// Load an OWL ontology into an RDF database.
 #[cfg(feature = "owl-schema")]
-fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
+fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
     use sophia_api::prelude::*;
     use sophia_turtle::parser::turtle;
 
@@ -30,8 +34,8 @@ fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
     let triples: Result<Vec<[sophia_api::term::SimpleTerm<'static>; 3]>, _> =
         turtle::parse_bufread(reader).collect_triples();
 
-    let triples =
-        triples.map_err(|e| ApiError::BadRequest(format!("failed to parse OWL schema: {e}")))?;
+    let triples = triples
+        .map_err(|e| ServiceError::BadRequest(format!("failed to parse OWL schema: {e}")))?;
 
     // Insert each triple as a SPARQL INSERT
     let session = db.session();
@@ -40,9 +44,9 @@ fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
         let p = format_term(&triple[1]);
         let o = format_term(&triple[2]);
         let sparql = format!("INSERT DATA {{ {s} {p} {o} . }}");
-        session
-            .execute_sparql(&sparql)
-            .map_err(|e| ApiError::Internal(format!("failed to insert OWL triple: {e}")))?;
+        session.execute_sparql(&sparql).map_err(|e| {
+            ServiceError::Internal(format!("failed to insert OWL triple: {e}"))
+        })?;
     }
 
     tracing::info!(triple_count = triples.len(), "Loaded OWL schema");
@@ -50,35 +54,35 @@ fn load_owl(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
 }
 
 #[cfg(not(feature = "owl-schema"))]
-fn load_owl(_content: &[u8], _db: &GrafeoDB) -> Result<(), ApiError> {
-    Err(ApiError::BadRequest(
+fn load_owl(_content: &[u8], _db: &GrafeoDB) -> Result<(), ServiceError> {
+    Err(ServiceError::BadRequest(
         "OWL Schema support requires the 'owl-schema' feature".to_string(),
     ))
 }
 
 /// Load an RDFS schema into an RDF database.
 #[cfg(feature = "rdfs-schema")]
-fn load_rdfs(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
+fn load_rdfs(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
     // RDFS files are also Turtle/RDF, reuse the same parsing logic as OWL
     load_owl(content, db)
 }
 
 #[cfg(not(feature = "rdfs-schema"))]
-fn load_rdfs(_content: &[u8], _db: &GrafeoDB) -> Result<(), ApiError> {
-    Err(ApiError::BadRequest(
+fn load_rdfs(_content: &[u8], _db: &GrafeoDB) -> Result<(), ServiceError> {
+    Err(ServiceError::BadRequest(
         "RDFS Schema support requires the 'rdfs-schema' feature".to_string(),
     ))
 }
 
 /// Load a JSON Schema and create LPG catalog constraints.
 #[cfg(feature = "json-schema")]
-fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
+fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
     let schema_value: serde_json::Value = serde_json::from_slice(content)
-        .map_err(|e| ApiError::BadRequest(format!("invalid JSON in schema file: {e}")))?;
+        .map_err(|e| ServiceError::BadRequest(format!("invalid JSON in schema file: {e}")))?;
 
     // Validate that it looks like a JSON Schema
     if !schema_value.is_object() {
-        return Err(ApiError::BadRequest(
+        return Err(ServiceError::BadRequest(
             "schema file must be a JSON object".to_string(),
         ));
     }
@@ -129,8 +133,8 @@ fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ApiError> {
 }
 
 #[cfg(not(feature = "json-schema"))]
-fn load_json_schema(_content: &[u8], _db: &GrafeoDB) -> Result<(), ApiError> {
-    Err(ApiError::BadRequest(
+fn load_json_schema(_content: &[u8], _db: &GrafeoDB) -> Result<(), ServiceError> {
+    Err(ServiceError::BadRequest(
         "JSON Schema support requires the 'json-schema' feature".to_string(),
     ))
 }

@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum 0.8.8",
  "base64 0.22.1",
@@ -1176,10 +1176,10 @@ dependencies = [
  "futures-util",
  "grafeo-common",
  "grafeo-engine",
+ "grafeo-service",
  "gwp",
  "hyper",
  "hyper-util",
- "jsonschema",
  "mime_guess",
  "parking_lot",
  "reqwest",
@@ -1188,10 +1188,6 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "sophia_api",
- "sophia_inmem",
- "sophia_turtle",
- "subtle",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
@@ -1205,6 +1201,29 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "grafeo-service"
+version = "0.4.0"
+dependencies = [
+ "base64 0.22.1",
+ "dashmap",
+ "grafeo-common",
+ "grafeo-engine",
+ "jsonschema",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sophia_api",
+ "sophia_inmem",
+ "sophia_turtle",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "utoipa",
  "uuid",
 ]
 

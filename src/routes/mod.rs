@@ -19,11 +19,12 @@ use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::database_manager::DatabaseSummary;
 use crate::error::ErrorBody;
 use crate::rate_limit::rate_limit_middleware;
 use crate::request_id::request_id_middleware;
 use crate::state::AppState;
+
+use types::DatabaseSummary;
 
 // ---------------------------------------------------------------------------
 // OpenAPI
@@ -34,7 +35,7 @@ use crate::state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.3.0",
+        version = "0.4.0",
         license(name = "Apache-2.0"),
     ),
     paths(

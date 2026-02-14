@@ -27,7 +27,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         engine_version: env!("GRAFEO_ENGINE_VERSION").to_string(),
         persistent: dbs.data_dir().is_some(),
         uptime_seconds: state.uptime_secs(),
-        active_sessions: dbs.total_active_sessions(),
+        active_sessions: state.sessions().active_count(),
         features: EnabledFeatures::detect(),
     })
 }
@@ -107,7 +107,7 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoRespons
         db_list.len(),
         nodes_total,
         edges_total,
-        dbs.total_active_sessions(),
+        state.sessions().active_count(),
         state.uptime_secs(),
     );
 

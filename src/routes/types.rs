@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::database_manager::DatabaseSummary;
-pub use crate::types::{CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode};
+pub use grafeo_service::types::{
+    CreateDatabaseRequest, DatabaseOptions, DatabaseSummary, DatabaseType, StorageMode,
+};
 
 #[derive(Deserialize, ToSchema)]
 pub struct QueryRequest {

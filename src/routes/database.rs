@@ -3,13 +3,12 @@
 use axum::extract::{Json, Path, State};
 use axum::response::IntoResponse;
 
-use crate::database_manager::DatabaseSummary;
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 use super::types::{
     CreateDatabaseRequest, DatabaseInfoResponse, DatabaseSchemaResponse, DatabaseStatsResponse,
-    EdgeTypeInfo, LabelInfo, ListDatabasesResponse,
+    DatabaseSummary, EdgeTypeInfo, LabelInfo, ListDatabasesResponse,
 };
 
 /// List all databases.
@@ -55,7 +54,7 @@ pub async fn create_database(
     let entry = state
         .databases()
         .get(&name)
-        .ok_or_else(|| ApiError::Internal("database disappeared after creation".to_string()))?;
+        .ok_or_else(|| ApiError::internal("database disappeared after creation"))?;
 
     Ok(Json(DatabaseSummary {
         name,
@@ -86,6 +85,8 @@ pub async fn delete_database(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Clean up any transaction sessions belonging to this database
+    state.sessions().remove_by_database(&name);
     state.databases().delete(&name)?;
     Ok(Json(serde_json::json!({ "deleted": name })))
 }
@@ -112,7 +113,7 @@ pub async fn database_info(
     let entry = state
         .databases()
         .get(&name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{name}' not found")))?;
+        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
 
     let info = entry.db.info();
     let metadata = &entry.metadata;
@@ -153,7 +154,7 @@ pub async fn database_stats(
     let entry = state
         .databases()
         .get(&name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{name}' not found")))?;
+        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
 
     let stats = entry.db.detailed_stats();
     Ok(Json(DatabaseStatsResponse {
@@ -191,7 +192,7 @@ pub async fn database_schema(
     let entry = state
         .databases()
         .get(&name)
-        .ok_or_else(|| ApiError::NotFound(format!("database '{name}' not found")))?;
+        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
 
     let schema = entry.db.schema();
     match schema {
@@ -215,8 +216,8 @@ pub async fn database_schema(
                 .collect(),
             property_keys: lpg.property_keys,
         })),
-        grafeo_engine::admin::SchemaInfo::Rdf(_) => Err(ApiError::BadRequest(
-            "RDF schema not supported via this endpoint".to_string(),
+        grafeo_engine::admin::SchemaInfo::Rdf(_) => Err(ApiError::bad_request(
+            "RDF schema not supported via this endpoint",
         )),
     }
 }

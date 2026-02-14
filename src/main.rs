@@ -36,15 +36,14 @@ async fn main() {
 
     // Spawn session + rate-limiter cleanup task
     let cleanup_state = state.clone();
-    let session_ttl = config.session_ttl;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let removed = cleanup_state.databases().cleanup_all_expired(session_ttl);
+            let removed = cleanup_state.cleanup_expired_sessions();
             if removed > 0 {
                 tracing::info!(removed, "Cleaned up expired sessions");
             }
-            cleanup_state.rate_limiter().cleanup();
+            cleanup_state.cleanup_rate_limits();
         }
     });
 

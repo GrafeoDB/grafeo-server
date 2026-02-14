@@ -1,10 +1,73 @@
-[package]
-name = "grafeo-server"
-version = "0.3.0"
+[workspace]
+members = ["crates/grafeo-service"]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo-server"
+
+[workspace.dependencies]
+# Engine
+grafeo-engine = { version = "0.5.3", default-features = false }
+grafeo-common = "0.5.3"
+
+# Internal crates
+grafeo-service = { path = "crates/grafeo-service" }
+
+# Async
+tokio = { version = "1.43", features = ["full"] }
+
+# Shared
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+dashmap = "6.1"
+parking_lot = "0.12"
+uuid = { version = "1.11", features = ["v4"] }
+tracing = "0.1"
+base64 = "0.22"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+uninlined_format_args = "allow"
+doc_markdown = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+needless_for_each = "allow"
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+items_after_statements = "allow"
+struct_field_names = "allow"
+wildcard_imports = "allow"
+single_match_else = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+manual_let_else = "allow"
+
+# --- Binary crate ---
+
+[package]
+name = "grafeo-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
@@ -13,6 +76,7 @@ default = ["http", "studio", "all-languages", "storage"]
 
 # Transport layers
 http = [
+    "grafeo-service/openapi",
     "dep:axum", "dep:tower", "dep:tower-http",
     "dep:utoipa", "dep:utoipa-swagger-ui",
     "dep:sysinfo", "dep:serde_json",
@@ -23,38 +87,38 @@ gwp = ["dep:gwp", "dep:tonic"]
 studio = ["http", "dep:rust-embed", "dep:mime_guess"]
 
 # Server-specific features
-owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
-rdfs-schema = ["owl-schema"]
-json-schema = ["dep:jsonschema", "dep:serde_json"]
-auth = ["dep:subtle"]
+owl-schema = ["grafeo-service/owl-schema"]
+rdfs-schema = ["grafeo-service/rdfs-schema"]
+json-schema = ["grafeo-service/json-schema"]
+auth = ["grafeo-service/auth"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
 
-# Engine: query languages
-gql = ["grafeo-engine/gql"]
-cypher = ["grafeo-engine/cypher"]
-sparql = ["grafeo-engine/sparql", "rdf"]
-gremlin = ["grafeo-engine/gremlin"]
-graphql = ["grafeo-engine/graphql"]
-sql-pgq = ["grafeo-engine/sql-pgq"]
+# Engine: query languages (forwarded to grafeo-service)
+gql = ["grafeo-service/gql"]
+cypher = ["grafeo-service/cypher"]
+sparql = ["grafeo-service/sparql"]
+gremlin = ["grafeo-service/gremlin"]
+graphql = ["grafeo-service/graphql"]
+sql-pgq = ["grafeo-service/sql-pgq"]
 all-languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
 
-# Engine: storage & execution
-parallel = ["grafeo-engine/parallel"]
-wal = ["grafeo-engine/wal"]
-spill = ["grafeo-engine/spill"]
-mmap = ["grafeo-engine/mmap"]
+# Engine: storage & execution (forwarded)
+parallel = ["grafeo-service/parallel"]
+wal = ["grafeo-service/wal"]
+spill = ["grafeo-service/spill"]
+mmap = ["grafeo-service/mmap"]
 storage = ["parallel", "wal", "spill", "mmap"]
 
-# Engine: search & AI
-vector-index = ["grafeo-engine/vector-index"]
-text-index = ["grafeo-engine/text-index"]
-hybrid-search = ["grafeo-engine/hybrid-search"]
-cdc = ["grafeo-engine/cdc"]
-embed = ["grafeo-engine/embed"]
+# Engine: search & AI (forwarded)
+vector-index = ["grafeo-service/vector-index"]
+text-index = ["grafeo-service/text-index"]
+hybrid-search = ["grafeo-service/hybrid-search"]
+cdc = ["grafeo-service/cdc"]
+embed = ["grafeo-service/embed"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 
-# Engine: data models
-rdf = ["grafeo-engine/rdf"]
+# Engine: data models (forwarded)
+rdf = ["grafeo-service/rdf"]
 
 # Tiers
 lite = ["gql", "storage", "gwp"]
@@ -64,9 +128,12 @@ full = [
 ]
 
 [dependencies]
-# Grafeo engine
-grafeo-engine = { version = "0.5.3", default-features = false }
-grafeo-common = "0.5.3"
+# Core business logic
+grafeo-service = { workspace = true }
+
+# Grafeo engine (still needed for direct engine types in transport code)
+grafeo-engine = { workspace = true }
+grafeo-common = { workspace = true }
 
 # Web framework (feature-gated: http)
 axum = { version = "0.8", features = ["json", "query", "ws"], optional = true }
@@ -74,33 +141,30 @@ tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"], optional = true }
 
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { workspace = true }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { version = "1.0", optional = true }
-base64 = "0.22"
 
 # Error handling
-thiserror = "2.0"
+thiserror = { workspace = true }
 
 # Concurrency
-parking_lot = "0.12"
-dashmap = "6.1"
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
 
 # Configuration
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Observability
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { workspace = true }
 futures-util = "0.3"
-
-# Security (feature-gated: auth)
-subtle = { version = "2", optional = true }
+base64 = { workspace = true }
 
 # System info (feature-gated: http)
 sysinfo = { version = "0.38.1", optional = true }
@@ -112,12 +176,6 @@ utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 # Static file embedding for the web UI (feature-gated: studio)
 rust-embed = { version = "8.5", optional = true }
 mime_guess = { version = "2.0", optional = true }
-
-# Schema parsing (feature-gated)
-sophia_turtle = { version = "0.9", optional = true }
-sophia_api = { version = "0.9", optional = true }
-sophia_inmem = { version = "0.9", optional = true }
-jsonschema = { version = "0.41", optional = true }
 
 # GQL Wire Protocol (feature-gated: gwp)
 gwp = { version = "0.1", optional = true }
@@ -138,35 +196,8 @@ tempfile = "3.25"
 gwp = "0.1"
 serde_json = "1.0"
 
-[lints.rust]
-unsafe_code = "warn"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
-cast_precision_loss = "allow"
-cast_possible_wrap = "allow"
-cast_lossless = "allow"
-uninlined_format_args = "allow"
-doc_markdown = "allow"
-redundant_closure_for_method_calls = "allow"
-similar_names = "allow"
-needless_for_each = "allow"  # utoipa OpenApi derive generates for_each
-too_many_lines = "allow"
-needless_pass_by_value = "allow"
-items_after_statements = "allow"
-struct_field_names = "allow"
-wildcard_imports = "allow"
-single_match_else = "allow"
-unnecessary_wraps = "allow"
-unused_self = "allow"
-manual_let_else = "allow"
+[lints]
+workspace = true
 
 [profile.release]
 lto = "thin"

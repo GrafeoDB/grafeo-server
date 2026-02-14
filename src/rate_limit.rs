@@ -1,124 +1,51 @@
-//! Per-IP rate limiting with a fixed-window counter.
+//! HTTP rate-limiting middleware.
 //!
-//! `RateLimiter` is transport-agnostic (used by `state.rs`).
-//! The axum middleware is gated behind the `http` feature.
+//! The core `RateLimiter` lives in `grafeo_service::rate_limit`. This module
+//! provides only the axum middleware that extracts client IPs from HTTP
+//! requests and delegates to the rate limiter.
 
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use axum::extract::{ConnectInfo, Request, State};
+use axum::middleware::Next;
+use axum::response::Response;
 
-/// In-memory per-IP rate limiter with fixed-window counters.
-#[derive(Clone)]
-pub struct RateLimiter {
-    inner: Arc<RateLimiterInner>,
+use crate::error::ApiError;
+use crate::state::AppState;
+
+/// Extracts the client IP from the request.
+fn extract_ip(req: &Request) -> Option<IpAddr> {
+    // X-Forwarded-For takes priority (reverse proxy)
+    if let Some(xff) = req.headers().get("x-forwarded-for")
+        && let Ok(s) = xff.to_str()
+        && let Some(first) = s.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return Some(ip);
+    }
+
+    // Fallback to ConnectInfo (direct connection)
+    req.extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
 }
 
-struct RateLimiterInner {
-    max_requests: u64,
-    window: Duration,
-    counters: DashMap<IpAddr, (u64, Instant)>,
+/// Rate-limiting middleware. Returns 429 when the per-IP limit is exceeded.
+pub async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let limiter = state.rate_limiter();
+    if !limiter.is_enabled() {
+        return Ok(next.run(req).await);
+    }
+
+    if let Some(ip) = extract_ip(&req)
+        && !limiter.check(ip)
+    {
+        return Err(ApiError::too_many_requests());
+    }
+
+    Ok(next.run(req).await)
 }
-
-impl RateLimiter {
-    /// Creates a new rate limiter. `max_requests = 0` means disabled.
-    pub fn new(max_requests: u64, window: Duration) -> Self {
-        Self {
-            inner: Arc::new(RateLimiterInner {
-                max_requests,
-                window,
-                counters: DashMap::new(),
-            }),
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.inner.max_requests > 0
-    }
-
-    /// Returns `true` if the request is allowed, `false` if rate-limited.
-    pub fn check(&self, ip: IpAddr) -> bool {
-        if !self.is_enabled() {
-            return true;
-        }
-
-        let mut entry = self.inner.counters.entry(ip).or_insert((0, Instant::now()));
-        let (count, window_start) = entry.value_mut();
-
-        if window_start.elapsed() > self.inner.window {
-            // Window expired — reset
-            *count = 1;
-            *window_start = Instant::now();
-            true
-        } else if *count < self.inner.max_requests {
-            *count += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Removes entries for expired windows (background cleanup).
-    pub fn cleanup(&self) {
-        let window = self.inner.window;
-        self.inner
-            .counters
-            .retain(|_, (_, start)| start.elapsed() <= window);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HTTP middleware (feature-gated)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "http")]
-mod http_impl {
-    use super::*;
-    use axum::extract::{ConnectInfo, Request, State};
-    use axum::middleware::Next;
-    use axum::response::Response;
-
-    use crate::error::ApiError;
-    use crate::state::AppState;
-
-    /// Extracts the client IP from the request.
-    fn extract_ip(req: &Request) -> Option<IpAddr> {
-        // X-Forwarded-For takes priority (reverse proxy)
-        if let Some(xff) = req.headers().get("x-forwarded-for")
-            && let Ok(s) = xff.to_str()
-            && let Some(first) = s.split(',').next()
-            && let Ok(ip) = first.trim().parse::<IpAddr>()
-        {
-            return Some(ip);
-        }
-
-        // Fallback to ConnectInfo (direct connection)
-        req.extensions()
-            .get::<ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip())
-    }
-
-    /// Rate-limiting middleware. Returns 429 when the per-IP limit is exceeded.
-    pub async fn rate_limit_middleware(
-        State(state): State<AppState>,
-        req: Request,
-        next: Next,
-    ) -> Result<Response, ApiError> {
-        let limiter = state.rate_limiter();
-        if !limiter.is_enabled() {
-            return Ok(next.run(req).await);
-        }
-
-        if let Some(ip) = extract_ip(&req)
-            && !limiter.check(ip)
-        {
-            return Err(ApiError::TooManyRequests);
-        }
-
-        Ok(next.run(req).await)
-    }
-}
-
-#[cfg(feature = "http")]
-pub use http_impl::rate_limit_middleware;

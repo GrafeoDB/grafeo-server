@@ -35,7 +35,7 @@ pub enum Language {
 }
 
 impl Language {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Gql => "gql",
             Self::Cypher => "cypher",

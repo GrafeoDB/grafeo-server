@@ -1,18 +1,18 @@
 //! Multi-database registry.
 //!
-//! Each named database is an independent `GrafeoDB` instance with its own
-//! session manager. The `"default"` database always exists and cannot be
-//! deleted.
+//! Each named database is an independent `GrafeoDB` instance. The `"default"`
+//! database always exists and cannot be deleted.
+//!
+//! Session management has been moved to `SessionRegistry` — this module only
+//! handles database lifecycle (create/delete/list/info).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
-use serde::Serialize;
 
-use crate::error::ApiError;
-use crate::sessions::SessionManager;
+use crate::error::ServiceError;
 use crate::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
 
 /// Default memory limit for new databases: 512 MB.
@@ -32,7 +32,7 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 /// Parses a WAL durability string into an engine `DurabilityMode`.
-fn parse_durability(s: &str) -> Result<DurabilityMode, ApiError> {
+fn parse_durability(s: &str) -> Result<DurabilityMode, ServiceError> {
     match s.to_lowercase().as_str() {
         "sync" => Ok(DurabilityMode::Sync),
         "batch" => Ok(DurabilityMode::default()), // Batch with default params
@@ -40,7 +40,7 @@ fn parse_durability(s: &str) -> Result<DurabilityMode, ApiError> {
             target_interval_ms: 100,
         }),
         "nosync" => Ok(DurabilityMode::NoSync),
-        other => Err(ApiError::BadRequest(format!(
+        other => Err(ServiceError::BadRequest(format!(
             "invalid wal_durability '{other}': expected \"sync\", \"batch\", \"adaptive\", or \"nosync\""
         ))),
     }
@@ -69,36 +69,17 @@ impl Default for DatabaseMetadata {
     }
 }
 
-/// A single database instance with its own session manager and metadata.
+/// A single database instance with its metadata.
 pub struct DatabaseEntry {
     pub db: GrafeoDB,
-    pub sessions: SessionManager,
     pub metadata: DatabaseMetadata,
 }
 
 /// Thread-safe registry of named database instances.
 pub struct DatabaseManager {
     databases: DashMap<String, Arc<DatabaseEntry>>,
-    /// Maps session IDs to database names for transaction routing.
-    session_db_map: DashMap<String, String>,
     /// If `Some`, databases are persisted under `{data_dir}/{name}/grafeo.db`.
     data_dir: Option<PathBuf>,
-}
-
-/// Summary info returned by the list endpoint.
-#[derive(Serialize)]
-#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
-pub struct DatabaseSummary {
-    /// Database name.
-    pub name: String,
-    /// Number of nodes.
-    pub node_count: usize,
-    /// Number of edges.
-    pub edge_count: usize,
-    /// Whether the database uses persistent storage.
-    pub persistent: bool,
-    /// Database type: "lpg", "rdf", "owl-schema", "rdfs-schema", "json-schema".
-    pub database_type: String,
 }
 
 impl DatabaseManager {
@@ -108,7 +89,6 @@ impl DatabaseManager {
     pub fn new(data_dir: Option<&str>) -> Self {
         let mgr = Self {
             databases: DashMap::new(),
-            session_db_map: DashMap::new(),
             data_dir: data_dir.map(PathBuf::from),
         };
 
@@ -120,11 +100,13 @@ impl DatabaseManager {
             let old_path = dir.join("grafeo.db");
             if old_path.exists() {
                 let new_dir = dir.join("default");
-                std::fs::create_dir_all(&new_dir).expect("failed to create default db directory");
+                std::fs::create_dir_all(&new_dir)
+                    .expect("failed to create default db directory");
                 let new_path = new_dir.join("grafeo.db");
                 if !new_path.exists() {
                     tracing::info!("Migrating old database layout to default/grafeo.db");
-                    std::fs::rename(&old_path, &new_path).expect("failed to migrate database file");
+                    std::fs::rename(&old_path, &new_path)
+                        .expect("failed to migrate database file");
                     // Also move WAL file if present
                     let old_wal = dir.join("grafeo.db.wal");
                     if old_wal.exists() {
@@ -155,11 +137,7 @@ impl DatabaseManager {
                                     };
                                     mgr.databases.insert(
                                         name,
-                                        Arc::new(DatabaseEntry {
-                                            db,
-                                            sessions: SessionManager::new(),
-                                            metadata,
-                                        }),
+                                        Arc::new(DatabaseEntry { db, metadata }),
                                     );
                                 }
                                 Err(e) => {
@@ -178,13 +156,12 @@ impl DatabaseManager {
                     .expect("failed to create default db directory");
                 let db_path = default_dir.join("grafeo.db");
                 tracing::info!("Creating default persistent database");
-                let db =
-                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db");
+                let db = GrafeoDB::open(db_path.to_str().unwrap())
+                    .expect("failed to create default db");
                 mgr.databases.insert(
                     "default".to_string(),
                     Arc::new(DatabaseEntry {
                         db,
-                        sessions: SessionManager::new(),
                         metadata: DatabaseMetadata {
                             storage_mode: "persistent".to_string(),
                             ..Default::default()
@@ -199,7 +176,6 @@ impl DatabaseManager {
                 "default".to_string(),
                 Arc::new(DatabaseEntry {
                     db: GrafeoDB::new_in_memory(),
-                    sessions: SessionManager::new(),
                     metadata: DatabaseMetadata::default(),
                 }),
             );
@@ -213,20 +189,19 @@ impl DatabaseManager {
         self.databases.get(name).map(|e| Arc::clone(e.value()))
     }
 
-    /// Creates a new named database from a full request. Returns error if name
-    /// is invalid, already exists, or options are incompatible with server config.
-    pub fn create(&self, req: &CreateDatabaseRequest) -> Result<(), ApiError> {
+    /// Creates a new named database from a full request.
+    pub fn create(&self, req: &CreateDatabaseRequest) -> Result<(), ServiceError> {
         let name = &req.name;
 
         if !is_valid_name(name) {
-            return Err(ApiError::BadRequest(format!(
+            return Err(ServiceError::BadRequest(format!(
                 "invalid database name '{name}': must start with a letter, contain only \
                  alphanumeric/underscore/hyphen, and be at most 64 characters"
             )));
         }
 
         if self.databases.contains_key(name.as_str()) {
-            return Err(ApiError::Conflict(format!(
+            return Err(ServiceError::Conflict(format!(
                 "database '{name}' already exists"
             )));
         }
@@ -234,26 +209,26 @@ impl DatabaseManager {
         // Validate: schema types require their feature flag
         #[cfg(not(feature = "owl-schema"))]
         if req.database_type == DatabaseType::OwlSchema {
-            return Err(ApiError::BadRequest(
+            return Err(ServiceError::BadRequest(
                 "OWL Schema databases require the server to be compiled with the 'owl-schema' feature".to_string(),
             ));
         }
         #[cfg(not(feature = "rdfs-schema"))]
         if req.database_type == DatabaseType::RdfsSchema {
-            return Err(ApiError::BadRequest(
+            return Err(ServiceError::BadRequest(
                 "RDFS Schema databases require the server to be compiled with the 'rdfs-schema' feature".to_string(),
             ));
         }
         #[cfg(not(feature = "json-schema"))]
         if req.database_type == DatabaseType::JsonSchema {
-            return Err(ApiError::BadRequest(
+            return Err(ServiceError::BadRequest(
                 "JSON Schema databases require the server to be compiled with the 'json-schema' feature".to_string(),
             ));
         }
 
         // Validate: schema types require a schema file
         if req.database_type.requires_schema_file() && req.schema_file.is_none() {
-            return Err(ApiError::BadRequest(format!(
+            return Err(ServiceError::BadRequest(format!(
                 "database type '{}' requires a schema_file",
                 req.database_type
             )));
@@ -276,14 +251,15 @@ impl DatabaseManager {
             StorageMode::InMemory => Config::in_memory(),
             StorageMode::Persistent => {
                 let dir = self.data_dir.as_ref().ok_or_else(|| {
-                    ApiError::BadRequest(
+                    ServiceError::BadRequest(
                         "persistent storage requires the server to be started with --data-dir"
                             .to_string(),
                     )
                 })?;
                 let db_dir = dir.join(name.as_str());
-                std::fs::create_dir_all(&db_dir)
-                    .map_err(|e| ApiError::Internal(format!("failed to create directory: {e}")))?;
+                std::fs::create_dir_all(&db_dir).map_err(|e| {
+                    ServiceError::Internal(format!("failed to create directory: {e}"))
+                })?;
                 let db_path = db_dir.join("grafeo.db");
                 Config::persistent(db_path.to_str().unwrap())
             }
@@ -326,17 +302,18 @@ impl DatabaseManager {
         );
 
         let db = GrafeoDB::with_config(config)
-            .map_err(|e| ApiError::Internal(format!("failed to create database: {e}")))?;
+            .map_err(|e| ServiceError::Internal(format!("failed to create database: {e}")))?;
 
         // Schema loading (if applicable)
         if let Some(ref schema_b64) = req.schema_file {
             let schema_bytes =
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
                     .map_err(|e| {
-                        ApiError::BadRequest(format!("invalid base64 in schema_file: {e}"))
+                        ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
                     })?;
 
-            let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
+            let schema_result =
+                crate::schema::load_schema(req.database_type, &schema_bytes, &db);
             if let Err(e) = schema_result {
                 // Rollback: close and remove the database
                 let _ = db.close();
@@ -359,27 +336,25 @@ impl DatabaseManager {
 
         self.databases.insert(
             name.clone(),
-            Arc::new(DatabaseEntry {
-                db,
-                sessions: SessionManager::new(),
-                metadata,
-            }),
+            Arc::new(DatabaseEntry { db, metadata }),
         );
 
         Ok(())
     }
 
     /// Deletes a database by name. The `"default"` database cannot be deleted.
-    pub fn delete(&self, name: &str) -> Result<(), ApiError> {
+    pub fn delete(&self, name: &str) -> Result<(), ServiceError> {
         if name == "default" {
-            return Err(ApiError::BadRequest(
+            return Err(ServiceError::BadRequest(
                 "cannot delete the default database".to_string(),
             ));
         }
 
         let removed = self.databases.remove(name);
         if removed.is_none() {
-            return Err(ApiError::NotFound(format!("database '{name}' not found")));
+            return Err(ServiceError::NotFound(format!(
+                "database '{name}' not found"
+            )));
         }
 
         let (_, entry) = removed.unwrap();
@@ -388,9 +363,6 @@ impl DatabaseManager {
         if let Err(e) = entry.db.close() {
             tracing::warn!(name = %name, error = %e, "Error closing database");
         }
-
-        // Remove session mappings that pointed to this database
-        self.session_db_map.retain(|_, db_name| db_name != name);
 
         // Remove on-disk data if persistent
         if let Some(ref dir) = self.data_dir {
@@ -407,14 +379,14 @@ impl DatabaseManager {
     }
 
     /// Lists all databases with summary info.
-    pub fn list(&self) -> Vec<DatabaseSummary> {
-        let mut result: Vec<DatabaseSummary> = self
+    pub fn list(&self) -> Vec<crate::types::DatabaseSummary> {
+        let mut result: Vec<crate::types::DatabaseSummary> = self
             .databases
             .iter()
             .map(|entry| {
                 let name = entry.key().clone();
                 let e = entry.value();
-                DatabaseSummary {
+                crate::types::DatabaseSummary {
                     name,
                     node_count: e.db.node_count(),
                     edge_count: e.db.edge_count(),
@@ -438,49 +410,6 @@ impl DatabaseManager {
             .iter()
             .filter_map(|e| e.value().db.memory_limit())
             .sum()
-    }
-
-    /// Returns the total number of active transaction sessions across all databases.
-    pub fn total_active_sessions(&self) -> usize {
-        self.databases
-            .iter()
-            .map(|e| e.value().sessions.active_count())
-            .sum()
-    }
-
-    /// Registers a session ID as belonging to a specific database.
-    pub fn register_session(&self, session_id: &str, db_name: &str) {
-        self.session_db_map
-            .insert(session_id.to_string(), db_name.to_string());
-    }
-
-    /// Resolves which database a session belongs to.
-    pub fn resolve_session(&self, session_id: &str) -> Option<String> {
-        self.session_db_map
-            .get(session_id)
-            .map(|e| e.value().clone())
-    }
-
-    /// Removes a session from the session-to-database mapping.
-    pub fn unregister_session(&self, session_id: &str) {
-        self.session_db_map.remove(session_id);
-    }
-
-    /// Runs expired-session cleanup across all databases. Returns total removed.
-    pub fn cleanup_all_expired(&self, ttl_secs: u64) -> usize {
-        let mut total = 0;
-        for entry in &self.databases {
-            total += entry.value().sessions.cleanup_expired(ttl_secs);
-        }
-        // Also clean up session_db_map entries whose sessions no longer exist
-        self.session_db_map.retain(|session_id, db_name| {
-            if let Some(entry) = self.databases.get(db_name.as_str()) {
-                entry.sessions.exists(session_id)
-            } else {
-                false
-            }
-        });
-        total
     }
 }
 
@@ -508,7 +437,6 @@ mod tests {
         let mgr = DatabaseManager::new(None);
         assert!(mgr.get("default").is_some());
 
-        // Create with minimal request (just name)
         let req = CreateDatabaseRequest {
             name: "test".to_string(),
             database_type: DatabaseType::Lpg,
@@ -541,16 +469,6 @@ mod tests {
 
         // Cannot delete default
         assert!(mgr.delete("default").is_err());
-    }
-
-    #[test]
-    fn test_session_mapping() {
-        let mgr = DatabaseManager::new(None);
-        mgr.register_session("sess-1", "default");
-        assert_eq!(mgr.resolve_session("sess-1").unwrap(), "default");
-
-        mgr.unregister_session("sess-1");
-        assert!(mgr.resolve_session("sess-1").is_none());
     }
 
     #[test]

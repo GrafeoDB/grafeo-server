@@ -1,14 +1,13 @@
-//! Transport-agnostic types used across both HTTP and GWP layers.
+//! Transport-agnostic types shared across the service layer.
 //!
-//! These types are shared between `database_manager`, `schema`, and the
-//! transport-specific route/handler modules. They live here to avoid
-//! coupling the database layer to any particular transport (HTTP/gRPC).
+//! These types are used by `DatabaseManager`, `schema`, and transport
+//! adapters. No HTTP or gRPC dependencies.
 
 use serde::{Deserialize, Serialize};
 
 /// Request to create a new named database.
 #[derive(Debug, Clone, Deserialize)]
-#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDatabaseRequest {
     /// Name for the new database.
     pub name: String,
@@ -30,7 +29,7 @@ pub struct CreateDatabaseRequest {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum DatabaseType {
     /// Labeled Property Graph (default). Supports GQL, Cypher, Gremlin, GraphQL.
     #[default]
@@ -78,7 +77,7 @@ impl std::fmt::Display for DatabaseType {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum StorageMode {
     /// Fast, ephemeral storage. Data lost on restart.
     #[default]
@@ -97,7 +96,7 @@ impl StorageMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DatabaseOptions {
     /// Memory limit in bytes. Default: 512 MB.
     #[serde(default)]
@@ -117,4 +116,95 @@ pub struct DatabaseOptions {
     /// Optional path for out-of-core spill processing.
     #[serde(default)]
     pub spill_path: Option<String>,
+}
+
+// --- Output types ---
+
+/// Summary info returned by the list endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DatabaseSummary {
+    /// Database name.
+    pub name: String,
+    /// Number of nodes.
+    pub node_count: usize,
+    /// Number of edges.
+    pub edge_count: usize,
+    /// Whether the database uses persistent storage.
+    pub persistent: bool,
+    /// Database type: "lpg", "rdf", "owl-schema", "rdfs-schema", "json-schema".
+    pub database_type: String,
+}
+
+/// Detailed info about a single database.
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseInfo {
+    pub name: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub persistent: bool,
+    pub version: String,
+    pub wal_enabled: bool,
+    pub database_type: String,
+    pub storage_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_bytes: Option<usize>,
+    pub backward_edges: bool,
+    pub threads: usize,
+}
+
+/// Database statistics.
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseStats {
+    pub name: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub label_count: usize,
+    pub edge_type_count: usize,
+    pub property_key_count: usize,
+    pub index_count: usize,
+    pub memory_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<usize>,
+}
+
+/// Schema information for a database.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaInfo {
+    pub name: String,
+    pub labels: Vec<LabelInfo>,
+    pub edge_types: Vec<EdgeTypeInfo>,
+    pub property_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LabelInfo {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeTypeInfo {
+    pub name: String,
+    pub count: usize,
+}
+
+/// Health/status information.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthInfo {
+    pub version: String,
+    pub engine_version: String,
+    pub persistent: bool,
+    pub uptime_seconds: u64,
+    pub active_sessions: usize,
+    pub enabled_languages: Vec<String>,
+    pub enabled_engine_features: Vec<String>,
+    pub enabled_server_features: Vec<String>,
+}
+
+/// Batch query input.
+pub struct BatchQuery {
+    pub statement: String,
+    pub language: Option<String>,
+    pub params: Option<std::collections::HashMap<String, grafeo_common::Value>>,
 }
