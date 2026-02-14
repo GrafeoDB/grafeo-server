@@ -16,7 +16,7 @@ Pure Rust, single binary. Available in three Docker image variants to match your
 ### Docker Hub
 
 ```bash
-# Standard — all query languages, AI/search features, web UI
+# Standard - all query languages, AI/search features, web UI
 docker run -p 7474:7474 grafeo/grafeo-server
 
 # With persistent storage
@@ -25,21 +25,25 @@ docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /da
 
 Three image variants are available:
 
-| Variant | Tag | Languages | AI/Search | Web UI | Use Case |
-|---------|-----|-----------|-----------|--------|----------|
-| **lite** | `grafeo-server:lite` | GQL only | No | No | Sidecar, CI, embedded |
-| **standard** | `grafeo-server:latest` | All 6 | Yes | Yes | General purpose |
-| **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes | Production, AI/RAG |
+| Variant | Tag | Languages | AI/Search | GWP | Web UI | Use Case |
+|---------|-----|-----------|-----------|-----|--------|----------|
+| **lite** | `grafeo-server:lite` | GQL only | No | No | No | Sidecar, CI, embedded |
+| **gwp** | `grafeo-server:gwp` | GQL only | No | Yes (:7687) | No | Wire protocol, microservice |
+| **standard** | `grafeo-server:latest` | All 6 | Yes | Yes (:7687) | Yes | General purpose |
+| **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes (:7687) | Yes | Production, AI/RAG |
 
 ```bash
-# Lite — GQL only, no web UI, smallest image
+# Lite - GQL only, no web UI, no GWP, smallest image
 docker run -p 7474:7474 grafeo/grafeo-server:lite
 
-# Full — everything including auth, TLS, ONNX embeddings
-docker run -p 7474:7474 grafeo/grafeo-server:full
+# GWP - GQL only + wire protocol, no web UI
+docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:gwp
+
+# Full - everything including auth, TLS, ONNX embeddings
+docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.2.4`, `grafeo-server:0.2.4-lite`, `grafeo-server:0.2.4-full`.
+Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-gwp`, `grafeo-server:0.3.0-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -49,7 +53,7 @@ See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-
 docker compose up -d
 ```
 
-The server is available at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`.
+The server is available at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`. GWP (gRPC) on `localhost:7687`.
 
 ### From source
 
@@ -133,7 +137,7 @@ Available algorithms include: PageRank, BFS, DFS, Dijkstra, Bellman-Ford, Connec
 
 ### Batch Queries
 
-Execute multiple queries atomically in a single request. All queries run within an implicit transaction — if any query fails, the entire batch is rolled back.
+Execute multiple queries atomically in a single request. All queries run within an implicit transaction - if any query fails, the entire batch is rolled back.
 
 ```bash
 curl -X POST http://localhost:7474/batch \
@@ -188,6 +192,28 @@ Connect to `ws://localhost:7474/ws` for interactive query execution over a persi
 
 The `id` field is optional and echoed back for request/response correlation.
 
+### GQL Wire Protocol (GWP)
+
+The standard and full builds include a gRPC-based binary wire protocol on port 7687, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) Rust client or any gRPC client.
+
+```rust
+use gwp::client::GqlConnection;
+use std::collections::HashMap;
+
+let conn = GqlConnection::connect("http://localhost:7687").await?;
+let mut session = conn.create_session().await?;
+
+let mut cursor = session.execute(
+    "MATCH (n:Person) RETURN n.name",
+    HashMap::new(),
+).await?;
+
+let rows = cursor.collect_rows().await?;
+session.close().await?;
+```
+
+Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7687).
+
 ### Health Check
 
 ```bash
@@ -209,6 +235,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_DATA_DIR` | `--data-dir` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
+| `GRAFEO_GWP_PORT` | `--gwp-port` | `7687` | GQL Wire Protocol (gRPC) port |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
@@ -267,7 +294,7 @@ grafeo-server --data-dir /data --tls-cert /certs/cert.pem --tls-key /certs/key.p
 
 ## Feature Flags
 
-Grafeo Server uses Cargo feature flags to control both server capabilities and which engine features are compiled in. The default build includes all query languages, AI/search, and schema parsing — matching the **standard** Docker image.
+Grafeo Server uses Cargo feature flags to control both server capabilities and which engine features are compiled in. The default build includes all query languages, AI/search, and schema parsing - matching the **standard** Docker image.
 
 ### Server Features
 
@@ -276,6 +303,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 | `owl-schema` | OWL/Turtle schema parsing for database creation | Yes |
 | `rdfs-schema` | RDFS schema support (implies `owl-schema`) | Yes |
 | `json-schema` | JSON Schema validation for database creation | No |
+| `gwp` | GQL Wire Protocol (gRPC) on port 7687 | Yes |
 | `auth` | Bearer token and HTTP Basic authentication | No |
 | `tls` | Built-in HTTPS via rustls | No |
 
@@ -285,7 +313,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 |---------|-------------|---------|
 | `gql` | GQL (ISO/IEC 39075) | Yes |
 | `cypher` | Cypher (openCypher 9.0) | Yes |
-| `sparql` | SPARQL (W3C 1.1) — implies `rdf` | Yes |
+| `sparql` | SPARQL (W3C 1.1) - implies `rdf` | Yes |
 | `gremlin` | Gremlin (Apache TinkerPop) | Yes |
 | `graphql` | GraphQL | Yes |
 | `sql-pgq` | SQL/PGQ (SQL:2023 GRAPH_TABLE) | Yes |
@@ -304,14 +332,14 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 
 | Preset | Contents |
 |--------|----------|
-| `default` | all-languages + ai + rdf + storage + owl-schema + rdfs-schema |
+| `default` | all-languages + ai + rdf + storage + owl-schema + rdfs-schema + gwp |
 | `full` | Everything (default + embed + json-schema + auth + tls) |
 
 ```bash
 # Default build (standard)
 cargo build --release
 
-# Lite — GQL + core storage only
+# Lite - GQL + core storage only
 cargo build --release --no-default-features --features "gql,storage"
 
 # With authentication
@@ -327,6 +355,7 @@ The Dockerfile supports three build targets matching these presets:
 
 ```bash
 docker build --target lite     -t grafeo-server:lite .
+docker build --target gwp      -t grafeo-server:gwp .
 docker build --target standard -t grafeo-server:standard .   # default
 docker build --target full     -t grafeo-server:full .
 ```
@@ -341,7 +370,7 @@ The `/health` endpoint reports which features are compiled into the running serv
   "features": {
     "languages": ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"],
     "engine": ["parallel", "wal", "spill", "mmap", "rdf", "vector-index", "text-index", "hybrid-search", "cdc"],
-    "server": ["owl-schema", "rdfs-schema"]
+    "server": ["owl-schema", "rdfs-schema", "gwp"]
   }
 }
 ```

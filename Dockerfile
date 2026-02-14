@@ -3,6 +3,7 @@
 #
 # Build targets:
 #   docker build --target lite     -t grafeo-server:lite .
+#   docker build --target gwp      -t grafeo-server:gwp .
 #   docker build --target standard -t grafeo-server:standard .
 #   docker build --target full     -t grafeo-server:full .
 #
@@ -24,10 +25,16 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 
-# --- Build: lite (no UI, GQL + core storage only) ---
+# --- Build: lite (no UI, GQL + core storage only, no GWP) ---
 FROM rust-base AS build-lite
 RUN mkdir -p client/dist && \
     cargo build --release --no-default-features --features "gql,storage" && \
+    strip target/release/grafeo-server
+
+# --- Build: gwp (no UI, GQL + core storage + GWP) ---
+FROM rust-base AS build-gwp
+RUN mkdir -p client/dist && \
+    cargo build --release --no-default-features --features "gql,storage,gwp" && \
     strip target/release/grafeo-server
 
 # --- Build: standard (with UI, default features) ---
@@ -46,7 +53,7 @@ RUN cargo build --release --features full && \
 FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 VOLUME /data
-EXPOSE 7474
+EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:7474/health || exit 1
 ENTRYPOINT ["grafeo-server"]
@@ -55,6 +62,10 @@ CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 # --- Final: lite ---
 FROM runtime-base AS lite
 COPY --from=build-lite /build/target/release/grafeo-server /usr/local/bin/grafeo-server
+
+# --- Final: gwp ---
+FROM runtime-base AS gwp
+COPY --from=build-gwp /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # --- Final: standard (default) ---
 FROM runtime-base AS standard

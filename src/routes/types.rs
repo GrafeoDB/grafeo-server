@@ -151,6 +151,9 @@ impl EnabledFeatures {
         if cfg!(feature = "json-schema") {
             server.push("json-schema".to_string());
         }
+        if cfg!(feature = "gwp") {
+            server.push("gwp".to_string());
+        }
 
         Self {
             languages,

@@ -5,15 +5,42 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-14
+
+### Added
+
+- **GQL Wire Protocol (GWP)**: binary gRPC wire protocol on port 7687 (feature-gated: `gwp`, default on)
+  - Full `GqlBackend` implementation bridging `gwp` crate to grafeo-engine
+  - Persistent sessions with database switching via `SessionProperty::Graph`
+  - Bidirectional value conversion between `grafeo_common::Value` and `gwp::types::Value`
+  - Streaming `ResultStream` with header, row batch, and summary frames
+  - Transaction support (begin, commit, rollback) via `spawn_blocking`
+  - `--gwp-port` CLI flag / `GRAFEO_GWP_PORT` env var (default: 7687)
+- **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection
+- **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`
+- **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI — lightweight image for microservices
+- **4 Docker variants**: lite, gwp, standard (default), full
+
+### Changed
+
+- GWP is introduced as an opt-in protocol alongside HTTP in this release. Once stability is proven, GWP will become the standard protocol from 0.4.x onwards, with the `gwp` Docker variant promoted to the recommended deployment for wire-protocol clients.
+
+- Bumped version to 0.3.0
+- `gwp` added to default features and `full` preset
+- `/health` endpoint now reports `"gwp"` in server features
+- Dockerfile exposes both ports 7474 and 7687
+- New dependencies: `gwp` 0.1, `tonic` 0.12 (both feature-gated)
+- 63 integration tests total (4 new GWP tests)
+
 ## [0.2.4] - 2026-02-13
 
 ### Added
 
-- **CALL procedure support** — 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.) accessible via `CALL grafeo.<algorithm>() YIELD ...` through all query endpoints
-- **`POST /sql` endpoint** — SQL/PGQ convenience endpoint for Property Graph Queries with graph pattern matching and CALL procedures
-- **SQL/PGQ language dispatch** — `language: "sql-pgq"` supported in `/query` and `/batch` endpoints
-- **SQL/PGQ metrics tracking** — per-language Prometheus counters for `sql-pgq` queries
-- **8 new integration tests** — CALL procedure listing, PageRank via GQL, WCC via Cypher, unknown procedure error, SQL/PGQ endpoint, language field dispatch, OpenAPI path, metrics tracking
+- **CALL procedure support** - 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.) accessible via `CALL grafeo.<algorithm>() YIELD ...` through all query endpoints
+- **`POST /sql` endpoint** - SQL/PGQ convenience endpoint for Property Graph Queries with graph pattern matching and CALL procedures
+- **SQL/PGQ language dispatch** - `language: "sql-pgq"` supported in `/query` and `/batch` endpoints
+- **SQL/PGQ metrics tracking** - per-language Prometheus counters for `sql-pgq` queries
+- **8 new integration tests** - CALL procedure listing, PageRank via GQL, WCC via Cypher, unknown procedure error, SQL/PGQ endpoint, language field dispatch, OpenAPI path, metrics tracking
 
 ### Changed
 
@@ -25,38 +52,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Docker `full` build** — added `g++` and `cmake` to builder stage for native C++ dependencies (`onig_sys`, `aws-lc-sys`, `ort_sys`) that require `libstdc++` at link time
+- **Docker `full` build** - added `g++` and `cmake` to builder stage for native C++ dependencies (`onig_sys`, `aws-lc-sys`, `ort_sys`) that require `libstdc++` at link time
 
 ## [0.2.2] - 2026-02-12
 
 ### Added
 
-- **Multi-variant Docker images** — three build targets: `lite` (no UI, GQL + storage only), `standard` (with UI, default features), and `full` (with UI, all features including auth and TLS)
-- **Docker build fix** — corrected `Dockerfile.dockerignore` paths for current build context (was referencing parent-directory layout)
+- **Multi-variant Docker images** - three build targets: `lite` (no UI, GQL + storage only), `standard` (with UI, default features), and `full` (with UI, all features including auth and TLS)
+- **Docker build fix** - corrected `Dockerfile.dockerignore` paths for current build context (was referencing parent-directory layout)
 
 ## [0.2.1] - 2026-02-11
 
 ### Added
 
-- **Feature flags** — Cargo features for optional functionality: `auth`, `tls`, `json-schema`, `full` (enables all)
-- **Authentication** (feature: `auth`) — bearer token (`Authorization: Bearer <token>` / `X-API-Key`), HTTP Basic auth, constant-time comparison via `subtle`; `/health`, `/metrics`, and `/studio/` exempt from auth
-- **Rate limiting** — per-IP fixed-window rate limiter with configurable max requests and window duration; `X-Forwarded-For` aware; background cleanup of stale entries
-- **Structured logging** — `--log-format json` option for machine-parseable structured log output alongside the default human-readable `pretty` format
-- **Batch query endpoint** — `POST /batch` executes multiple queries in a single request within an implicit transaction; atomic rollback on any failure
-- **WebSocket streaming** — `GET /ws` for interactive query execution over persistent connections; JSON-tagged protocol with query, result, error, ping/pong message types; request correlation via optional `id` field
-- **TLS support** (feature: `tls`) — built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware
-- **CORS hardening** — deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning
-- **Request ID tracking** — `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID
+- **Feature flags** - Cargo features for optional functionality: `auth`, `tls`, `json-schema`, `full` (enables all)
+- **Authentication** (feature: `auth`) - bearer token (`Authorization: Bearer <token>` / `X-API-Key`), HTTP Basic auth, constant-time comparison via `subtle`; `/health`, `/metrics`, and `/studio/` exempt from auth
+- **Rate limiting** - per-IP fixed-window rate limiter with configurable max requests and window duration; `X-Forwarded-For` aware; background cleanup of stale entries
+- **Structured logging** - `--log-format json` option for machine-parseable structured log output alongside the default human-readable `pretty` format
+- **Batch query endpoint** - `POST /batch` executes multiple queries in a single request within an implicit transaction; atomic rollback on any failure
+- **WebSocket streaming** - `GET /ws` for interactive query execution over persistent connections; JSON-tagged protocol with query, result, error, ping/pong message types; request correlation via optional `id` field
+- **TLS support** (feature: `tls`) - built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware
+- **CORS hardening** - deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning
+- **Request ID tracking** - `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID
 - **AGPL-3.0-or-later LICENSE file**
-- **9 new integration tests** — WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests
+- **9 new integration tests** - WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests
 
 ### Changed
 
-- **Route modularization** — split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`
-- **TRY DRY** — consolidated 4 near-identical query handlers into shared `execute_auto_commit`; inlined single-use batch helper; removed dead `contains` guard in system resources; extracted `total_active_sessions()` to `DatabaseManager`
-- **Build-time engine version** — `build.rs` extracts grafeo-engine version from `Cargo.lock` at compile time (`GRAFEO_ENGINE_VERSION` env var), eliminating hardcoded version strings
-- Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]` — `json-schema` now opt-in
-- Authentication is now feature-gated behind `auth` — users who don't need auth get a simpler build
+- **Route modularization** - split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`
+- **TRY DRY** - consolidated 4 near-identical query handlers into shared `execute_auto_commit`; inlined single-use batch helper; removed dead `contains` guard in system resources; extracted `total_active_sessions()` to `DatabaseManager`
+- **Build-time engine version** - `build.rs` extracts grafeo-engine version from `Cargo.lock` at compile time (`GRAFEO_ENGINE_VERSION` env var), eliminating hardcoded version strings
+- Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]` - `json-schema` now opt-in
+- Authentication is now feature-gated behind `auth` - users who don't need auth get a simpler build
 - `--cors-origins` default changed from allowing the dev server origin to denying all cross-origin requests
 - New dependencies: `futures-util` (WebSocket streams)
 - New optional dependencies: `subtle` (auth), `tokio-rustls`, `rustls`, `rustls-pemfile`, `hyper`, `hyper-util` (TLS)
@@ -165,7 +192,8 @@ Initial release.
 - **Pre-commit hooks** (prek) - fmt, clippy, deny, typos
 - **Integration test suite** - health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.1...v0.2.2
