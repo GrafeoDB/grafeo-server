@@ -18,7 +18,10 @@ use std::net::SocketAddr;
 ///
 /// This is a convenience wrapper around `gwp::server::GqlServer::serve`.
 /// The future resolves when the server shuts down.
-pub async fn serve(backend: GrafeoBackend, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(
+    backend: GrafeoBackend,
+    addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
     gwp::server::GqlServer::serve(backend, addr).await?;
     Ok(())
 }
