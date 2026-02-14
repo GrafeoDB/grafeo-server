@@ -1,16 +1,13 @@
-//! Per-IP rate limiting middleware using a fixed-window counter.
+//! Per-IP rate limiting with a fixed-window counter.
+//!
+//! `RateLimiter` is transport-agnostic (used by `state.rs`).
+//! The axum middleware is gated behind the `http` feature.
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, Request, State};
-use axum::middleware::Next;
-use axum::response::Response;
 use dashmap::DashMap;
-
-use crate::error::ApiError;
-use crate::state::AppState;
 
 /// In-memory per-IP rate limiter with fixed-window counters.
 #[derive(Clone)]
@@ -71,39 +68,57 @@ impl RateLimiter {
     }
 }
 
-/// Extracts the client IP from the request.
-fn extract_ip(req: &Request) -> Option<IpAddr> {
-    // X-Forwarded-For takes priority (reverse proxy)
-    if let Some(xff) = req.headers().get("x-forwarded-for")
-        && let Ok(s) = xff.to_str()
-        && let Some(first) = s.split(',').next()
-        && let Ok(ip) = first.trim().parse::<IpAddr>()
-    {
-        return Some(ip);
+// ---------------------------------------------------------------------------
+// HTTP middleware (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "http")]
+mod http_impl {
+    use super::*;
+    use axum::extract::{ConnectInfo, Request, State};
+    use axum::middleware::Next;
+    use axum::response::Response;
+
+    use crate::error::ApiError;
+    use crate::state::AppState;
+
+    /// Extracts the client IP from the request.
+    fn extract_ip(req: &Request) -> Option<IpAddr> {
+        // X-Forwarded-For takes priority (reverse proxy)
+        if let Some(xff) = req.headers().get("x-forwarded-for")
+            && let Ok(s) = xff.to_str()
+            && let Some(first) = s.split(',').next()
+            && let Ok(ip) = first.trim().parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
+
+        // Fallback to ConnectInfo (direct connection)
+        req.extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip())
     }
 
-    // Fallback to ConnectInfo (direct connection)
-    req.extensions()
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip())
+    /// Rate-limiting middleware. Returns 429 when the per-IP limit is exceeded.
+    pub async fn rate_limit_middleware(
+        State(state): State<AppState>,
+        req: Request,
+        next: Next,
+    ) -> Result<Response, ApiError> {
+        let limiter = state.rate_limiter();
+        if !limiter.is_enabled() {
+            return Ok(next.run(req).await);
+        }
+
+        if let Some(ip) = extract_ip(&req)
+            && !limiter.check(ip)
+        {
+            return Err(ApiError::TooManyRequests);
+        }
+
+        Ok(next.run(req).await)
+    }
 }
 
-/// Rate-limiting middleware. Returns 429 when the per-IP limit is exceeded.
-pub async fn rate_limit_middleware(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Result<Response, ApiError> {
-    let limiter = state.rate_limiter();
-    if !limiter.is_enabled() {
-        return Ok(next.run(req).await);
-    }
-
-    if let Some(ip) = extract_ip(&req)
-        && !limiter.check(ip)
-    {
-        return Err(ApiError::TooManyRequests);
-    }
-
-    Ok(next.run(req).await)
-}
+#[cfg(feature = "http")]
+pub use http_impl::rate_limit_middleware;

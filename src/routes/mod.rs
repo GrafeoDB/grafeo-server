@@ -24,7 +24,6 @@ use crate::error::ErrorBody;
 use crate::rate_limit::rate_limit_middleware;
 use crate::request_id::request_id_middleware;
 use crate::state::AppState;
-use crate::ui;
 
 // ---------------------------------------------------------------------------
 // OpenAPI
@@ -135,9 +134,13 @@ pub fn router(state: AppState) -> Router {
         .layer(cors_layer(&state))
         .with_state(state.clone());
 
-    ui::router()
-        .merge(api)
-        .merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
+    // Studio UI: embedded React app via rust-embed
+    #[cfg(feature = "studio")]
+    let app = crate::ui::router().merge(api);
+    #[cfg(not(feature = "studio"))]
+    let app = api;
+
+    app.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
 }
 
 fn cors_layer(state: &AppState) -> CorsLayer {

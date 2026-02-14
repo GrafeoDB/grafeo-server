@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--gwp-port` CLI flag / `GRAFEO_GWP_PORT` env var (default: 7687)
 - **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection
 - **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`
-- **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI — lightweight image for microservices
+- **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI, lightweight image for microservices
 - **4 Docker variants**: lite, gwp, standard (default), full
 
 ### Changed

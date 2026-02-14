@@ -10,11 +10,10 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 use serde::Serialize;
-use utoipa::ToSchema;
 
 use crate::error::ApiError;
-use crate::routes::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
 use crate::sessions::SessionManager;
+use crate::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
 
 /// Default memory limit for new databases: 512 MB.
 const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
@@ -87,7 +86,8 @@ pub struct DatabaseManager {
 }
 
 /// Summary info returned by the list endpoint.
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
+#[cfg_attr(feature = "http", derive(utoipa::ToSchema))]
 pub struct DatabaseSummary {
     /// Database name.
     pub name: String,
@@ -487,7 +487,7 @@ impl DatabaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::types::DatabaseOptions;
+    use crate::types::DatabaseOptions;
 
     #[test]
     fn test_name_validation() {

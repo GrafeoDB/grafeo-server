@@ -6,7 +6,7 @@
 use grafeo_engine::GrafeoDB;
 
 use crate::error::ApiError;
-use crate::routes::types::DatabaseType;
+use crate::types::DatabaseType;
 
 /// Dispatches schema loading based on database type. No-op for types that
 /// don't use schemas (Lpg, Rdf).

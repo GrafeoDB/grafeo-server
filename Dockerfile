@@ -3,11 +3,15 @@
 #
 # Build targets:
 #   docker build --target lite     -t grafeo-server:lite .
-#   docker build --target gwp      -t grafeo-server:gwp .
 #   docker build --target standard -t grafeo-server:standard .
 #   docker build --target full     -t grafeo-server:full .
 #
 # Default target (no --target) builds "standard".
+#
+# Tiers:
+#   lite     — GWP-only (gRPC), GQL + storage, no HTTP/UI
+#   standard — HTTP + Studio UI + all languages + storage (default)
+#   full     — HTTP + GWP + Studio + AI + auth + TLS + schemas
 # =============================================================================
 
 # --- Stage: Build the web UI ---
@@ -25,32 +29,44 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 
-# --- Build: lite (no UI, GQL + core storage only, no GWP) ---
+# --- Build: lite (GWP-only, GQL + storage, no HTTP/UI) ---
 FROM rust-base AS build-lite
 RUN mkdir -p client/dist && \
-    cargo build --release --no-default-features --features "gql,storage" && \
+    cargo build --release --no-default-features --features "lite" && \
     strip target/release/grafeo-server
 
-# --- Build: gwp (no UI, GQL + core storage + GWP) ---
-FROM rust-base AS build-gwp
-RUN mkdir -p client/dist && \
-    cargo build --release --no-default-features --features "gql,storage,gwp" && \
-    strip target/release/grafeo-server
-
-# --- Build: standard (with UI, default features) ---
+# --- Build: standard (HTTP + Studio UI, all languages, default features) ---
 FROM rust-base AS build-standard
 COPY --from=ui-builder /ui/dist client/dist/
 RUN cargo build --release && \
     strip target/release/grafeo-server
 
-# --- Build: full (with UI, all features) ---
+# --- Build: full (HTTP + GWP + Studio + AI + auth + TLS + schemas) ---
 FROM rust-base AS build-full
 COPY --from=ui-builder /ui/dist client/dist/
 RUN cargo build --release --features full && \
     strip target/release/grafeo-server
 
-# --- Shared runtime base ---
-FROM debian:bookworm-slim AS runtime-base
+# --- Runtime: lite (GWP-only, no HTTP healthcheck) ---
+FROM debian:bookworm-slim AS runtime-lite
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+VOLUME /data
+EXPOSE 7687
+ENTRYPOINT ["grafeo-server"]
+CMD ["--host", "0.0.0.0", "--data-dir", "/data"]
+
+# --- Runtime: shared HTTP base ---
+FROM debian:bookworm-slim AS runtime-http
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+VOLUME /data
+EXPOSE 7474
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -sf http://localhost:7474/health || exit 1
+ENTRYPOINT ["grafeo-server"]
+CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
+
+# --- Runtime: full (both ports) ---
+FROM debian:bookworm-slim AS runtime-full
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 VOLUME /data
 EXPOSE 7474 7687
@@ -60,19 +76,15 @@ ENTRYPOINT ["grafeo-server"]
 CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 
 # --- Final: lite ---
-FROM runtime-base AS lite
+FROM runtime-lite AS lite
 COPY --from=build-lite /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
-# --- Final: gwp ---
-FROM runtime-base AS gwp
-COPY --from=build-gwp /build/target/release/grafeo-server /usr/local/bin/grafeo-server
-
-# --- Final: standard (default) ---
-FROM runtime-base AS standard
+# --- Final: standard ---
+FROM runtime-http AS standard
 COPY --from=build-standard /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # --- Final: full ---
-FROM runtime-base AS full
+FROM runtime-full AS full
 COPY --from=build-full /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # Default target is standard

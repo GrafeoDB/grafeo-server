@@ -9,15 +9,25 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["all-languages", "ai", "rdf", "storage", "owl-schema", "rdfs-schema", "gwp"]
+default = ["http", "studio", "all-languages", "storage"]
+
+# Transport layers
+http = [
+    "dep:axum", "dep:tower", "dep:tower-http",
+    "dep:utoipa", "dep:utoipa-swagger-ui",
+    "dep:sysinfo", "dep:serde_json",
+]
+gwp = ["dep:gwp", "dep:tonic"]
+
+# Embedded web UI (requires http)
+studio = ["http", "dep:rust-embed", "dep:mime_guess"]
 
 # Server-specific features
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]
-json-schema = ["dep:jsonschema"]
+json-schema = ["dep:jsonschema", "dep:serde_json"]
 auth = ["dep:subtle"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
-gwp = ["dep:gwp", "dep:tonic"]
 
 # Engine: query languages
 gql = ["grafeo-engine/gql"]
@@ -46,9 +56,10 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 # Engine: data models
 rdf = ["grafeo-engine/rdf"]
 
-# Everything (server + engine)
+# Tiers
+lite = ["gql", "storage", "gwp"]
 full = [
-    "all-languages", "ai", "rdf", "storage", "embed",
+    "http", "studio", "all-languages", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp",
 ]
 
@@ -57,17 +68,17 @@ full = [
 grafeo-engine = { version = "0.5.3", default-features = false }
 grafeo-common = "0.5.3"
 
-# Web framework
-axum = { version = "0.8", features = ["json", "query", "ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
+# Web framework (feature-gated: http)
+axum = { version = "0.8", features = ["json", "query", "ws"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"], optional = true }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 base64 = "0.22"
 
 # Error handling
@@ -88,19 +99,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.11", features = ["v4"] }
 futures-util = "0.3"
 
-# Security (feature-gated)
+# Security (feature-gated: auth)
 subtle = { version = "2", optional = true }
 
-# System info (RAM, disk)
-sysinfo = "0.38.1"
+# System info (feature-gated: http)
+sysinfo = { version = "0.38.1", optional = true }
 
-# OpenAPI documentation
-utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+# OpenAPI documentation (feature-gated: http)
+utoipa = { version = "5", features = ["axum_extras"], optional = true }
+utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 
-# Static file embedding for the web UI
-rust-embed = "8.5"
-mime_guess = "2.0"
+# Static file embedding for the web UI (feature-gated: studio)
+rust-embed = { version = "8.5", optional = true }
+mime_guess = { version = "2.0", optional = true }
 
 # Schema parsing (feature-gated)
 sophia_turtle = { version = "0.9", optional = true }
@@ -108,11 +119,11 @@ sophia_api = { version = "0.9", optional = true }
 sophia_inmem = { version = "0.9", optional = true }
 jsonschema = { version = "0.41", optional = true }
 
-# GQL Wire Protocol (feature-gated)
+# GQL Wire Protocol (feature-gated: gwp)
 gwp = { version = "0.1", optional = true }
 tonic = { version = "0.12", optional = true }
 
-# TLS (feature-gated)
+# TLS (feature-gated: tls)
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
@@ -125,6 +136,7 @@ tokio-tungstenite = "0.28"
 futures-util = "0.3"
 tempfile = "3.25"
 gwp = "0.1"
+serde_json = "1.0"
 
 [lints.rust]
 unsafe_code = "warn"
