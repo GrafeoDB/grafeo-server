@@ -28,18 +28,22 @@ Three image variants are available:
 | Variant | Tag | Languages | AI/Search | GWP | Web UI | Use Case |
 |---------|-----|-----------|-----------|-----|--------|----------|
 | **lite** | `grafeo-server:lite` | GQL only | No | No | No | Sidecar, CI, embedded |
+| **gwp** | `grafeo-server:gwp` | GQL only | No | Yes (:7687) | No | Wire protocol, microservice |
 | **standard** | `grafeo-server:latest` | All 6 | Yes | Yes (:7687) | Yes | General purpose |
 | **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes (:7687) | Yes | Production, AI/RAG |
 
 ```bash
-# Lite - GQL only, no web UI, smallest image
+# Lite - GQL only, no web UI, no GWP, smallest image
 docker run -p 7474:7474 grafeo/grafeo-server:lite
 
+# GWP - GQL only + wire protocol, no web UI
+docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:gwp
+
 # Full - everything including auth, TLS, ONNX embeddings
-docker run -p 7474:7474 grafeo/grafeo-server:full
+docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-full`.
+Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-gwp`, `grafeo-server:0.3.0-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -351,6 +355,7 @@ The Dockerfile supports three build targets matching these presets:
 
 ```bash
 docker build --target lite     -t grafeo-server:lite .
+docker build --target gwp      -t grafeo-server:gwp .
 docker build --target standard -t grafeo-server:standard .   # default
 docker build --target full     -t grafeo-server:full .
 ```
