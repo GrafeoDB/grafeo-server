@@ -94,16 +94,14 @@ impl GqlBackend for GrafeoBackend {
     ) -> Result<(), GqlError> {
         match property {
             SessionProperty::Graph(db_name) => {
-                let entry = self
-                    .state
-                    .databases()
-                    .get(&db_name)
-                    .ok_or_else(|| GqlError::Session(format!("database '{db_name}' not found")))?;
+                let entry =
+                    self.state.databases().get(&db_name).ok_or_else(|| {
+                        GqlError::Session(format!("database '{db_name}' not found"))
+                    })?;
 
-                let engine_session =
-                    tokio::task::spawn_blocking(move || entry.db.session())
-                        .await
-                        .map_err(GqlError::backend)?;
+                let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
+                    .await
+                    .map_err(GqlError::backend)?;
 
                 let session_arc = self.get_session(session)?;
                 let mut s = session_arc.lock();
@@ -155,7 +153,9 @@ impl GqlBackend for GrafeoBackend {
             if params.is_empty() {
                 session.engine_session.execute(&statement)
             } else {
-                session.engine_session.execute_with_params(&statement, params)
+                session
+                    .engine_session
+                    .execute_with_params(&statement, params)
             }
         })
         .await
@@ -250,9 +250,7 @@ fn grafeo_to_gwp(value: &grafeo_common::Value) -> GwpValue {
 }
 
 /// Converts GWP parameters to grafeo-engine parameters.
-fn convert_params(
-    params: &HashMap<String, GwpValue>,
-) -> HashMap<String, grafeo_common::Value> {
+fn convert_params(params: &HashMap<String, GwpValue>) -> HashMap<String, grafeo_common::Value> {
     params
         .iter()
         .filter_map(|(k, v)| gwp_to_grafeo(v).map(|gv| (k.clone(), gv)))
