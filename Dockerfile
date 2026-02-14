@@ -46,7 +46,7 @@ RUN cargo build --release --features full && \
 FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 VOLUME /data
-EXPOSE 7474
+EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:7474/health || exit 1
 ENTRYPOINT ["grafeo-server"]

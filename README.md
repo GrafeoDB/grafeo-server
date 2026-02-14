@@ -16,7 +16,7 @@ Pure Rust, single binary. Available in three Docker image variants to match your
 ### Docker Hub
 
 ```bash
-# Standard — all query languages, AI/search features, web UI
+# Standard - all query languages, AI/search features, web UI
 docker run -p 7474:7474 grafeo/grafeo-server
 
 # With persistent storage
@@ -32,10 +32,10 @@ Three image variants are available:
 | **full** | `grafeo-server:full` | All 6 | Yes + ONNX embed | Yes | Production, AI/RAG |
 
 ```bash
-# Lite — GQL only, no web UI, smallest image
+# Lite - GQL only, no web UI, smallest image
 docker run -p 7474:7474 grafeo/grafeo-server:lite
 
-# Full — everything including auth, TLS, ONNX embeddings
+# Full - everything including auth, TLS, ONNX embeddings
 docker run -p 7474:7474 grafeo/grafeo-server:full
 ```
 
@@ -133,7 +133,7 @@ Available algorithms include: PageRank, BFS, DFS, Dijkstra, Bellman-Ford, Connec
 
 ### Batch Queries
 
-Execute multiple queries atomically in a single request. All queries run within an implicit transaction — if any query fails, the entire batch is rolled back.
+Execute multiple queries atomically in a single request. All queries run within an implicit transaction - if any query fails, the entire batch is rolled back.
 
 ```bash
 curl -X POST http://localhost:7474/batch \
@@ -267,7 +267,7 @@ grafeo-server --data-dir /data --tls-cert /certs/cert.pem --tls-key /certs/key.p
 
 ## Feature Flags
 
-Grafeo Server uses Cargo feature flags to control both server capabilities and which engine features are compiled in. The default build includes all query languages, AI/search, and schema parsing — matching the **standard** Docker image.
+Grafeo Server uses Cargo feature flags to control both server capabilities and which engine features are compiled in. The default build includes all query languages, AI/search, and schema parsing - matching the **standard** Docker image.
 
 ### Server Features
 
@@ -285,7 +285,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 |---------|-------------|---------|
 | `gql` | GQL (ISO/IEC 39075) | Yes |
 | `cypher` | Cypher (openCypher 9.0) | Yes |
-| `sparql` | SPARQL (W3C 1.1) — implies `rdf` | Yes |
+| `sparql` | SPARQL (W3C 1.1) - implies `rdf` | Yes |
 | `gremlin` | Gremlin (Apache TinkerPop) | Yes |
 | `graphql` | GraphQL | Yes |
 | `sql-pgq` | SQL/PGQ (SQL:2023 GRAPH_TABLE) | Yes |
@@ -311,7 +311,7 @@ Grafeo Server uses Cargo feature flags to control both server capabilities and w
 # Default build (standard)
 cargo build --release
 
-# Lite — GQL + core storage only
+# Lite - GQL + core storage only
 cargo build --release --no-default-features --features "gql,storage"
 
 # With authentication

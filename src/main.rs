@@ -53,6 +53,20 @@ async fn main() {
         }
     });
 
+    // Spawn the GQL Wire Protocol (gRPC) server alongside HTTP
+    #[cfg(feature = "gwp")]
+    {
+        let gwp_state = state.clone();
+        let gwp_addr = std::net::SocketAddr::new(addr.ip(), config.gwp_port);
+        tokio::spawn(async move {
+            let backend = grafeo_server::gwp::GrafeoBackend::new(gwp_state);
+            tracing::info!(%gwp_addr, "GWP (gRPC) server ready");
+            if let Err(e) = gwp::server::GqlServer::serve(backend, gwp_addr).await {
+                tracing::error!("GWP server error: {e}");
+            }
+        });
+    }
+
     #[cfg(feature = "tls")]
     if config.tls_enabled() {
         let tls_config = grafeo_server::tls::load_rustls_config(

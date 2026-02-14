@@ -18,6 +18,8 @@ pub mod state;
 #[cfg(feature = "tls")]
 pub mod tls;
 mod ui;
+#[cfg(feature = "gwp")]
+pub mod gwp;
 
 pub use routes::router;
 pub use state::AppState;
