@@ -1931,7 +1931,7 @@ async fn spawn_server_with_gwp() -> (String, String) {
     let gwp_addr: SocketAddr = gwp_listener.local_addr().unwrap();
     // Drop the listener so tonic can bind the same port
     drop(gwp_listener);
-    let backend = grafeo_server::gwp::GrafeoBackend::new(state);
+    let backend = grafeo_gwp::GrafeoBackend::new(state.service().clone());
     tokio::spawn(async move {
         gwp::server::GqlServer::serve(backend, gwp_addr)
             .await

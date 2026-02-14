@@ -207,6 +207,7 @@ pub struct HealthInfo {
 /// Populated by the binary crate (which has all feature flags) and passed
 /// to transport crates for health/status endpoints.
 #[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnabledFeatures {
     /// Query language support (e.g. "gql", "cypher", "sparql").
     pub languages: Vec<String>,

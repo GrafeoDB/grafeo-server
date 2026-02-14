@@ -134,13 +134,7 @@ async fn main() {
 
         tracing::info!(%addr, "Grafeo Server ready");
 
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+        grafeo_http::serve(listener, app, shutdown_signal()).await;
 
         tracing::info!("Grafeo Server shut down");
     }

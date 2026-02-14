@@ -150,6 +150,24 @@ pub fn router(state: AppState) -> Router {
     api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
 }
 
+/// Serve the HTTP router on the given listener with graceful shutdown.
+///
+/// Wraps `axum::serve` with `ConnectInfo<SocketAddr>` so rate limiting
+/// and logging can extract client addresses.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .expect("server error");
+}
+
 fn cors_layer(state: &AppState) -> CorsLayer {
     let origins = state.cors_origins();
 
