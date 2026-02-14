@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{
-    GqlBackend, ResetTarget, ResultFrame, ResultStream, SessionConfig, SessionHandle,
-    SessionProperty, TransactionHandle,
+    CreateDatabaseConfig, DatabaseInfo, GqlBackend, ResetTarget, ResultFrame, ResultStream,
+    SessionConfig, SessionHandle, SessionProperty, TransactionHandle,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -214,6 +214,128 @@ impl GqlBackend for GrafeoBackend {
         .await
         .map_err(GqlError::backend)?
         .map_err(|e| GqlError::Transaction(e.to_string()))
+    }
+
+    // -----------------------------------------------------------------
+    // Database lifecycle
+    // -----------------------------------------------------------------
+
+    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, GqlError> {
+        let list = self.state.databases().list();
+        Ok(list
+            .into_iter()
+            .map(|s| DatabaseInfo {
+                name: s.name,
+                node_count: s.node_count as u64,
+                edge_count: s.edge_count as u64,
+                persistent: s.persistent,
+                database_type: s.database_type,
+                storage_mode: String::new(),
+                memory_limit_bytes: None,
+                backward_edges: None,
+                threads: None,
+            })
+            .collect())
+    }
+
+    async fn create_database(
+        &self,
+        config: CreateDatabaseConfig,
+    ) -> Result<DatabaseInfo, GqlError> {
+        use grafeo_service::types::{
+            CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode,
+        };
+
+        let database_type = match config.database_type.to_lowercase().as_str() {
+            "lpg" => DatabaseType::Lpg,
+            "rdf" => DatabaseType::Rdf,
+            other => {
+                return Err(GqlError::Session(format!(
+                    "unsupported database type: {other}"
+                )));
+            }
+        };
+
+        let storage_mode = match config.storage_mode.to_lowercase().as_str() {
+            "inmemory" | "in-memory" | "in_memory" | "" => StorageMode::InMemory,
+            "persistent" => StorageMode::Persistent,
+            other => {
+                return Err(GqlError::Session(format!(
+                    "unsupported storage mode: {other}"
+                )));
+            }
+        };
+
+        let req = CreateDatabaseRequest {
+            name: config.name.clone(),
+            database_type,
+            storage_mode,
+            options: DatabaseOptions {
+                memory_limit_bytes: config.memory_limit_bytes.map(|v| v as usize),
+                backward_edges: config.backward_edges,
+                threads: config.threads.map(|v| v as usize),
+                wal_enabled: config.wal_enabled,
+                wal_durability: config.wal_durability,
+                spill_path: None,
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        self.state
+            .databases()
+            .create(&req)
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        self.get_database_info(&config.name).await
+    }
+
+    async fn delete_database(&self, name: &str) -> Result<String, GqlError> {
+        // Invalidate GWP sessions targeting this database before deleting
+        let sessions_to_remove: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.value().lock().database == name)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if !sessions_to_remove.is_empty() {
+            tracing::info!(
+                database = %name,
+                count = sessions_to_remove.len(),
+                "Invalidating GWP sessions for deleted database"
+            );
+            for sid in &sessions_to_remove {
+                self.sessions.remove(sid);
+            }
+        }
+
+        self.state
+            .databases()
+            .delete(name)
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(name.to_owned())
+    }
+
+    async fn get_database_info(&self, name: &str) -> Result<DatabaseInfo, GqlError> {
+        let entry = self
+            .state
+            .databases()
+            .get(name)
+            .ok_or_else(|| GqlError::Session(format!("database '{name}' not found")))?;
+
+        Ok(DatabaseInfo {
+            name: name.to_owned(),
+            node_count: entry.db.node_count() as u64,
+            edge_count: entry.db.edge_count() as u64,
+            persistent: entry.db.path().is_some(),
+            database_type: entry.metadata.database_type.clone(),
+            storage_mode: entry.metadata.storage_mode.clone(),
+            memory_limit_bytes: entry.db.memory_limit().map(|v| v as u64),
+            backward_edges: Some(entry.metadata.backward_edges),
+            threads: Some(entry.metadata.threads as u32),
+        })
     }
 }
 

@@ -178,7 +178,7 @@ rust-embed = { version = "8.5", optional = true }
 mime_guess = { version = "2.0", optional = true }
 
 # GQL Wire Protocol (feature-gated: gwp)
-gwp = { version = "0.1", optional = true }
+gwp = { path = "H:/gql-wire-protocol", optional = true }
 tonic = { version = "0.12", optional = true }
 
 # TLS (feature-gated: tls)
@@ -193,7 +193,7 @@ reqwest = { version = "0.13.2", features = ["gzip", "json"] }
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 tempfile = "3.25"
-gwp = "0.1"
+gwp = { path = "H:/gql-wire-protocol" }
 serde_json = "1.0"
 
 [lints]
