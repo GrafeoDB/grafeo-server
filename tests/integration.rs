@@ -16,7 +16,12 @@ use tokio_tungstenite::tungstenite;
 async fn spawn_server() -> String {
     // Inline the same setup as main.rs but with in-memory config
     let state = grafeo_server::AppState::new_in_memory(300);
-    let app = grafeo_server::router(state);
+    let mut app = grafeo_server::router(state);
+
+    #[cfg(feature = "studio")]
+    {
+        app = grafeo_studio::router().merge(app);
+    }
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();

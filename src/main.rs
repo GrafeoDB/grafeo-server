@@ -7,6 +7,7 @@
 
 use grafeo_server::config::Config;
 
+#[cfg(feature = "http")]
 use grafeo_service::types::EnabledFeatures;
 use grafeo_service::{ServiceConfig, ServiceState};
 use tracing_subscriber::EnvFilter;
@@ -151,6 +152,7 @@ async fn main() {
 /// This function runs in the binary crate which has all feature flags,
 /// so `cfg!()` checks work correctly. The result is passed to transport
 /// crates that need to report enabled features (e.g. health endpoint).
+#[cfg(feature = "http")]
 fn detect_features() -> EnabledFeatures {
     let mut languages = Vec::new();
     if cfg!(feature = "gql") {
