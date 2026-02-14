@@ -271,7 +271,7 @@ fn dispatch_query(
         (Language::Cypher, _) => {
             return Err(ServiceError::BadRequest(
                 "cypher support not enabled in this build".to_string(),
-            ))
+            ));
         }
 
         // GraphQL
@@ -283,7 +283,7 @@ fn dispatch_query(
         (Language::Graphql, _) => {
             return Err(ServiceError::BadRequest(
                 "graphql support not enabled in this build".to_string(),
-            ))
+            ));
         }
 
         // Gremlin
@@ -295,7 +295,7 @@ fn dispatch_query(
         (Language::Gremlin, _) => {
             return Err(ServiceError::BadRequest(
                 "gremlin support not enabled in this build".to_string(),
-            ))
+            ));
         }
 
         // SPARQL
@@ -305,7 +305,7 @@ fn dispatch_query(
         (Language::Sparql, _) => {
             return Err(ServiceError::BadRequest(
                 "sparql support not enabled in this build".to_string(),
-            ))
+            ));
         }
 
         // SQL/PGQ
@@ -317,7 +317,7 @@ fn dispatch_query(
         (Language::SqlPgq, _) => {
             return Err(ServiceError::BadRequest(
                 "sql-pgq support not enabled in this build".to_string(),
-            ))
+            ));
         }
     };
 

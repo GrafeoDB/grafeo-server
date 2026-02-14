@@ -6,6 +6,7 @@
 !Cargo.lock
 !build.rs
 !src/
+!crates/
 
 # Web UI
 !client/

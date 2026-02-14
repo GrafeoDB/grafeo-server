@@ -46,8 +46,7 @@ pub async fn tx_begin(
         .and_then(|b| b.database.as_deref())
         .unwrap_or("default");
 
-    let session_id =
-        QueryService::begin_tx(state.databases(), state.sessions(), db_name).await?;
+    let session_id = QueryService::begin_tx(state.databases(), state.sessions(), db_name).await?;
 
     Ok(Json(TransactionResponse {
         session_id,

@@ -57,15 +57,17 @@ pub async fn batch_query(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
-    let results =
-        QueryService::batch_execute(state.databases(), state.metrics(), db_name, batch_queries, timeout)
-            .await?;
+    let results = QueryService::batch_execute(
+        state.databases(),
+        state.metrics(),
+        db_name,
+        batch_queries,
+        timeout,
+    )
+    .await?;
 
     let responses: Vec<_> = results.iter().map(query_result_to_response).collect();
-    let total_ms: f64 = results
-        .iter()
-        .filter_map(|r| r.execution_time_ms)
-        .sum();
+    let total_ms: f64 = results.iter().filter_map(|r| r.execution_time_ms).sum();
 
     Ok(Json(BatchQueryResponse {
         results: responses,

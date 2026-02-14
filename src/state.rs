@@ -81,11 +81,7 @@ impl AppState {
 
     /// Creates an in-memory state with basic auth enabled (for tests).
     #[cfg(feature = "auth")]
-    pub fn new_in_memory_with_basic_auth(
-        session_ttl: u64,
-        user: String,
-        password: String,
-    ) -> Self {
+    pub fn new_in_memory_with_basic_auth(session_ttl: u64, user: String, password: String) -> Self {
         Self {
             inner: Arc::new(AppInner {
                 service: ServiceState::new_in_memory_with_basic_auth(session_ttl, user, password),

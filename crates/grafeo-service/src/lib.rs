@@ -129,11 +129,7 @@ impl ServiceState {
 
     /// Creates an in-memory state with basic auth enabled (for tests).
     #[cfg(feature = "auth")]
-    pub fn new_in_memory_with_basic_auth(
-        session_ttl: u64,
-        user: String,
-        password: String,
-    ) -> Self {
+    pub fn new_in_memory_with_basic_auth(session_ttl: u64, user: String, password: String) -> Self {
         Self {
             inner: Arc::new(Inner {
                 databases: DatabaseManager::new(None),
@@ -231,11 +227,7 @@ impl ServiceState {
             Some(ms) => Some(Duration::from_millis(ms)),
             None => {
                 let global = self.query_timeout();
-                if global.is_zero() {
-                    None
-                } else {
-                    Some(global)
-                }
+                if global.is_zero() { None } else { Some(global) }
             }
         }
     }

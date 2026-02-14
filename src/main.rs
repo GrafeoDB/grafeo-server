@@ -52,10 +52,8 @@ async fn main() {
     // -----------------------------------------------------------------
     #[cfg(all(feature = "gwp", not(feature = "http")))]
     {
-        let gwp_addr = std::net::SocketAddr::new(
-            config.host.parse().expect("invalid host"),
-            config.gwp_port,
-        );
+        let gwp_addr =
+            std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.gwp_port);
         let backend = grafeo_server::gwp::GrafeoBackend::new(state);
         tracing::info!(%gwp_addr, "GWP server ready (standalone)");
         if let Err(e) = gwp::server::GqlServer::serve(backend, gwp_addr).await {
@@ -70,10 +68,8 @@ async fn main() {
     // -----------------------------------------------------------------
     #[cfg(feature = "http")]
     {
-        let addr = std::net::SocketAddr::new(
-            config.host.parse().expect("invalid host"),
-            config.port,
-        );
+        let addr =
+            std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.port);
         let app = grafeo_server::router(state.clone());
         let listener = tokio::net::TcpListener::bind(addr)
             .await
