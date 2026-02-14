@@ -8,6 +8,8 @@ pub mod auth;
 pub mod config;
 pub mod database_manager;
 pub mod error;
+#[cfg(feature = "gwp")]
+pub mod gwp;
 pub mod metrics;
 pub mod rate_limit;
 pub mod request_id;
@@ -18,8 +20,6 @@ pub mod state;
 #[cfg(feature = "tls")]
 pub mod tls;
 mod ui;
-#[cfg(feature = "gwp")]
-pub mod gwp;
 
 pub use routes::router;
 pub use state::AppState;

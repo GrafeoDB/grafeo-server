@@ -1939,10 +1939,7 @@ async fn spawn_server_with_gwp() -> (String, String) {
     // Give the gRPC server a moment to bind
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    (
-        format!("http://{http_addr}"),
-        format!("http://{gwp_addr}"),
-    )
+    (format!("http://{http_addr}"), format!("http://{gwp_addr}"))
 }
 
 #[cfg(feature = "gwp")]
