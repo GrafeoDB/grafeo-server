@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-bolt"
-version = "0.4.1"
+version = "0.4.2"
 
 [[package]]
 name = "grafeo-common"
@@ -1102,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "axum",
  "clap",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "axum",
  "mime_guess",
