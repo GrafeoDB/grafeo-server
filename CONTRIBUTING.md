@@ -29,10 +29,10 @@ cargo run
 ### Running Tests
 
 ```bash
-# Default features (51 integration tests)
+# Default features (59 integration tests)
 cargo test
 
-# With authentication tests (60 integration tests)
+# With authentication tests
 cargo test --features auth
 
 # All features
@@ -93,58 +93,47 @@ The project follows the [Grafeo Rust Code Style Guide](.claude/CODE_STYLE.md). K
 
 - **Async boundaries** - Database operations run via `tokio::task::spawn_blocking` to avoid blocking the async runtime
 - **Concurrency** - `parking_lot::Mutex` (not std), `DashMap` for session/rate-limit maps
-- **State** - `AppState` wraps `Arc<Inner>` and is cloned into all handlers
+- **State** - `ServiceState` (in grafeo-service) holds shared state; `AppState` (in grafeo-http) wraps it with HTTP-specific fields
 - **Feature gating** - Use `#[cfg(feature = "...")]` on modules, struct fields, enum variants, and tests as appropriate
 
 ## Project Structure
 
-```
-src/
-  main.rs            Entry point, CLI config, graceful shutdown
-  lib.rs             Public module exports (enables integration tests)
-  config.rs          CLI/env configuration (clap derive)
-  state.rs           AppState with Arc<Inner>
-  error.rs           ApiError enum -> JSON responses
-  database_manager.rs  Multi-database management
-  sessions.rs        DashMap session registry with TTL
-  auth.rs            Authentication middleware (feature: auth)
-  rate_limit.rs      Per-IP rate limiting
-  request_id.rs      X-Request-Id tracking
-  metrics.rs         Prometheus-compatible metrics
-  schema.rs          Schema parsing (feature-gated)
-  tls.rs             HTTPS via rustls (feature: tls)
-  ui.rs              rust-embed static file serving
-  routes/
-    mod.rs           Router assembly, CORS, OpenAPI
-    query.rs         POST /query, /cypher, /graphql, /gremlin, /sparql
-    batch.rs         POST /batch
-    transaction.rs   POST /tx/begin, /tx/query, /tx/commit, /tx/rollback
-    database.rs      GET/POST /db, GET/DELETE /db/{name}, stats, schema
-    system.rs        GET /health, /metrics, /system/resources
-    websocket.rs     GET /ws
-    types.rs         Request/response structs
-    helpers.rs       Shared handler utilities
+```text
+src/                            Binary crate (orchestrator)
+  main.rs                       Entry point: compose transports, detect features
+  config.rs                     CLI/env config (clap derive)
+  lib.rs                        Minimal re-exports for integration tests
+crates/
+  grafeo-service/               Core business logic (transport-agnostic)
+    query.rs, session.rs, database.rs, types.rs, error.rs, metrics.rs, ...
+  grafeo-http/                  HTTP/REST transport adapter
+    routes/, middleware/, state.rs, error.rs, encode.rs, types.rs, tls.rs
+  grafeo-gwp/                   GQL Wire Protocol (gRPC) adapter
+    backend.rs, encode.rs
+  grafeo-studio/                Embedded web UI (rust-embed)
+  grafeo-bolt/                  Bolt v5 protocol (placeholder)
 tests/
-  integration.rs     Integration test suite (runs against in-memory server)
-client/              React + TypeScript web UI
+  integration.rs                59 integration tests (HTTP + GWP)
+client/                         React + TypeScript web UI
 ```
 
 ## Feature Flags
 
 When adding new optional functionality, prefer feature-gating it:
 
-| Feature | What it gates |
-|---------|---------------|
-| `owl-schema` | OWL/Turtle schema parsing |
-| `rdfs-schema` | RDFS schema support |
-| `json-schema` | JSON Schema validation |
-| `auth` | Authentication middleware + `subtle` crate |
-| `tls` | HTTPS support + `rustls` crate family |
-| `full` | All of the above |
+| Feature      | What it gates                              |
+| ------------ | ------------------------------------------ |
+| `owl-schema` | OWL/Turtle schema parsing                  |
+| `rdfs-schema`| RDFS schema support                        |
+| `json-schema`| JSON Schema validation                     |
+| `auth`       | Authentication middleware + `subtle` crate |
+| `tls`        | HTTPS support + `rustls` crate family      |
+| `full`       | All of the above                           |
 
 Remember to:
+
 - Add the feature to `full` in `Cargo.toml`
-- Gate modules with `#[cfg(feature = "...")]` in `lib.rs`
+- Gate modules with `#[cfg(feature = "...")]` in the appropriate crate's `lib.rs`
 - Gate related tests in `tests/integration.rs`
 - Update CI to test both with and without the feature
 

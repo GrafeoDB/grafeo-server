@@ -1000,9 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "998dc7753fd65be2739369b211dd3242b094c19e188f3185d1c8abe3d987da64"
+version = "0.5.4"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1028,9 +1026,7 @@ version = "0.4.0"
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afd785177b03eda5e241bd67d9a4fc8bb2313a1d5b3111bcaad7af7e3223773c"
+version = "0.5.4"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1051,9 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37b7bd35424b58982c551ad0159caba0cd7f750c46306e086cd1eda7ed935736"
+version = "0.5.4"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1077,9 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97378bf452d8334ce96f9e1d86dff2ee25525a7f66f0d905bd49ca20790861c8"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1199,9 +1191,9 @@ dependencies = [
 
 [[package]]
 name = "gwp"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37401726d3b4f3f11df48f6617422f52ef48dd501592e29ca6ad7fae26c385de"
+checksum = "fe2993c3267726e8495b9774bcb5baf876eb1c1507f2e1ad26bd5e2a88666603"
 dependencies = [
  "prost",
  "prost-build",
