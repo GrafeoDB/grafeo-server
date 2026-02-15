@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.4", default-features = false }
-grafeo-common = "0.5.4"
+grafeo-engine = { version = "0.5.5", default-features = false }
+grafeo-common = "0.5.5"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
