@@ -23,11 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
-        with:
-          repository: GrafeoDB/grafeo
-          path: .grafeo
-
       # Set up QEMU for multi-arch builds
       - uses: docker/setup-qemu-action@v3
 

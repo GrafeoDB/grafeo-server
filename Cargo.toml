@@ -164,10 +164,6 @@ axum = { version = "0.8" }
 [lints]
 workspace = true
 
-[patch.crates-io]
-grafeo-engine = { path = "../grafeo/crates/grafeo-engine" }
-grafeo-common = { path = "../grafeo/crates/grafeo-common" }
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
