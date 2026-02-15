@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Result streaming**: query responses are now encoded and sent incrementally in batches of 1000 rows, reducing peak memory from O(rows x json_size) to O(batch_size x json_size) for the encoded output
+  - `RowBatchIter` in `grafeo-service`: transport-agnostic row-batch iterator with `QueryResultExt` extension trait and `DEFAULT_BATCH_SIZE` constant
+  - `StreamingQueryBody` in `grafeo-http`: `Stream` implementation producing chunked JSON byte-identical to the previous materialized `QueryResponse` serialization
+  - Lazy `GrafeoResultStream` in `grafeo-gwp`: state-machine replacing the pre-built `Vec<ResultFrame>` — large results now produce multiple `Batch` frames (e.g., 2500 rows = 3 batches instead of 1)
+- **13 new streaming unit tests**: grafeo-service (7: empty, exact multiple, partial final, larger-than-rows, size_hint, remaining, zero-floors-to-one), grafeo-http (3: empty JSON, materialized equality, multi-chunk), grafeo-gwp (3: empty frames, single batch, multi-batch)
+
+### Changed
+
+- All query endpoints (`/query`, `/cypher`, `/graphql`, `/gremlin`, `/sparql`, `/sql`, `/tx/query`) now return streaming `Response<Body>` instead of `Json<QueryResponse>`; HTTP JSON format is unchanged (backward compatible)
+- Batch (`/batch`) and WebSocket (`/ws`) endpoints remain materialized (deferred)
+- 31 per-crate unit tests total (13 grafeo-service + 9 grafeo-http + 9 grafeo-gwp, up from 6 + 6 + 6)
+
 ## [0.4.1] - 2026-02-15
 
 ### Added
