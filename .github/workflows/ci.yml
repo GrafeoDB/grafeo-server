@@ -279,5 +279,13 @@ jobs:
           echo "grafeo contents:"
           ls -la grafeo/ || echo "grafeo not found"
 
+      - name: Create workspace .dockerignore
+        run: |
+          cat > .dockerignore << 'EOF'
+          # Allow everything by default
+          # The grafeo-server/.dockerignore is being used and blocking the context
+          # This file overrides it
+          EOF
+
       - name: Build Docker image
         run: docker build -f grafeo-server/Dockerfile -t grafeo-server:test .
