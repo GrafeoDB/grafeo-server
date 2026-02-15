@@ -18,6 +18,9 @@ target/
 **/*.rs.bk
 *.pdb
 
+# ── CI checkout of grafeo engine (checked out at build time) ─────────
+.grafeo/
+
 # ── Client (Node.js) ─────────────────────────────────────────────────
 client/node_modules/
 client/dist/
