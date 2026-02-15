@@ -5,7 +5,7 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] - 2026-02-16
 
 ### Added
 
@@ -14,17 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `StreamingQueryBody` in `grafeo-http`: `Stream` implementation producing chunked JSON byte-identical to the previous materialized `QueryResponse` serialization
   - Lazy `GrafeoResultStream` in `grafeo-gwp`: state-machine replacing the pre-built `Vec<ResultFrame>` — large results now produce multiple `Batch` frames (e.g., 2500 rows = 3 batches instead of 1)
 - **13 new streaming unit tests**: grafeo-service (7: empty, exact multiple, partial final, larger-than-rows, size_hint, remaining, zero-floors-to-one), grafeo-http (3: empty JSON, materialized equality, multi-chunk), grafeo-gwp (3: empty frames, single batch, multi-batch)
-
-### Changed
-
-- All query endpoints (`/query`, `/cypher`, `/graphql`, `/gremlin`, `/sparql`, `/sql`, `/tx/query`) now return streaming `Response<Body>` instead of `Json<QueryResponse>`; HTTP JSON format is unchanged (backward compatible)
-- Batch (`/batch`) and WebSocket (`/ws`) endpoints remain materialized (deferred)
-- 31 per-crate unit tests total (13 grafeo-service + 9 grafeo-http + 9 grafeo-gwp, up from 6 + 6 + 6)
-
-## [0.4.1] - 2026-02-15
-
-### Added
-
 - **8 GWP integration tests**: database lifecycle via GWP client — list, create, delete, get_info, query after create, delete-then-recreate, duplicate error, configure-after-delete error
 - **18 per-crate unit tests**: grafeo-service (6: database CRUD, name validation, metrics, language mapping), grafeo-http (6: value encoding, query response, param conversion), grafeo-gwp (6: value conversion, roundtrip, unsupported types)
 - **Per-crate CI job**: matrix job in `ci.yml` running `cargo test -p <crate>` independently for grafeo-service, grafeo-http, grafeo-gwp
@@ -37,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- 71 integration tests total (59 HTTP + 12 GWP, up from 59 + 4)
-- Version bumped to 0.4.1
+- All query endpoints (`/query`, `/cypher`, `/graphql`, `/gremlin`, `/sparql`, `/sql`, `/tx/query`) now return streaming `Response<Body>` instead of `Json<QueryResponse>`; HTTP JSON format is unchanged (backward compatible)
+- Batch (`/batch`) and WebSocket (`/ws`) endpoints remain materialized (deferred)
+- per-crate unit tests amd seperste integrstion tests
 
 ## [0.4.0] - 2026-02-15
 

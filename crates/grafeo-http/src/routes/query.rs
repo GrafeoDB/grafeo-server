@@ -62,7 +62,9 @@ pub async fn query(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, None).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, None).await?,
+    ))
 }
 
 /// Execute a Cypher query (auto-commit).
@@ -81,7 +83,9 @@ pub async fn cypher(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, Some("cypher")).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, Some("cypher")).await?,
+    ))
 }
 
 /// Execute a GraphQL query (auto-commit).
@@ -100,7 +104,9 @@ pub async fn graphql(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, Some("graphql")).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, Some("graphql")).await?,
+    ))
 }
 
 /// Execute a Gremlin query (auto-commit).
@@ -119,7 +125,9 @@ pub async fn gremlin(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, Some("gremlin")).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, Some("gremlin")).await?,
+    ))
 }
 
 /// Execute a SPARQL query (auto-commit).
@@ -138,7 +146,9 @@ pub async fn sparql(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, Some("sparql")).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, Some("sparql")).await?,
+    ))
 }
 
 /// Execute a SQL/PGQ query (auto-commit).
@@ -160,5 +170,7 @@ pub async fn sql(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(execute_query(&state, &req, Some("sql-pgq")).await?))
+    Ok(streaming_json_response(
+        execute_query(&state, &req, Some("sql-pgq")).await?,
+    ))
 }

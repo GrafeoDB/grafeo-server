@@ -262,18 +262,12 @@ mod tests {
             determine_language(Some("sparql")),
             Language::Sparql
         ));
-        assert!(matches!(
-            determine_language(Some("sql")),
-            Language::SqlPgq
-        ));
+        assert!(matches!(determine_language(Some("sql")), Language::SqlPgq));
         assert!(matches!(
             determine_language(Some("sql-pgq")),
             Language::SqlPgq
         ));
-        assert!(matches!(
-            determine_language(Some("unknown")),
-            Language::Gql
-        ));
+        assert!(matches!(determine_language(Some("unknown")), Language::Gql));
     }
 
     #[test]

@@ -473,8 +473,8 @@ impl ResultStream for GrafeoResultStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_common::types::LogicalType;
     use grafeo_common::Value;
+    use grafeo_common::types::LogicalType;
     use grafeo_engine::database::QueryResult;
     use std::future::poll_fn;
     use std::pin::Pin;
@@ -492,9 +492,7 @@ mod tests {
     }
 
     /// Collects all frames from a `GrafeoResultStream`.
-    async fn collect_frames(
-        mut stream: Pin<Box<dyn ResultStream>>,
-    ) -> Vec<ResultFrame> {
+    async fn collect_frames(mut stream: Pin<Box<dyn ResultStream>>) -> Vec<ResultFrame> {
         let mut frames = Vec::new();
         loop {
             let frame = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;

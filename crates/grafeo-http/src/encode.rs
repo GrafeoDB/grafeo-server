@@ -78,10 +78,7 @@ enum JsonStreamPhase {
     /// Next poll yields the JSON prefix: `{"columns":[...],"rows":[`
     Prefix,
     /// Next poll encodes rows starting at `offset` into a JSON array chunk.
-    Rows {
-        offset: usize,
-        needs_comma: bool,
-    },
+    Rows { offset: usize, needs_comma: bool },
     /// Next poll yields the closing fields and brace.
     Suffix,
     /// Stream exhausted.
@@ -147,8 +144,7 @@ impl Stream for StreamingQueryBody {
                     if needs_comma || i > 0 {
                         buf.push(',');
                     }
-                    let json_row: Vec<serde_json::Value> =
-                        row.iter().map(value_to_json).collect();
+                    let json_row: Vec<serde_json::Value> = row.iter().map(value_to_json).collect();
                     buf.push_str(
                         &serde_json::to_string(&json_row)
                             .expect("serde_json::Value is always serializable"),
