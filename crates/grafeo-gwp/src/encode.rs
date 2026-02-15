@@ -134,12 +134,10 @@ mod tests {
         // Temporal types are not supported — should be filtered out
         let params = HashMap::from([(
             "time".to_string(),
-            GwpValue::Duration {
+            GwpValue::Duration(gwp::types::Duration {
                 months: 0,
-                days: 1,
-                seconds: 0,
-                nanos: 0,
-            },
+                nanoseconds: 86_400_000_000_000,
+            }),
         )]);
         let converted = convert_params(&params);
         assert!(converted.is_empty());
