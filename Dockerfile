@@ -17,18 +17,19 @@
 # --- Stage: Build the web UI ---
 FROM node:22-slim AS ui-builder
 WORKDIR /ui
-COPY client/package.json client/package-lock.json* ./
+COPY grafeo-server/client/package.json grafeo-server/client/package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
-COPY client/ .
+COPY grafeo-server/client/ .
 RUN npm run build
 
 # --- Stage: Shared Rust base ---
 FROM rust:1.91-slim AS rust-base
 RUN apt-get update && apt-get install -y pkg-config libssl-dev curl g++ cmake protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY crates/ crates/
-COPY src/ src/
+COPY grafeo/ ../grafeo/
+COPY grafeo-server/Cargo.toml grafeo-server/Cargo.lock grafeo-server/build.rs ./
+COPY grafeo-server/crates/ crates/
+COPY grafeo-server/src/ src/
 
 # --- Build: lite (GWP-only, GQL + storage, no HTTP/UI) ---
 FROM rust-base AS build-lite

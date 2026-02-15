@@ -1,32 +1,14 @@
 //! Grafeo Server — graph database server with pluggable transports.
 //!
-//! Core business logic (database management, query execution, sessions,
-//! metrics, authentication) lives in the `grafeo-service` crate.
+//! This is the binary crate. Core business logic lives in `grafeo-service`.
+//! Transport adapters live in `grafeo-http`, `grafeo-gwp`, `grafeo-studio`.
 //!
-//! This crate provides transport adapters:
-//! - `http`   — REST API via axum (includes Swagger UI)
-//! - `studio` — embedded web UI via rust-embed (requires `http`)
-//! - `gwp`    — GQL Wire Protocol via gRPC
+//! This module re-exports key types for integration tests and backwards compat.
 
-#[cfg(feature = "auth")]
-pub mod auth;
 pub mod config;
-pub mod error;
-#[cfg(feature = "gwp")]
-pub mod gwp;
-#[cfg(feature = "http")]
-pub mod rate_limit;
-#[cfg(feature = "http")]
-pub mod request_id;
-#[cfg(feature = "http")]
-pub mod routes;
-pub mod state;
-#[cfg(feature = "tls")]
-pub mod tls;
-#[cfg(feature = "studio")]
-mod ui;
 
 pub use grafeo_service;
+
+// Re-export HTTP types for integration tests
 #[cfg(feature = "http")]
-pub use routes::router;
-pub use state::AppState;
+pub use grafeo_http::{AppState, router};

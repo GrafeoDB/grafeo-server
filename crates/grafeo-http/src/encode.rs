@@ -1,14 +1,11 @@
-//! Shared helper functions for HTTP route handlers.
-//!
-//! Bridges grafeo-service types (engine `Value`, `QueryResult`) to HTTP JSON types.
+//! Value encoding: bridges grafeo-service types to HTTP JSON types.
 
 use std::collections::HashMap;
 
 use grafeo_engine::database::QueryResult;
 
 use crate::error::ApiError;
-
-use super::types::QueryResponse;
+use crate::types::QueryResponse;
 
 /// Converts a Grafeo `Value` to a JSON value.
 pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {

@@ -25,11 +25,11 @@ docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /da
 
 Three image tiers are available:
 
-| Tier | Tag | Transport | Languages | AI/Search | Web UI | Binary |
-|------|-----|-----------|-----------|-----------|--------|--------|
-| **lite** | `grafeo-server:lite` | GWP (gRPC :7687) | GQL | No | No | ~7 MB |
-| **standard** | `grafeo-server:latest` | HTTP (:7474) | All 6 | No | Studio | ~21 MB |
-| **full** | `grafeo-server:full` | HTTP + GWP | All 6 | Yes + embed | Studio | ~25 MB |
+| Tier         | Tag                    | Transport        | Languages | AI/Search   | Web UI | Binary  |
+| ------------ | ---------------------- | ---------------- | --------- | ----------- | ------ | ------- |
+| **lite**     | `grafeo-server:lite`   | GWP (gRPC :7687) | GQL       | No          | No     | ~7 MB   |
+| **standard** | `grafeo-server:latest` | HTTP (:7474)     | All 6     | No          | Studio | ~21 MB  |
+| **full**     | `grafeo-server:full`   | HTTP + GWP       | All 6     | Yes + embed | Studio | ~25 MB  |
 
 ```bash
 # Lite - GWP-only, GQL + storage, no HTTP/UI
@@ -39,7 +39,7 @@ docker run -p 7687:7687 grafeo/grafeo-server:lite --data-dir /data
 docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.3.0`, `grafeo-server:0.3.0-lite`, `grafeo-server:0.3.0-full`.
+Versioned tags: `grafeo-server:0.4.0`, `grafeo-server:0.4.0-lite`, `grafeo-server:0.4.0-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 

@@ -202,6 +202,21 @@ pub struct HealthInfo {
     pub enabled_server_features: Vec<String>,
 }
 
+/// Compiled feature flags detected at build time.
+///
+/// Populated by the binary crate (which has all feature flags) and passed
+/// to transport crates for health/status endpoints.
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct EnabledFeatures {
+    /// Query language support (e.g. "gql", "cypher", "sparql").
+    pub languages: Vec<String>,
+    /// Engine capabilities (e.g. "parallel", "wal", "vector-index").
+    pub engine: Vec<String>,
+    /// Server capabilities (e.g. "auth", "tls", "gwp").
+    pub server: Vec<String>,
+}
+
 /// Batch query input.
 pub struct BatchQuery {
     pub statement: String,
