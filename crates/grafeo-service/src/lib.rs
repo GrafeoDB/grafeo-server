@@ -18,6 +18,7 @@ pub mod query;
 pub mod rate_limit;
 pub mod schema;
 pub mod session;
+pub mod stream;
 pub mod types;
 
 use std::sync::Arc;

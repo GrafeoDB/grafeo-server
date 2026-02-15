@@ -1,8 +1,19 @@
 //! Value encoding: bridges grafeo-service types to HTTP JSON types.
+//!
+//! Includes [`StreamingQueryBody`] for incremental JSON encoding of
+//! large query results, producing output byte-identical to the
+//! materialized `QueryResponse` serialization.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
+use axum::body::Body;
+use axum::response::Response;
+use futures_util::Stream;
 use grafeo_engine::database::QueryResult;
+use grafeo_service::stream::DEFAULT_BATCH_SIZE;
 
 use crate::error::ApiError;
 use crate::types::QueryResponse;
@@ -56,6 +67,141 @@ pub fn convert_json_params(
         }
         None => Ok(None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming JSON body
+// ---------------------------------------------------------------------------
+
+/// Phase of the JSON streaming state machine.
+enum JsonStreamPhase {
+    /// Next poll yields the JSON prefix: `{"columns":[...],"rows":[`
+    Prefix,
+    /// Next poll encodes rows starting at `offset` into a JSON array chunk.
+    Rows {
+        offset: usize,
+        needs_comma: bool,
+    },
+    /// Next poll yields the closing fields and brace.
+    Suffix,
+    /// Stream exhausted.
+    Done,
+}
+
+/// Streaming HTTP body that produces a `QueryResponse`-compatible JSON
+/// document incrementally.
+///
+/// Each `poll_next` encodes at most `batch_size` rows, keeping peak
+/// memory for the encoded output proportional to the batch size rather
+/// than the total row count.  The concatenated output is byte-identical
+/// to `serde_json::to_string(&QueryResponse { ... })`.
+pub struct StreamingQueryBody {
+    result: QueryResult,
+    batch_size: usize,
+    phase: JsonStreamPhase,
+}
+
+impl StreamingQueryBody {
+    /// Creates a new streaming body from a `QueryResult`.
+    pub fn new(result: QueryResult) -> Self {
+        Self {
+            result,
+            batch_size: DEFAULT_BATCH_SIZE,
+            phase: JsonStreamPhase::Prefix,
+        }
+    }
+}
+
+impl Stream for StreamingQueryBody {
+    type Item = Result<String, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        match this.phase {
+            JsonStreamPhase::Prefix => {
+                let columns_json = serde_json::to_string(&this.result.columns)
+                    .expect("column names are always serializable");
+                let prefix = format!(r#"{{"columns":{columns_json},"rows":["#);
+
+                this.phase = if this.result.rows.is_empty() {
+                    JsonStreamPhase::Suffix
+                } else {
+                    JsonStreamPhase::Rows {
+                        offset: 0,
+                        needs_comma: false,
+                    }
+                };
+
+                Poll::Ready(Some(Ok(prefix)))
+            }
+
+            JsonStreamPhase::Rows {
+                offset,
+                needs_comma,
+            } => {
+                let end = (offset + this.batch_size).min(this.result.rows.len());
+                let mut buf = String::new();
+
+                for (i, row) in this.result.rows[offset..end].iter().enumerate() {
+                    if needs_comma || i > 0 {
+                        buf.push(',');
+                    }
+                    let json_row: Vec<serde_json::Value> =
+                        row.iter().map(value_to_json).collect();
+                    buf.push_str(
+                        &serde_json::to_string(&json_row)
+                            .expect("serde_json::Value is always serializable"),
+                    );
+                }
+
+                this.phase = if end >= this.result.rows.len() {
+                    JsonStreamPhase::Suffix
+                } else {
+                    JsonStreamPhase::Rows {
+                        offset: end,
+                        needs_comma: true,
+                    }
+                };
+
+                Poll::Ready(Some(Ok(buf)))
+            }
+
+            JsonStreamPhase::Suffix => {
+                let mut suffix = String::from("]");
+
+                if let Some(ms) = this.result.execution_time_ms {
+                    suffix.push_str(r#","execution_time_ms":"#);
+                    // Use serde_json to match QueryResponse serialization format
+                    let v = serde_json::json!(ms);
+                    suffix.push_str(&v.to_string());
+                }
+                if let Some(scanned) = this.result.rows_scanned {
+                    suffix.push_str(r#","rows_scanned":"#);
+                    let v = serde_json::json!(scanned);
+                    suffix.push_str(&v.to_string());
+                }
+                suffix.push('}');
+
+                this.phase = JsonStreamPhase::Done;
+                Poll::Ready(Some(Ok(suffix)))
+            }
+
+            JsonStreamPhase::Done => Poll::Ready(None),
+        }
+    }
+}
+
+/// Creates a streaming HTTP `Response<Body>` from a `QueryResult`.
+///
+/// The response produces JSON identical to `Json<QueryResponse>`, but
+/// encoded incrementally in batches to reduce peak memory.
+pub fn streaming_json_response(result: QueryResult) -> Response<Body> {
+    let stream = StreamingQueryBody::new(result);
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(Body::from_stream(stream))
+        .expect("response builder with valid header is infallible")
 }
 
 #[cfg(test)]
@@ -123,5 +269,65 @@ mod tests {
     #[test]
     fn convert_json_params_none() {
         assert!(convert_json_params(None).unwrap().is_none());
+    }
+
+    // --- Streaming tests ---
+
+    use futures_util::StreamExt;
+    use grafeo_common::types::LogicalType;
+
+    fn make_result(num_rows: usize) -> QueryResult {
+        QueryResult {
+            columns: vec!["x".to_string()],
+            column_types: vec![LogicalType::Int64],
+            rows: (0..num_rows)
+                .map(|i| vec![Value::Int64(i as i64)])
+                .collect(),
+            execution_time_ms: Some(1.0),
+            rows_scanned: Some(num_rows as u64),
+        }
+    }
+
+    /// Collects all chunks from a `StreamingQueryBody` into a single string.
+    async fn collect_stream(mut stream: StreamingQueryBody) -> String {
+        let mut chunks = Vec::new();
+        while let Some(Ok(chunk)) = stream.next().await {
+            chunks.push(chunk);
+        }
+        chunks.join("")
+    }
+
+    #[tokio::test]
+    async fn streaming_empty_result_produces_valid_json() {
+        let result = make_result(0);
+        let expected = serde_json::to_string(&query_result_to_response(&result)).unwrap();
+        let actual = collect_stream(StreamingQueryBody::new(result)).await;
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_matches_materialized_output() {
+        let result = make_result(5);
+        let expected = serde_json::to_string(&query_result_to_response(&result)).unwrap();
+        let actual = collect_stream(StreamingQueryBody::new(result)).await;
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_large_result_produces_multiple_chunks() {
+        let result = make_result(2500);
+        let mut stream = StreamingQueryBody::new(result);
+        stream.batch_size = 1000;
+        let mut chunk_count = 0;
+        let mut full = String::new();
+        while let Some(Ok(chunk)) = stream.next().await {
+            chunk_count += 1;
+            full.push_str(&chunk);
+        }
+        // Prefix + 3 row batches (1000+1000+500) + Suffix = 5 chunks
+        assert_eq!(chunk_count, 5);
+        // Verify valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 2500);
     }
 }

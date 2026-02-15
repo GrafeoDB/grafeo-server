@@ -4,10 +4,11 @@
 
 use axum::extract::{Json, State};
 use axum::http::HeaderMap;
+use axum::response::Response;
 
 use grafeo_service::query::QueryService;
 
-use crate::encode::{convert_json_params, query_result_to_response};
+use crate::encode::{convert_json_params, streaming_json_response};
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 use crate::types::{QueryRequest, QueryResponse, TransactionResponse, TxBeginRequest};
@@ -74,7 +75,7 @@ pub async fn tx_query(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
-) -> Result<Json<QueryResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let session_id = get_session_id(&headers)?;
     let params = convert_json_params(req.params.as_ref())?;
     let timeout = state.effective_timeout(req.timeout_ms);
@@ -91,7 +92,7 @@ pub async fn tx_query(
     )
     .await?;
 
-    Ok(Json(query_result_to_response(&result)))
+    Ok(streaming_json_response(result))
 }
 
 /// Commit a transaction.
