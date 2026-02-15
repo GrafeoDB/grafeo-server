@@ -268,5 +268,16 @@ jobs:
           repository: GrafeoDB/grafeo
           path: grafeo
 
+      - name: List directory structure for debugging
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Directory contents:"
+          ls -la
+          echo "grafeo-server contents:"
+          ls -la grafeo-server/ || echo "grafeo-server not found"
+          echo "grafeo contents:"
+          ls -la grafeo/ || echo "grafeo not found"
+
       - name: Build Docker image
         run: docker build -f grafeo-server/Dockerfile -t grafeo-server:test .
