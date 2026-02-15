@@ -86,11 +86,11 @@ mod tests {
 
     #[test]
     fn value_to_json_map() {
-        let map = Value::Map(
-            vec![("key".into(), Value::String("val".into()))]
-                .into_iter()
-                .collect(),
-        );
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let mut m = BTreeMap::new();
+        m.insert("key".into(), Value::String("val".into()));
+        let map = Value::Map(Arc::new(m));
         let json = value_to_json(&map);
         assert_eq!(json["key"], "val");
     }
@@ -107,6 +107,7 @@ mod tests {
     fn query_result_to_response_basic() {
         let result = QueryResult {
             columns: vec!["name".to_string()],
+            column_types: vec![grafeo_common::types::LogicalType::String],
             rows: vec![vec![Value::String("Alice".into())]],
             execution_time_ms: Some(1.5),
             rows_scanned: Some(10),
