@@ -57,3 +57,70 @@ pub fn convert_json_params(
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafeo_common::Value;
+
+    #[test]
+    fn value_to_json_primitives() {
+        assert_eq!(value_to_json(&Value::Null), serde_json::Value::Null);
+        assert_eq!(value_to_json(&Value::Bool(true)), serde_json::json!(true));
+        assert_eq!(value_to_json(&Value::Int64(42)), serde_json::json!(42));
+        assert_eq!(
+            value_to_json(&Value::Float64(3.14)),
+            serde_json::json!(3.14)
+        );
+        assert_eq!(
+            value_to_json(&Value::String("hello".into())),
+            serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn value_to_json_list() {
+        let list = Value::List(vec![Value::Int64(1), Value::Int64(2)].into());
+        assert_eq!(value_to_json(&list), serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn value_to_json_map() {
+        let map = Value::Map(
+            vec![("key".into(), Value::String("val".into()))]
+                .into_iter()
+                .collect(),
+        );
+        let json = value_to_json(&map);
+        assert_eq!(json["key"], "val");
+    }
+
+    #[test]
+    fn value_to_json_vector() {
+        let vec = Value::Vector(vec![1.0f32, 2.0, 3.0].into());
+        let json = value_to_json(&vec);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn query_result_to_response_basic() {
+        let result = QueryResult {
+            columns: vec!["name".to_string()],
+            rows: vec![vec![Value::String("Alice".into())]],
+            execution_time_ms: Some(1.5),
+            rows_scanned: Some(10),
+        };
+        let resp = query_result_to_response(&result);
+        assert_eq!(resp.columns, vec!["name"]);
+        assert_eq!(resp.rows.len(), 1);
+        assert_eq!(resp.rows[0][0], serde_json::json!("Alice"));
+        assert_eq!(resp.execution_time_ms, Some(1.5));
+        assert_eq!(resp.rows_scanned, Some(10));
+    }
+
+    #[test]
+    fn convert_json_params_none() {
+        assert!(convert_json_params(None).unwrap().is_none());
+    }
+}

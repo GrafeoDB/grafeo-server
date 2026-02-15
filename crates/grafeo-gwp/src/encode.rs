@@ -60,3 +60,88 @@ fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafeo_common::Value;
+
+    #[test]
+    fn grafeo_to_gwp_primitives() {
+        assert!(matches!(grafeo_to_gwp(&Value::Null), GwpValue::Null));
+        assert!(matches!(
+            grafeo_to_gwp(&Value::Bool(true)),
+            GwpValue::Boolean(true)
+        ));
+        assert!(matches!(
+            grafeo_to_gwp(&Value::Int64(42)),
+            GwpValue::Integer(42)
+        ));
+        assert!(matches!(
+            grafeo_to_gwp(&Value::Float64(3.14)),
+            GwpValue::Float(f) if (f - 3.14).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn grafeo_to_gwp_string() {
+        let val = grafeo_to_gwp(&Value::String("hello".into()));
+        assert!(matches!(val, GwpValue::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn grafeo_to_gwp_list() {
+        let list = Value::List(vec![Value::Int64(1), Value::Int64(2)].into());
+        let gwp = grafeo_to_gwp(&list);
+        if let GwpValue::List(items) = gwp {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected GwpValue::List");
+        }
+    }
+
+    #[test]
+    fn grafeo_to_gwp_vector() {
+        let vec = Value::Vector(vec![1.0f32, 2.0].into());
+        let gwp = grafeo_to_gwp(&vec);
+        if let GwpValue::List(items) = gwp {
+            assert_eq!(items.len(), 2);
+            assert!(matches!(items[0], GwpValue::Float(f) if (f - 1.0).abs() < f64::EPSILON));
+        } else {
+            panic!("expected GwpValue::List for vector");
+        }
+    }
+
+    #[test]
+    fn gwp_to_grafeo_roundtrip() {
+        let params = HashMap::from([
+            ("str".to_string(), GwpValue::String("hello".to_string())),
+            ("num".to_string(), GwpValue::Integer(42)),
+            ("flag".to_string(), GwpValue::Boolean(true)),
+        ]);
+        let converted = convert_params(&params);
+        assert_eq!(converted.len(), 3);
+        assert!(matches!(
+            converted.get("str"),
+            Some(Value::String(s)) if s.as_str() == "hello"
+        ));
+        assert!(matches!(converted.get("num"), Some(Value::Int64(42))));
+        assert!(matches!(converted.get("flag"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn gwp_to_grafeo_unsupported_returns_none() {
+        // Temporal types are not supported — should be filtered out
+        let params = HashMap::from([(
+            "time".to_string(),
+            GwpValue::Duration {
+                months: 0,
+                days: 1,
+                seconds: 0,
+                nanos: 0,
+            },
+        )]);
+        let converted = convert_params(&params);
+        assert!(converted.is_empty());
+    }
+}
