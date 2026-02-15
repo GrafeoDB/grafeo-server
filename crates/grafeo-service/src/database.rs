@@ -310,9 +310,7 @@ impl DatabaseManager {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 GrafeoDB::with_config(config).map_err(|e| {
-                    ServiceError::Internal(format!(
-                        "failed to create database after retry: {e}"
-                    ))
+                    ServiceError::Internal(format!("failed to create database after retry: {e}"))
                 })?
             }
         };
