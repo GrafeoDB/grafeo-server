@@ -30,6 +30,12 @@ jobs:
           repository: GrafeoDB/grafeo
           path: grafeo
 
+      - name: Create workspace .dockerignore
+        run: |
+          cat > .dockerignore << 'EOF'
+          # Allow everything - we're using a parent context with subdirs
+          EOF
+
       # Set up QEMU for multi-arch builds
       - uses: docker/setup-qemu-action@v3
 
