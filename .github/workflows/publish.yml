@@ -22,19 +22,11 @@ jobs:
         variant: [lite, gwp, standard, full]
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: grafeo-server
 
       - uses: actions/checkout@v4
         with:
           repository: GrafeoDB/grafeo
-          path: grafeo
-
-      - name: Create workspace .dockerignore
-        run: |
-          cat > .dockerignore << 'EOF'
-          # Allow everything - we're using a parent context with subdirs
-          EOF
+          path: .grafeo
 
       # Set up QEMU for multi-arch builds
       - uses: docker/setup-qemu-action@v3
@@ -69,7 +61,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: grafeo-server/Dockerfile
+          file: Dockerfile
           target: ${{ matrix.variant }}
           platforms: linux/amd64,linux/arm64
           push: true

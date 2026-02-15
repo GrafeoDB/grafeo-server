@@ -260,32 +260,11 @@ jobs:
     needs: [rust-check, rust-test, build-client]
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: grafeo-server
 
       - uses: actions/checkout@v4
         with:
           repository: GrafeoDB/grafeo
-          path: grafeo
-
-      - name: List directory structure for debugging
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Directory contents:"
-          ls -la
-          echo "grafeo-server contents:"
-          ls -la grafeo-server/ || echo "grafeo-server not found"
-          echo "grafeo contents:"
-          ls -la grafeo/ || echo "grafeo not found"
-
-      - name: Create workspace .dockerignore
-        run: |
-          cat > .dockerignore << 'EOF'
-          # Allow everything by default
-          # The grafeo-server/.dockerignore is being used and blocking the context
-          # This file overrides it
-          EOF
+          path: .grafeo
 
       - name: Build Docker image
-        run: docker build -f grafeo-server/Dockerfile -t grafeo-server:test .
+        run: docker build -t grafeo-server:test .
