@@ -17,6 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: grafeo-server
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: grafeo
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -32,22 +39,26 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            grafeo-server/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('grafeo-server/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       # Create empty client/dist so rust-embed compiles
       - run: mkdir -p client/dist
+        working-directory: grafeo-server
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+        working-directory: grafeo-server
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+        working-directory: grafeo-server
 
       - name: Check docs
         run: cargo doc --no-deps
+        working-directory: grafeo-server
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -61,6 +72,13 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: grafeo-server
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: grafeo
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -76,20 +94,23 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+            grafeo-server/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('grafeo-server/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
       # Create empty client/dist so rust-embed compiles
       - run: mkdir -p client/dist
         shell: bash
+        working-directory: grafeo-server
 
       - name: Run tests
         run: cargo test
+        working-directory: grafeo-server
 
       - name: Run tests (release)
         run: cargo test --release
+        working-directory: grafeo-server
 
   # Security audit
   security:
@@ -150,6 +171,13 @@ jobs:
     needs: [rust-test, build-client]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: grafeo-server
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: grafeo
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -163,8 +191,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+            grafeo-server/target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('grafeo-server/**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-e2e-
 
@@ -172,13 +200,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: client-dist
-          path: client/dist/
+          path: grafeo-server/client/dist/
 
       - name: Build server (release)
         run: cargo build --release
+        working-directory: grafeo-server
 
       - name: Run E2E tests
         run: bash scripts/e2e-test.sh
+        working-directory: grafeo-server
 
   # Code coverage
   coverage:
@@ -186,6 +216,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: grafeo-server
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: grafeo
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -200,11 +237,13 @@ jobs:
 
       # Create empty client/dist so rust-embed compiles
       - run: mkdir -p client/dist
+        working-directory: grafeo-server
 
       - name: Generate coverage report
         run: |
           cargo llvm-cov --lcov --output-path lcov.info \
             --ignore-filename-regex '(tests/|client/)'
+        working-directory: grafeo-server
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -221,4 +260,13 @@ jobs:
     needs: [rust-check, rust-test, build-client]
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t grafeo-server:test .
+        with:
+          path: grafeo-server
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: grafeo
+
+      - name: Build Docker image
+        run: docker build -f grafeo-server/Dockerfile -t grafeo-server:test .
