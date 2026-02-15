@@ -119,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TLS support** (feature: `tls`): built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware
 - **CORS hardening**: deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning
 - **Request ID tracking**: `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID
-- **AGPL-3.0-or-later LICENSE file**
+- **Apache-2.0 LICENSE file**
 - **9 new integration tests**: WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests
 
 ### Changed
