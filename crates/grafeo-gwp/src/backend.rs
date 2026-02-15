@@ -342,74 +342,41 @@ impl GqlBackend for GrafeoBackend {
 }
 
 // ---------------------------------------------------------------------------
-// ResultStream: converts QueryResult into GWP streaming frames
+// ResultStream: lazily converts QueryResult into GWP streaming frames
 // ---------------------------------------------------------------------------
 
-/// A `ResultStream` that yields pre-built frames from a `QueryResult`.
+use grafeo_service::stream::DEFAULT_BATCH_SIZE;
+
+/// Phase of the lazy streaming state machine.
+enum StreamPhase {
+    /// Next poll yields the header frame.
+    Header,
+    /// Next poll encodes rows starting at `offset` into a Batch frame.
+    Rows { offset: usize },
+    /// Next poll yields the summary frame.
+    Summary,
+    /// Stream exhausted.
+    Done,
+}
+
+/// A `ResultStream` that lazily yields frames from a `QueryResult`.
+///
+/// Instead of pre-building all frames in a `Vec`, this encodes rows
+/// in batches of `DEFAULT_BATCH_SIZE`, reducing peak memory for the
+/// encoded output and producing multiple Batch frames for large results.
 struct GrafeoResultStream {
-    frames: Vec<ResultFrame>,
-    index: usize,
+    result: grafeo_engine::database::QueryResult,
+    batch_size: usize,
+    phase: StreamPhase,
 }
 
 impl GrafeoResultStream {
     fn from_query_result(result: grafeo_engine::database::QueryResult) -> Self {
-        let columns: Vec<proto::ColumnDescriptor> = result
-            .columns
-            .iter()
-            .map(|name| proto::ColumnDescriptor {
-                name: name.clone(),
-                r#type: Some(proto::TypeDescriptor {
-                    r#type: proto::GqlType::TypeAny.into(),
-                    nullable: true,
-                    element_type: None,
-                    fields: Vec::new(),
-                }),
-            })
-            .collect();
-
-        let has_rows = !result.rows.is_empty();
-
-        let header = ResultFrame::Header(proto::ResultHeader {
-            result_type: if has_rows || !columns.is_empty() {
-                proto::ResultType::BindingTable.into()
-            } else {
-                proto::ResultType::Omitted.into()
-            },
-            columns,
-        });
-
-        let mut frames = vec![header];
-
-        if has_rows {
-            let rows: Vec<proto::Row> = result
-                .rows
-                .iter()
-                .map(|row| proto::Row {
-                    values: row
-                        .iter()
-                        .map(|v| proto::Value::from(grafeo_to_gwp(v)))
-                        .collect(),
-                })
-                .collect();
-            frames.push(ResultFrame::Batch(proto::RowBatch { rows }));
+        Self {
+            result,
+            batch_size: DEFAULT_BATCH_SIZE,
+            phase: StreamPhase::Header,
         }
-
-        let mut counters = HashMap::new();
-        if let Some(ms) = result.execution_time_ms {
-            counters.insert("execution_time_ms".to_owned(), (ms * 1000.0) as i64);
-        }
-        if let Some(scanned) = result.rows_scanned {
-            counters.insert("rows_scanned".to_owned(), scanned as i64);
-        }
-
-        frames.push(ResultFrame::Summary(proto::ResultSummary {
-            status: Some(status::success()),
-            warnings: Vec::new(),
-            rows_affected: result.rows.len() as i64,
-            counters,
-        }));
-
-        Self { frames, index: 0 }
     }
 }
 
@@ -418,12 +385,180 @@ impl ResultStream for GrafeoResultStream {
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<ResultFrame, GqlError>>> {
-        if self.index < self.frames.len() {
-            let frame = self.frames[self.index].clone();
-            self.index += 1;
-            Poll::Ready(Some(Ok(frame)))
-        } else {
-            Poll::Ready(None)
+        match self.phase {
+            StreamPhase::Header => {
+                let columns: Vec<proto::ColumnDescriptor> = self
+                    .result
+                    .columns
+                    .iter()
+                    .map(|name| proto::ColumnDescriptor {
+                        name: name.clone(),
+                        r#type: Some(proto::TypeDescriptor {
+                            r#type: proto::GqlType::TypeAny.into(),
+                            nullable: true,
+                            element_type: None,
+                            fields: Vec::new(),
+                        }),
+                    })
+                    .collect();
+
+                let has_data = !self.result.rows.is_empty() || !columns.is_empty();
+
+                let header = ResultFrame::Header(proto::ResultHeader {
+                    result_type: if has_data {
+                        proto::ResultType::BindingTable.into()
+                    } else {
+                        proto::ResultType::Omitted.into()
+                    },
+                    columns,
+                });
+
+                self.phase = if self.result.rows.is_empty() {
+                    StreamPhase::Summary
+                } else {
+                    StreamPhase::Rows { offset: 0 }
+                };
+
+                Poll::Ready(Some(Ok(header)))
+            }
+
+            StreamPhase::Rows { offset } => {
+                let end = (offset + self.batch_size).min(self.result.rows.len());
+                let rows: Vec<proto::Row> = self.result.rows[offset..end]
+                    .iter()
+                    .map(|row| proto::Row {
+                        values: row
+                            .iter()
+                            .map(|v| proto::Value::from(grafeo_to_gwp(v)))
+                            .collect(),
+                    })
+                    .collect();
+
+                let frame = ResultFrame::Batch(proto::RowBatch { rows });
+
+                self.phase = if end >= self.result.rows.len() {
+                    StreamPhase::Summary
+                } else {
+                    StreamPhase::Rows { offset: end }
+                };
+
+                Poll::Ready(Some(Ok(frame)))
+            }
+
+            StreamPhase::Summary => {
+                let mut counters = HashMap::new();
+                if let Some(ms) = self.result.execution_time_ms {
+                    counters.insert("execution_time_ms".to_owned(), (ms * 1000.0) as i64);
+                }
+                if let Some(scanned) = self.result.rows_scanned {
+                    counters.insert("rows_scanned".to_owned(), scanned as i64);
+                }
+
+                let summary = ResultFrame::Summary(proto::ResultSummary {
+                    status: Some(status::success()),
+                    warnings: Vec::new(),
+                    rows_affected: self.result.rows.len() as i64,
+                    counters,
+                });
+
+                self.phase = StreamPhase::Done;
+                Poll::Ready(Some(Ok(summary)))
+            }
+
+            StreamPhase::Done => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafeo_common::types::LogicalType;
+    use grafeo_common::Value;
+    use grafeo_engine::database::QueryResult;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+
+    fn make_result(num_rows: usize) -> QueryResult {
+        QueryResult {
+            columns: vec!["x".to_string()],
+            column_types: vec![LogicalType::Int64],
+            rows: (0..num_rows)
+                .map(|i| vec![Value::Int64(i as i64)])
+                .collect(),
+            execution_time_ms: Some(1.0),
+            rows_scanned: Some(num_rows as u64),
+        }
+    }
+
+    /// Collects all frames from a `GrafeoResultStream`.
+    async fn collect_frames(
+        mut stream: Pin<Box<dyn ResultStream>>,
+    ) -> Vec<ResultFrame> {
+        let mut frames = Vec::new();
+        loop {
+            let frame = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+            match frame {
+                Some(Ok(f)) => frames.push(f),
+                Some(Err(e)) => panic!("unexpected error: {e:?}"),
+                None => break,
+            }
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn empty_result_yields_header_and_summary() {
+        let result = make_result(0);
+        let stream = Box::pin(GrafeoResultStream::from_query_result(result));
+        let frames = collect_frames(stream).await;
+        // Header + Summary (no Batch frames)
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(frames[0], ResultFrame::Header(_)));
+        assert!(matches!(frames[1], ResultFrame::Summary(_)));
+    }
+
+    #[tokio::test]
+    async fn small_result_yields_single_batch() {
+        let result = make_result(5);
+        let stream = Box::pin(GrafeoResultStream::from_query_result(result));
+        let frames = collect_frames(stream).await;
+        // Header + 1 Batch + Summary
+        assert_eq!(frames.len(), 3);
+        assert!(matches!(frames[0], ResultFrame::Header(_)));
+        if let ResultFrame::Batch(ref batch) = frames[1] {
+            assert_eq!(batch.rows.len(), 5);
+        } else {
+            panic!("expected Batch frame");
+        }
+        assert!(matches!(frames[2], ResultFrame::Summary(_)));
+    }
+
+    #[tokio::test]
+    async fn large_result_yields_multiple_batches() {
+        let result = make_result(2500);
+        let mut stream = GrafeoResultStream::from_query_result(result);
+        stream.batch_size = 1000;
+        let stream = Box::pin(stream);
+        let frames = collect_frames(stream).await;
+        // Header + 3 Batch (1000+1000+500) + Summary = 5
+        assert_eq!(frames.len(), 5);
+        assert!(matches!(frames[0], ResultFrame::Header(_)));
+        if let ResultFrame::Batch(ref b) = frames[1] {
+            assert_eq!(b.rows.len(), 1000);
+        } else {
+            panic!("expected Batch");
+        }
+        if let ResultFrame::Batch(ref b) = frames[2] {
+            assert_eq!(b.rows.len(), 1000);
+        } else {
+            panic!("expected Batch");
+        }
+        if let ResultFrame::Batch(ref b) = frames[3] {
+            assert_eq!(b.rows.len(), 500);
+        } else {
+            panic!("expected Batch");
+        }
+        assert!(matches!(frames[4], ResultFrame::Summary(_)));
     }
 }

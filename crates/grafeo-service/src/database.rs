@@ -297,8 +297,25 @@ impl DatabaseManager {
             "Creating database"
         );
 
-        let db = GrafeoDB::with_config(config)
-            .map_err(|e| ServiceError::Internal(format!("failed to create database: {e}")))?;
+        // Engine creation may fail if a recently-deleted database hasn't fully
+        // released its resources yet (memory allocator, WAL flush, worker thread
+        // join). Retry once after a brief pause to handle this race.
+        let db = match GrafeoDB::with_config(config.clone()) {
+            Ok(db) => db,
+            Err(first_err) => {
+                tracing::debug!(
+                    name = %name,
+                    error = %first_err,
+                    "Engine creation failed, retrying after brief pause"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                GrafeoDB::with_config(config).map_err(|e| {
+                    ServiceError::Internal(format!(
+                        "failed to create database after retry: {e}"
+                    ))
+                })?
+            }
+        };
 
         // Schema loading (if applicable)
         if let Some(ref schema_b64) = req.schema_file {
@@ -336,6 +353,12 @@ impl DatabaseManager {
     }
 
     /// Deletes a database by name. The `"default"` database cannot be deleted.
+    ///
+    /// The engine is closed and the `Arc<DatabaseEntry>` is explicitly dropped
+    /// before any on-disk cleanup, ensuring that internal engine resources
+    /// (memory allocator, WAL, worker threads) are fully released. This
+    /// prevents resource contention if a new database is created immediately
+    /// after deletion.
     pub fn delete(&self, name: &str) -> Result<(), ServiceError> {
         if name == "default" {
             return Err(ServiceError::BadRequest(
@@ -356,6 +379,12 @@ impl DatabaseManager {
         if let Err(e) = entry.db.close() {
             tracing::warn!(name = %name, error = %e, "Error closing database");
         }
+
+        // Explicitly drop the Arc to ensure the engine is fully released
+        // before we touch the filesystem. If other references exist (e.g.,
+        // stale sessions), this won't be the final drop — but we've already
+        // removed from the registry so new lookups will fail.
+        drop(entry);
 
         // Remove on-disk data if persistent
         if let Some(ref dir) = self.data_dir {
@@ -462,6 +491,30 @@ mod tests {
 
         // Cannot delete default
         assert!(mgr.delete("default").is_err());
+    }
+
+    #[test]
+    fn test_delete_then_recreate() {
+        let mgr = DatabaseManager::new(None);
+        let req = CreateDatabaseRequest {
+            name: "ephemeral".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        // Create, delete, immediately recreate — exercises the close barrier
+        mgr.create(&req).unwrap();
+        assert!(mgr.get("ephemeral").is_some());
+
+        mgr.delete("ephemeral").unwrap();
+        assert!(mgr.get("ephemeral").is_none());
+
+        // Should succeed without resource contention
+        mgr.create(&req).unwrap();
+        assert!(mgr.get("ephemeral").is_some());
     }
 
     #[test]

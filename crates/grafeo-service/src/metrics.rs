@@ -237,3 +237,59 @@ pub fn determine_language(lang: Option<&str>) -> Language {
         _ => Language::Gql,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn determine_language_mapping() {
+        assert!(matches!(determine_language(None), Language::Gql));
+        assert!(matches!(determine_language(Some("gql")), Language::Gql));
+        assert!(matches!(
+            determine_language(Some("cypher")),
+            Language::Cypher
+        ));
+        assert!(matches!(
+            determine_language(Some("graphql")),
+            Language::Graphql
+        ));
+        assert!(matches!(
+            determine_language(Some("gremlin")),
+            Language::Gremlin
+        ));
+        assert!(matches!(
+            determine_language(Some("sparql")),
+            Language::Sparql
+        ));
+        assert!(matches!(
+            determine_language(Some("sql")),
+            Language::SqlPgq
+        ));
+        assert!(matches!(
+            determine_language(Some("sql-pgq")),
+            Language::SqlPgq
+        ));
+        assert!(matches!(
+            determine_language(Some("unknown")),
+            Language::Gql
+        ));
+    }
+
+    #[test]
+    fn metrics_record_and_render() {
+        let m = Metrics::new();
+        m.record_query(Language::Gql, 1_500); // 1.5ms
+        m.record_query(Language::Gql, 2_500);
+        m.record_query_error(Language::Cypher);
+
+        let output = m.render(2, 100, 50, 3, 60);
+        assert!(output.contains("grafeo_databases_total 2"));
+        assert!(output.contains("grafeo_nodes_total 100"));
+        assert!(output.contains("grafeo_edges_total 50"));
+        assert!(output.contains("grafeo_active_sessions_total 3"));
+        assert!(output.contains("grafeo_uptime_seconds 60"));
+        assert!(output.contains("grafeo_queries_total{language=\"gql\"} 2"));
+        assert!(output.contains("grafeo_query_errors_total{language=\"cypher\"} 1"));
+    }
+}

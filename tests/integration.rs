@@ -1916,7 +1916,15 @@ async fn metrics_tracks_sql_pgq() {
 /// Returns `(http_base_url, gwp_endpoint)`.
 #[cfg(feature = "gwp")]
 async fn spawn_server_with_gwp() -> (String, String) {
-    let state = grafeo_server::AppState::new_in_memory(300);
+    use grafeo_service::types::EnabledFeatures;
+
+    let service = grafeo_service::ServiceState::new_in_memory(300);
+    let features = EnabledFeatures {
+        languages: vec![],
+        engine: vec![],
+        server: vec!["gwp".to_string()],
+    };
+    let state = grafeo_server::AppState::new(service, vec![], features);
     let app = grafeo_server::router(state.clone());
 
     // HTTP
@@ -2061,4 +2069,245 @@ async fn gwp_health_reports_gwp_feature() {
         server_features.contains(&"gwp"),
         "health should report gwp feature; got: {server_features:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// GWP Database Lifecycle (v0.4.1)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_list_databases_returns_default() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    let databases = db_client.list().await.unwrap();
+    assert_eq!(databases.len(), 1);
+    assert_eq!(databases[0].name, "default");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_and_delete_database() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    // Create a database
+    let info = db_client
+        .create(gwp::server::CreateDatabaseConfig {
+            name: "gwp-test-db".to_string(),
+            database_type: "lpg".to_string(),
+            storage_mode: "inmemory".to_string(),
+            memory_limit_bytes: None,
+            backward_edges: None,
+            threads: None,
+            wal_enabled: None,
+            wal_durability: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.name, "gwp-test-db");
+    assert_eq!(info.node_count, 0);
+
+    // List should show 2 databases
+    let databases = db_client.list().await.unwrap();
+    assert_eq!(databases.len(), 2);
+
+    // Delete
+    let deleted = db_client.delete("gwp-test-db").await.unwrap();
+    assert_eq!(deleted, "gwp-test-db");
+
+    // List should show 1 database
+    let databases = db_client.list().await.unwrap();
+    assert_eq!(databases.len(), 1);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_get_database_info() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    let info = db_client.get_info("default").await.unwrap();
+    assert_eq!(info.name, "default");
+    assert_eq!(info.database_type, "lpg");
+    assert!(!info.persistent);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_database_then_query() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+
+    // Create database via GWP
+    let mut db_client = conn.create_database_client();
+    db_client
+        .create(gwp::server::CreateDatabaseConfig {
+            name: "query-db".to_string(),
+            database_type: "lpg".to_string(),
+            storage_mode: "inmemory".to_string(),
+            memory_limit_bytes: None,
+            backward_edges: None,
+            threads: None,
+            wal_enabled: None,
+            wal_durability: None,
+        })
+        .await
+        .unwrap();
+
+    // Create session, configure to the new database, execute query
+    let mut session = conn.create_session().await.unwrap();
+    session.set_graph("query-db").await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "CREATE (:Widget {name: 'Gear'}) RETURN 'ok'",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    // Verify node count via get_info
+    let info = db_client.get_info("query-db").await.unwrap();
+    assert_eq!(info.node_count, 1);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_delete_then_recreate_database() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    let config = gwp::server::CreateDatabaseConfig {
+        name: "ephemeral".to_string(),
+        database_type: "lpg".to_string(),
+        storage_mode: "inmemory".to_string(),
+        memory_limit_bytes: None,
+        backward_edges: None,
+        threads: None,
+        wal_enabled: None,
+        wal_durability: None,
+    };
+
+    // Create, delete, recreate — exercises the close barrier path
+    db_client.create(config.clone()).await.unwrap();
+    db_client.delete("ephemeral").await.unwrap();
+    db_client.create(config).await.unwrap();
+
+    // Should be queryable
+    let mut session = conn.create_session().await.unwrap();
+    session.set_graph("ephemeral").await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "MATCH (n) RETURN count(n)",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    assert_eq!(rows.len(), 1, "should return a count row");
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_delete_nonexistent_database_fails() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    let result = db_client.delete("nonexistent").await;
+    assert!(result.is_err(), "deleting nonexistent database should fail");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_duplicate_database_fails() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    let config = gwp::server::CreateDatabaseConfig {
+        name: "dup".to_string(),
+        database_type: "lpg".to_string(),
+        storage_mode: "inmemory".to_string(),
+        memory_limit_bytes: None,
+        backward_edges: None,
+        threads: None,
+        wal_enabled: None,
+        wal_durability: None,
+    };
+
+    db_client.create(config.clone()).await.unwrap();
+    let result = db_client.create(config).await;
+    assert!(result.is_err(), "creating duplicate database should fail");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_configure_deleted_database_fails() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut db_client = conn.create_database_client();
+
+    // Create then delete a database
+    db_client
+        .create(gwp::server::CreateDatabaseConfig {
+            name: "doomed".to_string(),
+            database_type: "lpg".to_string(),
+            storage_mode: "inmemory".to_string(),
+            memory_limit_bytes: None,
+            backward_edges: None,
+            threads: None,
+            wal_enabled: None,
+            wal_durability: None,
+        })
+        .await
+        .unwrap();
+    db_client.delete("doomed").await.unwrap();
+
+    // Configuring a session to the deleted database should fail
+    let mut session = conn.create_session().await.unwrap();
+    let result = session.set_graph("doomed").await;
+    assert!(
+        result.is_err(),
+        "configuring session to deleted database should fail"
+    );
+
+    session.close().await.unwrap();
 }
