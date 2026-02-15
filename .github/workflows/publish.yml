@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [lite, gwp, standard, full]
+        variant: [lite, standard, full]
     steps:
       - uses: actions/checkout@v4
 
