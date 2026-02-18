@@ -7,21 +7,88 @@
 //! All engine operations run via `spawn_blocking` to avoid blocking
 //! the async runtime.
 
+#[cfg(feature = "auth")]
+mod auth;
 mod backend;
 mod encode;
 
 pub use backend::GrafeoBackend;
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::time::Duration;
+
+/// Configuration options for the GWP server.
+///
+/// All fields are optional — `Default` gives a bare server with no
+/// TLS, no auth, no idle reaper, and unlimited sessions.
+#[derive(Default)]
+pub struct GwpOptions {
+    /// Idle session timeout. Sessions inactive longer than this are
+    /// automatically closed and their transactions rolled back.
+    pub idle_timeout: Option<Duration>,
+
+    /// Maximum concurrent GWP sessions. New handshakes are rejected
+    /// with `RESOURCE_EXHAUSTED` once the limit is reached.
+    pub max_sessions: Option<usize>,
+
+    /// TLS certificate path (PEM). Both cert and key must be set to enable TLS.
+    #[cfg(feature = "tls")]
+    pub tls_cert: Option<String>,
+
+    /// TLS private key path (PEM).
+    #[cfg(feature = "tls")]
+    pub tls_key: Option<String>,
+
+    /// Auth provider for handshake credential validation.
+    #[cfg(feature = "auth")]
+    pub auth_provider: Option<grafeo_service::auth::AuthProvider>,
+
+    /// Shutdown signal. When the future resolves, the server stops
+    /// accepting connections, drains in-flight requests, and stops
+    /// the idle session reaper.
+    pub shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
 
 /// Starts the GWP (gRPC) server on the given address.
 ///
-/// This is a convenience wrapper around `gwp::server::GqlServer::serve`.
-/// The future resolves when the server shuts down.
+/// Uses the `GqlServer` builder from gwp to configure TLS,
+/// authentication, idle timeout, and session limits.
 pub async fn serve(
     backend: GrafeoBackend,
     addr: SocketAddr,
+    options: GwpOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    gwp::server::GqlServer::serve(backend, addr).await?;
+    let mut builder = gwp::server::GqlServer::builder(backend);
+
+    if let Some(timeout) = options.idle_timeout {
+        builder = builder.idle_timeout(timeout);
+    }
+    if let Some(limit) = options.max_sessions {
+        builder = builder.max_sessions(limit);
+    }
+
+    #[cfg(feature = "tls")]
+    if let (Some(cert_path), Some(key_path)) = (options.tls_cert, options.tls_key) {
+        let cert_pem = std::fs::read(&cert_path)
+            .map_err(|e| format!("cannot read GWP TLS cert '{cert_path}': {e}"))?;
+        let key_pem = std::fs::read(&key_path)
+            .map_err(|e| format!("cannot read GWP TLS key '{key_path}': {e}"))?;
+        let identity = tonic::transport::Identity::from_pem(&cert_pem, &key_pem);
+        let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+        builder = builder.tls(tls_config);
+    }
+
+    #[cfg(feature = "auth")]
+    if let Some(provider) = options.auth_provider {
+        builder = builder.auth(auth::GwpAuthValidator::new(provider));
+    }
+
+    if let Some(signal) = options.shutdown {
+        builder = builder.shutdown(signal);
+    }
+
+    builder.serve(addr).await?;
     Ok(())
 }

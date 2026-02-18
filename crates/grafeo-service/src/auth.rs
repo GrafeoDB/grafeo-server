@@ -8,6 +8,7 @@ use subtle::ConstantTimeEq;
 
 /// Authentication provider supporting bearer tokens and HTTP Basic auth.
 #[cfg(feature = "auth")]
+#[derive(Clone)]
 pub struct AuthProvider {
     bearer_token: Option<String>,
     basic_user: Option<String>,

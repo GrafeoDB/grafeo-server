@@ -1946,7 +1946,7 @@ async fn spawn_server_with_gwp() -> (String, String) {
     drop(gwp_listener);
     let backend = grafeo_gwp::GrafeoBackend::new(state.service().clone());
     tokio::spawn(async move {
-        gwp::server::GqlServer::serve(backend, gwp_addr)
+        gwp::server::GqlServer::start(backend, gwp_addr)
             .await
             .unwrap();
     });
