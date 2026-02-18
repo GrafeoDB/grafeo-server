@@ -14,7 +14,9 @@ mod encode;
 
 pub use backend::GrafeoBackend;
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::Duration;
 
 /// Configuration options for the GWP server.
@@ -42,6 +44,11 @@ pub struct GwpOptions {
     /// Auth provider for handshake credential validation.
     #[cfg(feature = "auth")]
     pub auth_provider: Option<grafeo_service::auth::AuthProvider>,
+
+    /// Shutdown signal. When the future resolves, the server stops
+    /// accepting connections, drains in-flight requests, and stops
+    /// the idle session reaper.
+    pub shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 /// Starts the GWP (gRPC) server on the given address.
@@ -76,6 +83,10 @@ pub async fn serve(
     #[cfg(feature = "auth")]
     if let Some(provider) = options.auth_provider {
         builder = builder.auth(auth::GwpAuthValidator::new(provider));
+    }
+
+    if let Some(signal) = options.shutdown {
+        builder = builder.shutdown(signal);
     }
 
     builder.serve(addr).await?;

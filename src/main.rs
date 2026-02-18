@@ -70,7 +70,13 @@ async fn main() {
     {
         let gwp_addr =
             std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.gwp_port);
-        let gwp_options = build_gwp_options(&config, &service);
+        let mut gwp_options = build_gwp_options(&config, &service);
+        gwp_options.shutdown = Some(Box::pin(async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install signal handler");
+            tracing::info!("Shutdown signal received");
+        }));
         let backend = grafeo_gwp::GrafeoBackend::new(service);
         tracing::info!(%gwp_addr, "GWP server ready (standalone)");
         if let Err(e) = grafeo_gwp::serve(backend, gwp_addr, gwp_options).await {
@@ -106,18 +112,21 @@ async fn main() {
 
         // Spawn GWP alongside HTTP if both features are enabled
         #[cfg(feature = "gwp")]
-        {
+        let gwp_handle = {
             let gwp_state = service.clone();
-            let gwp_options = build_gwp_options(&config, &service);
+            let mut gwp_options = build_gwp_options(&config, &service);
             let gwp_addr = std::net::SocketAddr::new(addr.ip(), config.gwp_port);
+            gwp_options.shutdown = Some(Box::pin(async {
+                tokio::signal::ctrl_c().await.ok();
+            }));
             tokio::spawn(async move {
                 let backend = grafeo_gwp::GrafeoBackend::new(gwp_state);
                 tracing::info!(%gwp_addr, "GWP (gRPC) server ready");
                 if let Err(e) = grafeo_gwp::serve(backend, gwp_addr, gwp_options).await {
                     tracing::error!("GWP server error: {e}");
                 }
-            });
-        }
+            })
+        };
 
         #[cfg(feature = "tls")]
         if config.tls_enabled() {
@@ -131,6 +140,9 @@ async fn main() {
 
             grafeo_http::tls::serve_tls(listener, tls_config, app, shutdown_signal()).await;
 
+            #[cfg(feature = "gwp")]
+            gwp_handle.await.ok();
+
             tracing::info!("Grafeo Server shut down");
             return;
         }
@@ -138,6 +150,9 @@ async fn main() {
         tracing::info!(%addr, "Grafeo Server ready");
 
         grafeo_http::serve(listener, app, shutdown_signal()).await;
+
+        #[cfg(feature = "gwp")]
+        gwp_handle.await.ok();
 
         tracing::info!("Grafeo Server shut down");
     }
@@ -253,6 +268,7 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
         auth_provider: service.auth().cloned(),
+        shutdown: None,
     }
 }
 

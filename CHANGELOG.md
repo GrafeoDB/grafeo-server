@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GWP authentication**: when `auth` feature is enabled, GWP handshake validates credentials using the same `--auth-token`/`--auth-user`/`--auth-password` as HTTP via a `GwpAuthValidator` adapter
 - **GWP idle timeout**: GWP sessions are automatically reaped after `--session-ttl` seconds of inactivity (previously only HTTP sessions had TTL cleanup)
 - **GWP max sessions**: `--gwp-max-sessions` CLI flag / `GRAFEO_GWP_MAX_SESSIONS` env var limits concurrent GWP sessions; new handshakes rejected with `RESOURCE_EXHAUSTED` when limit is reached (default: 0 = unlimited)
+- **GWP graceful shutdown**: Ctrl-C now drains in-flight gRPC requests, stops the idle session reaper, and awaits GWP task completion before process exit (previously the GWP task was dropped without draining)
+- **GWP health check**: `grpc.health.v1.Health` service served automatically on the GWP port via `tonic-health`
+- **GWP tracing**: structured `tracing` spans and events on all gRPC methods, including session lifecycle, query execution, transactions, and database operations
 - `AuthProvider` now derives `Clone` for cross-transport sharing
 - `grafeo-gwp` crate now has `tls` and `auth` feature flags, forwarded from the workspace `tls`/`auth` features
 

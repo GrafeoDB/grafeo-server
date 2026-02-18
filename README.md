@@ -232,6 +232,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
 | `GRAFEO_GWP_PORT` | `--gwp-port` | `7687` | GQL Wire Protocol (gRPC) port |
+| `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `0` | Max concurrent GWP sessions (0 = unlimited) |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
