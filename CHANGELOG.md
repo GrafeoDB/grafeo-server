@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.2] - Unreleased
 
+### Changed
+
+- Bumped grafeo-engine and grafeo-common to 0.5.6 (UNWIND/FOR clauses, SSSP procedure, full node/edge maps in RETURN, UTF-8 lexer fix, embedding model config, text index sync, SPARQL COPY/MOVE/ADD, performance improvements)
+- Bumped gwp to 0.1.4 and migrated to builder pattern (`GqlServer::builder()`)
+- **GWP TLS**: when `tls` feature is enabled, GWP (gRPC) server uses the same `--tls-cert`/`--tls-key` files as HTTP for encrypted transport
+- **GWP authentication**: when `auth` feature is enabled, GWP handshake validates credentials using the same `--auth-token`/`--auth-user`/`--auth-password` as HTTP via a `GwpAuthValidator` adapter
+- **GWP idle timeout**: GWP sessions are automatically reaped after `--session-ttl` seconds of inactivity (previously only HTTP sessions had TTL cleanup)
+- **GWP max sessions**: `--gwp-max-sessions` CLI flag / `GRAFEO_GWP_MAX_SESSIONS` env var limits concurrent GWP sessions; new handshakes rejected with `RESOURCE_EXHAUSTED` when limit is reached (default: 0 = unlimited)
+- `AuthProvider` now derives `Clone` for cross-transport sharing
+- `grafeo-gwp` crate now has `tls` and `auth` feature flags, forwarded from the workspace `tls`/`auth` features
+
 ## [0.4.1] - 2026-02-16
 
 ### Added

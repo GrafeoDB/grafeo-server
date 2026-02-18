@@ -10,13 +10,18 @@ description = "GQL Wire Protocol (gRPC) transport adapter for Grafeo Server"
 grafeo-service = { workspace = true }
 grafeo-engine = { workspace = true }
 grafeo-common = { workspace = true }
-gwp = "0.1.2"
+gwp = { path = "../../../gwp" }
 tonic = "0.14"
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+default = []
+tls = ["gwp/tls"]
+auth = ["grafeo-service/auth"]
 
 [lints]
 workspace = true

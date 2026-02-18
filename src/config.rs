@@ -52,6 +52,11 @@ pub struct Config {
     #[arg(long, default_value_t = 7687, env = "GRAFEO_GWP_PORT")]
     pub gwp_port: u16,
 
+    /// Maximum concurrent GWP sessions. 0 = unlimited.
+    #[cfg(feature = "gwp")]
+    #[arg(long, default_value_t = 0, env = "GRAFEO_GWP_MAX_SESSIONS")]
+    pub gwp_max_sessions: usize,
+
     /// Log level.
     #[arg(long, default_value = "info", env = "GRAFEO_LOG_LEVEL")]
     pub log_level: String,
