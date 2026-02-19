@@ -2313,7 +2313,7 @@ async fn gwp_configure_deleted_database_fails() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin endpoints (v0.5.0)
+// Admin endpoints (v0.4.3)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2495,7 +2495,7 @@ async fn openapi_includes_admin_and_search_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// Search endpoints (v0.5.0) — feature-dependent stubs
+// Search endpoints (v0.4.3) — feature-dependent stubs
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2540,7 +2540,7 @@ async fn search_text_requires_database() {
 }
 
 // ---------------------------------------------------------------------------
-// GWP Admin operations (v0.5.0)
+// GWP Admin operations (v0.4.3)
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "gwp")]

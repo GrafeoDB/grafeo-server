@@ -5,6 +5,35 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-02-19
+
+### Added
+
+- **Admin endpoints** (HTTP + GWP): database introspection, maintenance, and index management via both REST and gRPC
+  - `GET /admin/{db}/stats`: detailed database statistics (node/edge/label/property counts, memory, disk usage)
+  - `GET /admin/{db}/wal`: WAL status (enabled, path, size, record count, epoch)
+  - `POST /admin/{db}/wal/checkpoint`: force WAL checkpoint (flush pending records to storage)
+  - `GET /admin/{db}/validate`: database integrity validation (dangling edges, index consistency)
+  - `POST /admin/{db}/index`: create property, vector, or text index
+  - `DELETE /admin/{db}/index`: drop property, vector, or text index
+- **Search endpoints** (HTTP + GWP): vector, text, and hybrid search via both REST and gRPC
+  - `POST /search/vector`: KNN vector similarity search via HNSW index (feature: `vector-index`)
+  - `POST /search/text`: full-text BM25 search (feature: `text-index`)
+  - `POST /search/hybrid`: combined vector + text search with rank fusion (feature: `hybrid-search`)
+- **grafeo-service admin module** (`admin.rs`): transport-agnostic `AdminService` with 6 operations (database_stats, wal_status, wal_checkpoint, validate, create_index, drop_index) and 7 unit tests
+- **grafeo-service search module** (`search.rs`): transport-agnostic `SearchService` with 3 operations (vector_search, text_search, hybrid_search); feature-gated with stub fallbacks when features are disabled
+- **gwp AdminService** (gRPC): 6 RPCs — `GetDatabaseStats`, `WalStatus`, `WalCheckpoint`, `Validate`, `CreateIndex`, `DropIndex`; registered in `GqlServer::builder()`
+- **gwp SearchService** (gRPC): 3 RPCs — `VectorSearch`, `TextSearch`, `HybridSearch` with filter support; registered in `GqlServer::builder()`
+- **grafeo-gwp backend**: implemented all 10 admin/search trait methods in `GrafeoBackend`, converting between service types and gwp proto types
+- **14 new integration tests**: 10 HTTP (admin stats, not-found, WAL status, WAL checkpoint, validate, create/drop index, stats after insertion, OpenAPI paths, search vector/text error handling) + 4 GWP (admin stats, WAL status, validate, create/drop index via raw tonic proto clients)
+- **OpenAPI**: admin and search endpoints fully documented with schemas (`DatabaseStats`, `WalStatusInfo`, `ValidationInfo`, `IndexDef`, `VectorSearchReq`, `TextSearchReq`, `HybridSearchReq`, `SearchHit`, `SearchResponse`) and "Admin" / "Search" tags
+
+### Changed
+
+- Bumped grafeo-engine and grafeo-common to 0.5.7
+- Bumped gwp to 0.1.5 (adds AdminService and SearchService gRPC definitions)
+- 132 total tests (94 integration + 20 grafeo-service unit + 9 grafeo-gwp + 9 grafeo-http)
+
 ## [0.4.2] - 2026-02-18
 
 ### Changed
@@ -251,7 +280,8 @@ Initial release.
 - **Pre-commit hooks** (prek): fmt, clippy, deny, typos
 - **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.3.0...v0.4.0
