@@ -2311,3 +2311,351 @@ async fn gwp_configure_deleted_database_fails() {
 
     session.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Admin endpoints (v0.5.0)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_stats_returns_valid_response() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/stats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "default");
+    assert_eq!(body["node_count"], 0);
+    assert_eq!(body["edge_count"], 0);
+    assert!(body["memory_bytes"].is_u64());
+}
+
+#[tokio::test]
+async fn admin_stats_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/nonexistent/stats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn admin_wal_status_in_memory() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/wal"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], false);
+    assert!(body["current_epoch"].is_u64());
+}
+
+#[tokio::test]
+async fn admin_wal_checkpoint_succeeds() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/wal/checkpoint"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["success"], true);
+}
+
+#[tokio::test]
+async fn admin_validate_clean_database() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/validate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["valid"], true);
+    assert!(body["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn admin_create_and_drop_property_index() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create index
+    let resp = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({"type": "property", "property": "name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], true);
+
+    // Drop index
+    let resp = client
+        .delete(format!("{base}/admin/default/index"))
+        .json(&json!({"type": "property", "property": "name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], true);
+
+    // Drop again — should return false
+    let resp = client
+        .delete(format!("{base}/admin/default/index"))
+        .json(&json!({"type": "property", "property": "name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], false);
+}
+
+#[tokio::test]
+async fn admin_stats_after_data_insertion() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Insert data (two separate known-good INSERT statements)
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Person {name: 'Alice'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Person {name: 'Bob'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Stats should reflect the data
+    let resp = client
+        .get(format!("{base}/admin/default/stats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["node_count"], 2);
+    assert!(body["label_count"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn openapi_includes_admin_and_search_paths() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+
+    let paths = body["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/admin/{db}/stats"));
+    assert!(paths.contains_key("/admin/{db}/wal"));
+    assert!(paths.contains_key("/admin/{db}/wal/checkpoint"));
+    assert!(paths.contains_key("/admin/{db}/validate"));
+    assert!(paths.contains_key("/admin/{db}/index"));
+    assert!(paths.contains_key("/search/vector"));
+    assert!(paths.contains_key("/search/text"));
+    assert!(paths.contains_key("/search/hybrid"));
+}
+
+// ---------------------------------------------------------------------------
+// Search endpoints (v0.5.0) — feature-dependent stubs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn search_vector_requires_database() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/search/vector"))
+        .json(&json!({
+            "database": "nonexistent",
+            "label": "Document",
+            "property": "embedding",
+            "query_vector": [0.1, 0.2, 0.3],
+            "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Should return 400 (feature disabled) or 404 (db not found)
+    assert!(resp.status() == 400 || resp.status() == 404);
+}
+
+#[tokio::test]
+async fn search_text_requires_database() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/search/text"))
+        .json(&json!({
+            "database": "nonexistent",
+            "label": "Document",
+            "property": "content",
+            "query": "hello world",
+            "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status() == 400 || resp.status() == 404);
+}
+
+// ---------------------------------------------------------------------------
+// GWP Admin operations (v0.5.0)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_admin_stats() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let channel = tonic::transport::Channel::from_shared(gwp_endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut admin_client =
+        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+
+    let resp = admin_client
+        .get_database_stats(gwp::proto::GetDatabaseStatsRequest {
+            database: "default".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.node_count, 0);
+    assert_eq!(resp.edge_count, 0);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_admin_wal_status() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let channel = tonic::transport::Channel::from_shared(gwp_endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut admin_client =
+        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+
+    let resp = admin_client
+        .wal_status(gwp::proto::WalStatusRequest {
+            database: "default".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(!resp.enabled);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_admin_validate() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let channel = tonic::transport::Channel::from_shared(gwp_endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut admin_client =
+        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+
+    let resp = admin_client
+        .validate(gwp::proto::ValidateRequest {
+            database: "default".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.valid);
+    assert!(resp.errors.is_empty());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_admin_create_index() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let channel = tonic::transport::Channel::from_shared(gwp_endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut admin_client =
+        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+
+    // Create a property index
+    admin_client
+        .create_index(gwp::proto::CreateIndexRequest {
+            database: "default".to_string(),
+            index: Some(gwp::proto::create_index_request::Index::PropertyIndex(
+                gwp::proto::PropertyIndexDef {
+                    property: "name".to_string(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+    // Drop the index
+    let resp = admin_client
+        .drop_index(gwp::proto::DropIndexRequest {
+            database: "default".to_string(),
+            index: Some(gwp::proto::drop_index_request::Index::PropertyIndex(
+                gwp::proto::PropertyIndexDef {
+                    property: "name".to_string(),
+                },
+            )),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.existed);
+}

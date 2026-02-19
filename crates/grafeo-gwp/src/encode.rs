@@ -40,6 +40,12 @@ pub fn convert_params(params: &HashMap<String, GwpValue>) -> HashMap<String, gra
         .collect()
 }
 
+/// Converts a GWP `Value` to a `grafeo_common::Value`, using `Null` for
+/// unsupported types. Used by the search filter conversion path.
+pub fn gwp_to_grafeo_common(value: &GwpValue) -> grafeo_common::Value {
+    gwp_to_grafeo(value).unwrap_or(grafeo_common::Value::Null)
+}
+
 /// Converts a GWP `Value` to a grafeo-engine `Value`.
 /// Returns None for types that grafeo-engine doesn't support as parameters.
 fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
