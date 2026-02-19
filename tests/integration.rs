@@ -2553,8 +2553,7 @@ async fn gwp_admin_stats() {
         .connect()
         .await
         .unwrap();
-    let mut admin_client =
-        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+    let mut admin_client = gwp::proto::admin_service_client::AdminServiceClient::new(channel);
 
     let resp = admin_client
         .get_database_stats(gwp::proto::GetDatabaseStatsRequest {
@@ -2578,8 +2577,7 @@ async fn gwp_admin_wal_status() {
         .connect()
         .await
         .unwrap();
-    let mut admin_client =
-        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+    let mut admin_client = gwp::proto::admin_service_client::AdminServiceClient::new(channel);
 
     let resp = admin_client
         .wal_status(gwp::proto::WalStatusRequest {
@@ -2602,8 +2600,7 @@ async fn gwp_admin_validate() {
         .connect()
         .await
         .unwrap();
-    let mut admin_client =
-        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+    let mut admin_client = gwp::proto::admin_service_client::AdminServiceClient::new(channel);
 
     let resp = admin_client
         .validate(gwp::proto::ValidateRequest {
@@ -2627,8 +2624,7 @@ async fn gwp_admin_create_index() {
         .connect()
         .await
         .unwrap();
-    let mut admin_client =
-        gwp::proto::admin_service_client::AdminServiceClient::new(channel);
+    let mut admin_client = gwp::proto::admin_service_client::AdminServiceClient::new(channel);
 
     // Create a property index
     admin_client

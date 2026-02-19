@@ -11,8 +11,8 @@ use gwp::proto;
 use gwp::server::{
     AdminStats, AdminValidationResult, AdminWalStatus, CreateDatabaseConfig, DatabaseInfo,
     GqlBackend, HybridSearchParams, IndexDefinition, ResetTarget, ResultFrame, ResultStream,
-    SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams,
-    TransactionHandle, ValidationDiagnostic, VectorSearchParams,
+    SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams, TransactionHandle,
+    ValidationDiagnostic, VectorSearchParams,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -541,10 +541,9 @@ impl GqlBackend for GrafeoBackend {
             k: req.k,
         };
 
-        let hits =
-            SearchService::hybrid_search(self.state.databases(), &req.database, service_req)
-                .await
-                .map_err(|e| GqlError::Session(e.to_string()))?;
+        let hits = SearchService::hybrid_search(self.state.databases(), &req.database, service_req)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
 
         Ok(hits
             .into_iter()

@@ -293,9 +293,7 @@ pub struct ValidationWarningItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IndexDef {
     /// Property hash index for O(1) equality lookups.
-    Property {
-        property: String,
-    },
+    Property { property: String },
     /// Vector similarity index (HNSW).
     Vector {
         label: String,
@@ -310,10 +308,7 @@ pub enum IndexDef {
         ef_construction: Option<u32>,
     },
     /// Full-text index (BM25).
-    Text {
-        label: String,
-        property: String,
-    },
+    Text { label: String, property: String },
 }
 
 // ============================================================================
