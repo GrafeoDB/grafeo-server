@@ -34,7 +34,7 @@ subtle = { version = "2", optional = true }
 utoipa = { version = "5", optional = true }
 
 [features]
-default = ["gql", "storage"]
+default = ["gql", "storage", "algos"]
 
 # Query languages (forwarded to grafeo-engine)
 gql = ["grafeo-engine/gql"]
@@ -44,6 +44,9 @@ gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 sql-pgq = ["grafeo-engine/sql-pgq"]
 all-languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
+
+# Engine: graph algorithms
+algos = ["grafeo-engine/algos"]
 
 # Engine: storage & execution
 parallel = ["grafeo-engine/parallel"]

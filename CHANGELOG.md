@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bumped grafeo-engine and grafeo-common to 0.5.7
 - Bumped gwp to 0.1.5 (adds AdminService and SearchService gRPC definitions)
+- Added `algos` feature flag forwarding for graph algorithm procedures (CALL procedures now require the `algos` feature, enabled by default and in `full` tier)
 - 132 total tests (94 integration + 20 grafeo-service unit + 9 grafeo-gwp + 9 grafeo-http)
 
 ## [0.4.2] - 2026-02-18

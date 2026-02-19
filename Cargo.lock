@@ -744,7 +744,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -807,7 +807,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1066,9 +1066,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.6"
+version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4084365fabf81b5b8a4f6fef82126405031e9832e24dc7c2c55f547c67f2bc17"
+checksum = "3d9dc3710c423040d9d77982bb12afdea42357e6e93e4109c52718fc4f390423"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1090,13 +1090,13 @@ dependencies = [
 
 [[package]]
 name = "grafeo-bolt"
-version = "0.4.2"
+version = "0.4.3"
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.6"
+version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f73def9f09755b05658f1cd3c6b5eeecac1d1345fd524403a93bf13902cc09c"
+checksum = "fb63fea6290a2ec0bcb77236f08355dbe44a47f9b52f2e83883f93fa26177767"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1117,9 +1117,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.6"
+version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6297f18b59cc04b8e1c8cfdf5b119ce68affd040dedcb26a686f8232081b6c3"
+checksum = "643cdc688d0971d3e42bb3cf382a32ce40052cd71b8f8f32fd7498dd6a6048ee"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1143,9 +1143,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.6"
+version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ab7d469e0cba43841446a050a643a955ab92adac4668624b53d819263122798"
+checksum = "ade032f226403175289f34374f42a75783641aa8a7dd9bd8d51796b9ae706754"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1269,6 +1269,8 @@ dependencies = [
 [[package]]
 name = "gwp"
 version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a35ee8f0aef681cb177dc52595a37acb255f52855805574caebce52c5f05d8d6"
 dependencies = [
  "prost",
  "prost-build",
@@ -2018,7 +2020,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2544,7 +2546,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2901,7 +2903,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2969,7 +2971,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3383,7 +3385,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3580,9 +3582,9 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.4"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f32a6f80051a4111560201420c7885d0082ba9efe2ab61875c587bb6b18b9a0"
+checksum = "fec7c61a0695dc1887c1b53952990f3ad2e3a31453e1f49f10e75424943a93ec"
 dependencies = [
  "async-trait",
  "axum",
@@ -4278,7 +4280,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
