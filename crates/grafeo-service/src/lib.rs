@@ -9,6 +9,7 @@
 //!
 //! **Zero transport dependencies** — no axum, no tonic, no wire-protocol code.
 
+pub mod admin;
 #[cfg(feature = "auth")]
 pub mod auth;
 pub mod database;
@@ -17,6 +18,7 @@ pub mod metrics;
 pub mod query;
 pub mod rate_limit;
 pub mod schema;
+pub mod search;
 pub mod session;
 pub mod stream;
 pub mod types;

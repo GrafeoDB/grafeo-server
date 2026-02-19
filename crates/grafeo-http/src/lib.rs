@@ -29,7 +29,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use error::ErrorBody;
-use types::DatabaseSummary;
+use types::{DatabaseSummary, SearchResponse};
 
 pub use state::AppState;
 
@@ -42,7 +42,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.4.2",
+        version = "0.4.3",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -65,6 +65,15 @@ pub use state::AppState;
         routes::database::database_info,
         routes::database::database_stats,
         routes::database::database_schema,
+        routes::admin::admin_stats,
+        routes::admin::admin_wal_status,
+        routes::admin::admin_wal_checkpoint,
+        routes::admin::admin_validate,
+        routes::admin::admin_create_index,
+        routes::admin::admin_drop_index,
+        routes::search::vector_search,
+        routes::search::text_search,
+        routes::search::hybrid_search,
     ),
     components(
         schemas(
@@ -76,12 +85,20 @@ pub use state::AppState;
             types::DatabaseSchemaResponse, types::LabelInfo, types::EdgeTypeInfo,
             types::SystemResources, types::ResourceDefaults,
             types::BatchQueryRequest, types::BatchQueryItem, types::BatchQueryResponse,
+            grafeo_service::types::DatabaseStats, grafeo_service::types::WalStatusInfo,
+            grafeo_service::types::ValidationInfo, grafeo_service::types::ValidationErrorItem,
+            grafeo_service::types::ValidationWarningItem, grafeo_service::types::IndexDef,
+            grafeo_service::types::VectorSearchReq, grafeo_service::types::TextSearchReq,
+            grafeo_service::types::HybridSearchReq, grafeo_service::types::SearchHit,
+            SearchResponse,
         )
     ),
     tags(
         (name = "Query", description = "Execute queries in various graph query languages"),
         (name = "Transaction", description = "Explicit transaction management"),
         (name = "Database", description = "Database management (create, delete, list, info)"),
+        (name = "Admin", description = "Database administration, introspection, and index management"),
+        (name = "Search", description = "Vector, text, and hybrid search"),
         (name = "System", description = "System and health endpoints"),
     )
 )]
@@ -123,6 +140,22 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/db/{name}/stats", get(routes::database::database_stats))
         .route("/db/{name}/schema", get(routes::database::database_schema))
+        // Admin
+        .route("/admin/{db}/stats", get(routes::admin::admin_stats))
+        .route("/admin/{db}/wal", get(routes::admin::admin_wal_status))
+        .route(
+            "/admin/{db}/wal/checkpoint",
+            post(routes::admin::admin_wal_checkpoint),
+        )
+        .route("/admin/{db}/validate", get(routes::admin::admin_validate))
+        .route(
+            "/admin/{db}/index",
+            post(routes::admin::admin_create_index).delete(routes::admin::admin_drop_index),
+        )
+        // Search
+        .route("/search/vector", post(routes::search::vector_search))
+        .route("/search/text", post(routes::search::text_search))
+        .route("/search/hybrid", post(routes::search::hybrid_search))
         // System
         .route("/health", get(routes::system::health))
         .route("/system/resources", get(routes::system::system_resources))

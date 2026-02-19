@@ -8,6 +8,13 @@ pub use grafeo_service::types::{
     StorageMode,
 };
 
+/// Search response wrapper.
+#[derive(Serialize, ToSchema)]
+pub struct SearchResponse {
+    /// Search result hits ordered by relevance.
+    pub hits: Vec<grafeo_service::types::SearchHit>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct QueryRequest {
     /// The query string to execute.

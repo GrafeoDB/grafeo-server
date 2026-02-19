@@ -155,6 +155,7 @@ pub struct DatabaseInfo {
 
 /// Database statistics.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DatabaseStats {
     pub name: String,
     pub node_count: usize,
@@ -222,4 +223,173 @@ pub struct BatchQuery {
     pub statement: String,
     pub language: Option<String>,
     pub params: Option<std::collections::HashMap<String, grafeo_common::Value>>,
+}
+
+// ============================================================================
+// Admin types
+// ============================================================================
+
+/// WAL (Write-Ahead Log) status information.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WalStatusInfo {
+    /// Whether WAL is enabled for this database.
+    pub enabled: bool,
+    /// WAL file path (if persistent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// WAL size in bytes.
+    pub size_bytes: usize,
+    /// Number of WAL records.
+    pub record_count: usize,
+    /// Last checkpoint timestamp (Unix epoch seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint: Option<u64>,
+    /// Current epoch/LSN.
+    pub current_epoch: u64,
+}
+
+/// Database validation result.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ValidationInfo {
+    /// Whether the database passed validation (no errors).
+    pub valid: bool,
+    /// Validation errors.
+    pub errors: Vec<ValidationErrorItem>,
+    /// Validation warnings.
+    pub warnings: Vec<ValidationWarningItem>,
+}
+
+/// A validation error.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ValidationErrorItem {
+    /// Error code (e.g. "DANGLING_SRC").
+    pub code: String,
+    /// Human-readable error message.
+    pub message: String,
+    /// Optional context (e.g. affected entity ID).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// A validation warning.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ValidationWarningItem {
+    /// Warning code (e.g. "NO_EDGES").
+    pub code: String,
+    /// Human-readable warning message.
+    pub message: String,
+    /// Optional context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// Index definition for create/drop operations.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IndexDef {
+    /// Property hash index for O(1) equality lookups.
+    Property { property: String },
+    /// Vector similarity index (HNSW).
+    Vector {
+        label: String,
+        property: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dimensions: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metric: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        m: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ef_construction: Option<u32>,
+    },
+    /// Full-text index (BM25).
+    Text { label: String, property: String },
+}
+
+// ============================================================================
+// Search types
+// ============================================================================
+
+/// Vector search request parameters.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct VectorSearchReq {
+    /// Database name (defaults to "default").
+    #[serde(default = "default_db_name")]
+    pub database: String,
+    /// Node label to search within.
+    pub label: String,
+    /// Property containing vector embeddings.
+    pub property: String,
+    /// Query vector.
+    pub query_vector: Vec<f32>,
+    /// Number of nearest neighbors to return.
+    pub k: u32,
+    /// Search beam width (higher = better recall).
+    #[serde(default)]
+    pub ef: Option<u32>,
+    /// Optional property equality filters.
+    #[serde(default)]
+    pub filters: std::collections::HashMap<String, grafeo_common::Value>,
+}
+
+/// Text search request parameters.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TextSearchReq {
+    /// Database name (defaults to "default").
+    #[serde(default = "default_db_name")]
+    pub database: String,
+    /// Node label to search within.
+    pub label: String,
+    /// Property indexed for text search.
+    pub property: String,
+    /// Search query text.
+    pub query: String,
+    /// Number of results to return.
+    pub k: u32,
+}
+
+/// Hybrid search request parameters (vector + text).
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HybridSearchReq {
+    /// Database name (defaults to "default").
+    #[serde(default = "default_db_name")]
+    pub database: String,
+    /// Node label to search within.
+    pub label: String,
+    /// Property indexed for text search.
+    pub text_property: String,
+    /// Property indexed for vector search.
+    pub vector_property: String,
+    /// Text query for BM25 search.
+    pub query_text: String,
+    /// Vector query for similarity search (optional).
+    #[serde(default)]
+    pub query_vector: Vec<f32>,
+    /// Number of results to return.
+    pub k: u32,
+}
+
+/// A single search result hit.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SearchHit {
+    /// Node identifier.
+    pub node_id: u64,
+    /// Relevance score (distance for vector, BM25 for text, fused for hybrid).
+    pub score: f64,
+    /// Node properties (empty by default, populated if requested).
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+fn default_db_name() -> String {
+    "default".to_owned()
 }

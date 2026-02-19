@@ -18,12 +18,14 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 
+# JSON (always needed for SearchHit properties)
+serde_json = "1"
+
 # Schema loading (optional)
 sophia_turtle = { version = "0.9", optional = true }
 sophia_api = { version = "0.9", optional = true }
 sophia_inmem = { version = "0.9", optional = true }
 jsonschema = { version = "0.41", optional = true }
-serde_json = { version = "1", optional = true }
 
 # Auth (optional)
 subtle = { version = "2", optional = true }
@@ -32,7 +34,7 @@ subtle = { version = "2", optional = true }
 utoipa = { version = "5", optional = true }
 
 [features]
-default = ["gql", "storage"]
+default = ["gql", "storage", "algos"]
 
 # Query languages (forwarded to grafeo-engine)
 gql = ["grafeo-engine/gql"]
@@ -42,6 +44,9 @@ gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 sql-pgq = ["grafeo-engine/sql-pgq"]
 all-languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
+
+# Engine: graph algorithms
+algos = ["grafeo-engine/algos"]
 
 # Engine: storage & execution
 parallel = ["grafeo-engine/parallel"]
@@ -64,7 +69,7 @@ rdf = ["grafeo-engine/rdf"]
 # Schema loading
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]
-json-schema = ["dep:jsonschema", "dep:serde_json"]
+json-schema = ["dep:jsonschema"]
 
 # Auth provider
 auth = ["dep:subtle"]

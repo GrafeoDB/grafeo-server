@@ -9,8 +9,10 @@ use dashmap::DashMap;
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{
-    CreateDatabaseConfig, DatabaseInfo, GqlBackend, ResetTarget, ResultFrame, ResultStream,
-    SessionConfig, SessionHandle, SessionProperty, TransactionHandle,
+    AdminStats, AdminValidationResult, AdminWalStatus, CreateDatabaseConfig, DatabaseInfo,
+    GqlBackend, HybridSearchParams, IndexDefinition, ResetTarget, ResultFrame, ResultStream,
+    SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams, TransactionHandle,
+    ValidationDiagnostic, VectorSearchParams,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -18,6 +20,8 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use grafeo_service::ServiceState;
+use grafeo_service::admin::AdminService;
+use grafeo_service::search::SearchService;
 
 use crate::encode::{convert_params, grafeo_to_gwp};
 
@@ -338,6 +342,217 @@ impl GqlBackend for GrafeoBackend {
             backward_edges: Some(entry.metadata.backward_edges),
             threads: Some(entry.metadata.threads as u32),
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Admin operations
+    // -----------------------------------------------------------------
+
+    async fn get_database_stats(&self, name: &str) -> Result<AdminStats, GqlError> {
+        let stats = AdminService::database_stats(self.state.databases(), name)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(AdminStats {
+            node_count: stats.node_count as u64,
+            edge_count: stats.edge_count as u64,
+            label_count: stats.label_count as u64,
+            edge_type_count: stats.edge_type_count as u64,
+            property_key_count: stats.property_key_count as u64,
+            index_count: stats.index_count as u64,
+            memory_bytes: stats.memory_bytes as u64,
+            disk_bytes: stats.disk_bytes.map(|v| v as u64),
+        })
+    }
+
+    async fn wal_status(&self, name: &str) -> Result<AdminWalStatus, GqlError> {
+        let status = AdminService::wal_status(self.state.databases(), name)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(AdminWalStatus {
+            enabled: status.enabled,
+            path: status.path,
+            size_bytes: status.size_bytes as u64,
+            record_count: status.record_count as u64,
+            last_checkpoint: status.last_checkpoint,
+            current_epoch: status.current_epoch,
+        })
+    }
+
+    async fn wal_checkpoint(&self, name: &str) -> Result<(), GqlError> {
+        AdminService::wal_checkpoint(self.state.databases(), name)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))
+    }
+
+    async fn validate(&self, name: &str) -> Result<AdminValidationResult, GqlError> {
+        let result = AdminService::validate(self.state.databases(), name)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(AdminValidationResult {
+            valid: result.valid,
+            errors: result
+                .errors
+                .into_iter()
+                .map(|e| ValidationDiagnostic {
+                    code: e.code,
+                    message: e.message,
+                    context: e.context,
+                })
+                .collect(),
+            warnings: result
+                .warnings
+                .into_iter()
+                .map(|w| ValidationDiagnostic {
+                    code: w.code,
+                    message: w.message,
+                    context: w.context,
+                })
+                .collect(),
+        })
+    }
+
+    async fn create_index(&self, name: &str, index: IndexDefinition) -> Result<(), GqlError> {
+        let service_index = match index {
+            IndexDefinition::Property { property } => {
+                grafeo_service::types::IndexDef::Property { property }
+            }
+            IndexDefinition::Vector {
+                label,
+                property,
+                dimensions,
+                metric,
+                m,
+                ef_construction,
+            } => grafeo_service::types::IndexDef::Vector {
+                label,
+                property,
+                dimensions,
+                metric,
+                m,
+                ef_construction,
+            },
+            IndexDefinition::Text { label, property } => {
+                grafeo_service::types::IndexDef::Text { label, property }
+            }
+        };
+
+        AdminService::create_index(self.state.databases(), name, service_index)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))
+    }
+
+    async fn drop_index(&self, name: &str, index: IndexDefinition) -> Result<bool, GqlError> {
+        let service_index = match index {
+            IndexDefinition::Property { property } => {
+                grafeo_service::types::IndexDef::Property { property }
+            }
+            IndexDefinition::Vector {
+                label,
+                property,
+                dimensions,
+                metric,
+                m,
+                ef_construction,
+            } => grafeo_service::types::IndexDef::Vector {
+                label,
+                property,
+                dimensions,
+                metric,
+                m,
+                ef_construction,
+            },
+            IndexDefinition::Text { label, property } => {
+                grafeo_service::types::IndexDef::Text { label, property }
+            }
+        };
+
+        AdminService::drop_index(self.state.databases(), name, service_index)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))
+    }
+
+    // -----------------------------------------------------------------
+    // Search operations
+    // -----------------------------------------------------------------
+
+    async fn vector_search(&self, req: VectorSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+        let service_req = grafeo_service::types::VectorSearchReq {
+            database: req.database.clone(),
+            label: req.label,
+            property: req.property,
+            query_vector: req.query_vector,
+            k: req.k,
+            ef: req.ef,
+            filters: req
+                .filters
+                .into_iter()
+                .map(|(k, v)| (k, crate::encode::gwp_to_grafeo_common(&v)))
+                .collect(),
+        };
+
+        let hits = SearchService::vector_search(self.state.databases(), &req.database, service_req)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(hits
+            .into_iter()
+            .map(|h| SearchHit {
+                node_id: h.node_id,
+                score: h.score,
+                properties: HashMap::new(),
+            })
+            .collect())
+    }
+
+    async fn text_search(&self, req: TextSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+        let service_req = grafeo_service::types::TextSearchReq {
+            database: req.database.clone(),
+            label: req.label,
+            property: req.property,
+            query: req.query,
+            k: req.k,
+        };
+
+        let hits = SearchService::text_search(self.state.databases(), &req.database, service_req)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(hits
+            .into_iter()
+            .map(|h| SearchHit {
+                node_id: h.node_id,
+                score: h.score,
+                properties: HashMap::new(),
+            })
+            .collect())
+    }
+
+    async fn hybrid_search(&self, req: HybridSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+        let service_req = grafeo_service::types::HybridSearchReq {
+            database: req.database.clone(),
+            label: req.label,
+            text_property: req.text_property,
+            vector_property: req.vector_property,
+            query_text: req.query_text,
+            query_vector: req.query_vector,
+            k: req.k,
+        };
+
+        let hits = SearchService::hybrid_search(self.state.databases(), &req.database, service_req)
+            .await
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        Ok(hits
+            .into_iter()
+            .map(|h| SearchHit {
+                node_id: h.node_id,
+                score: h.score,
+                properties: HashMap::new(),
+            })
+            .collect())
     }
 }
 
