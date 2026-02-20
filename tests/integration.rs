@@ -2655,3 +2655,286 @@ async fn gwp_admin_create_index() {
 
     assert!(resp.existed);
 }
+
+// ===========================================================================
+// Bolt v5 protocol integration tests
+// ===========================================================================
+
+#[cfg(feature = "bolt")]
+async fn spawn_server_with_bolt() -> (String, SocketAddr) {
+    use grafeo_service::types::EnabledFeatures;
+
+    let service = grafeo_service::ServiceState::new_in_memory(300);
+    let features = EnabledFeatures {
+        languages: vec![],
+        engine: vec![],
+        server: vec!["bolt".to_string()],
+    };
+    let state = grafeo_server::AppState::new(service, vec![], features);
+    let app = grafeo_server::router(state.clone());
+
+    // HTTP
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr: SocketAddr = http_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            http_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Bolt
+    let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
+    drop(bolt_listener);
+    let backend = grafeo_boltr::GrafeoBackend::new(state.service().clone());
+    tokio::spawn(async move {
+        grafeo_boltr::serve(backend, bolt_addr, grafeo_boltr::BoltrOptions::default())
+            .await
+            .unwrap();
+    });
+    // Give the Bolt server time to bind
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    (format!("http://{http_addr}"), bolt_addr)
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_connect_and_authenticate() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .expect("Bolt connect failed");
+
+    assert_eq!(session.version(), (5, 4));
+
+    session.close().await.expect("Bolt close failed");
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_execute_query() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let http_client = Client::new();
+
+    // Seed data via HTTP
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({"query": "CREATE (:BoltTest {name: 'Alice'})-[:KNOWS]->(:BoltTest {name: 'Bob'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Query via Bolt
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let result = session
+        .run("MATCH (n:BoltTest) RETURN n.name ORDER BY n.name")
+        .await
+        .expect("Bolt query failed");
+
+    assert_eq!(result.columns, vec!["n.name"]);
+    assert_eq!(result.records.len(), 2);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_transaction_commit() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Begin transaction, create a node, commit
+    session.begin().await.unwrap();
+    session.run("CREATE (:BoltTxTest {val: 42})").await.unwrap();
+    session.commit().await.unwrap();
+
+    // Verify committed data is visible
+    let result = session
+        .run("MATCH (n:BoltTxTest) RETURN n.val")
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_transaction_rollback() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Begin transaction, create a node, rollback
+    session.begin().await.unwrap();
+    session.run("CREATE (:BoltRbTest {val: 99})").await.unwrap();
+    session.rollback().await.unwrap();
+
+    // Verify rolled-back data is NOT visible
+    let result = session
+        .run("MATCH (n:BoltRbTest) RETURN n.val")
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 0);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_reset_from_failed() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Cause a failure with bad syntax
+    let err = session.run("THIS IS NOT VALID SYNTAX").await;
+    assert!(err.is_err(), "bad syntax should fail");
+
+    // RESET to recover
+    session.reset().await.expect("RESET should succeed");
+
+    // Should be able to run queries again
+    let result = session
+        .run("MATCH (n) RETURN n LIMIT 1")
+        .await
+        .unwrap();
+    assert!(result.records.len() <= 1);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_query_with_parameters() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Create with parameters
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "name".to_string(),
+        boltr::types::BoltValue::String("Charlie".to_string()),
+    );
+
+    session
+        .run_with_params(
+            "CREATE (:BoltParamTest {name: $name})",
+            params,
+            boltr::types::BoltDict::new(),
+        )
+        .await
+        .unwrap();
+
+    let result = session
+        .run("MATCH (n:BoltParamTest) RETURN n.name")
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_health_reports_bolt_feature() {
+    let (http, _bolt_addr) = spawn_server_with_bolt().await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{http}/health")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+
+    let server_features = body["features"]["server"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        server_features.contains(&"bolt"),
+        "health features should include 'bolt', got: {server_features:?}"
+    );
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_multiple_queries_in_session() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Run multiple queries on the same session
+    session
+        .run("CREATE (:BoltMulti {seq: 1})")
+        .await
+        .unwrap();
+    session
+        .run("CREATE (:BoltMulti {seq: 2})")
+        .await
+        .unwrap();
+    session
+        .run("CREATE (:BoltMulti {seq: 3})")
+        .await
+        .unwrap();
+
+    let result = session
+        .run("MATCH (n:BoltMulti) RETURN n.seq ORDER BY n.seq")
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 3);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_server_info() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    // Use low-level connection to inspect HELLO response
+    let mut conn = boltr::client::BoltConnection::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let hello_meta = conn
+        .hello(boltr::types::BoltDict::from([(
+            "user_agent".to_string(),
+            boltr::types::BoltValue::String("test-client".to_string()),
+        )]))
+        .await
+        .unwrap();
+
+    // Server should include server info
+    let server = hello_meta
+        .get("server")
+        .and_then(|v| v.as_str())
+        .expect("HELLO response should include 'server'");
+    assert!(
+        server.starts_with("GrafeoDB/"),
+        "server string should start with 'GrafeoDB/', got: {server}"
+    );
+
+    conn.goodbye().await.ok();
+}

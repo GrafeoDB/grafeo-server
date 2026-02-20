@@ -235,6 +235,20 @@ impl QueryService {
         Ok(results)
     }
 
+    /// Dispatch a query on an existing engine session by language string.
+    ///
+    /// For transport crates (Bolt, GWP) that manage their own engine sessions.
+    /// Handles language dispatch and feature-gate validation.
+    pub fn dispatch(
+        session: &grafeo_engine::Session,
+        statement: &str,
+        language: Option<&str>,
+        params: Option<&HashMap<String, grafeo_common::Value>>,
+    ) -> Result<QueryResult, ServiceError> {
+        let lang = determine_language(language);
+        dispatch_query(session, statement, lang, params)
+    }
+
     /// Provides direct access to a session Arc for transport-specific use
     /// (e.g., GWP needs to hold session state across multiple calls).
     pub fn get_session(

@@ -4,12 +4,12 @@ members = [
     "crates/grafeo-http",
     "crates/grafeo-gwp",
     "crates/grafeo-studio",
-    "crates/grafeo-bolt",
+    "crates/grafeo-boltr",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -25,7 +25,10 @@ grafeo-service = { path = "crates/grafeo-service" }
 grafeo-http = { path = "crates/grafeo-http" }
 grafeo-gwp = { path = "crates/grafeo-gwp" }
 grafeo-studio = { path = "crates/grafeo-studio" }
-grafeo-bolt = { path = "crates/grafeo-bolt" }
+grafeo-boltr = { path = "crates/grafeo-boltr" }
+
+# External protocol crates
+boltr = { version = "0.1", path = "../boltr" }
 
 # Async
 tokio = { version = "1.43", features = ["full"] }
@@ -82,19 +85,20 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["http", "studio", "all-languages", "storage", "algos"]
+default = ["http", "gwp", "studio", "all-languages", "storage", "algos"]
 
 # Transport layers
 http = ["dep:grafeo-http", "grafeo-service/openapi"]
 gwp = ["dep:grafeo-gwp"]
+bolt = ["dep:grafeo-boltr"]
 studio = ["http", "dep:grafeo-studio"]
 
 # Server-specific features
 owl-schema = ["grafeo-service/owl-schema"]
 rdfs-schema = ["grafeo-service/rdfs-schema"]
 json-schema = ["grafeo-service/json-schema"]
-auth = ["grafeo-service/auth", "grafeo-http?/auth", "grafeo-gwp?/auth"]
-tls = ["grafeo-http?/tls", "grafeo-gwp?/tls"]
+auth = ["grafeo-service/auth", "grafeo-http?/auth", "grafeo-gwp?/auth", "grafeo-boltr?/auth"]
+tls = ["grafeo-http?/tls", "grafeo-gwp?/tls", "grafeo-boltr?/tls"]
 
 # Engine: query languages (forwarded to grafeo-service)
 gql = ["grafeo-service/gql"]
@@ -128,9 +132,10 @@ rdf = ["grafeo-service/rdf"]
 
 # Tiers
 lite = ["gql", "storage", "gwp"]
+boltr = ["http", "bolt", "studio", "all-languages", "storage", "algos"]
 full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
-    "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp",
+    "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
 ]
 
 [dependencies]
@@ -140,6 +145,7 @@ grafeo-service = { workspace = true }
 # Transport crates (optional)
 grafeo-http = { workspace = true, optional = true }
 grafeo-gwp = { workspace = true, optional = true }
+grafeo-boltr = { workspace = true, optional = true }
 grafeo-studio = { workspace = true, optional = true }
 
 # Async runtime
@@ -155,7 +161,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [dev-dependencies]
 grafeo-http = { workspace = true }
 grafeo-gwp = { workspace = true }
+grafeo-boltr = { workspace = true }
 grafeo-studio = { workspace = true }
+boltr = { workspace = true, features = ["client"] }
 reqwest = { version = "0.13.2", features = ["gzip", "json"] }
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
