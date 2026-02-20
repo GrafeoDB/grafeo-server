@@ -28,7 +28,7 @@ grafeo-studio = { path = "crates/grafeo-studio" }
 grafeo-boltr = { path = "crates/grafeo-boltr" }
 
 # External protocol crates
-boltr = { version = "0.1", path = "../boltr" }
+boltr = "0.1.0"
 
 # Async
 tokio = { version = "1.43", features = ["full"] }
