@@ -39,7 +39,7 @@ docker run -p 7687:7687 grafeo/grafeo-server:lite --data-dir /data
 docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.0`, `grafeo-server:0.4.0-lite`, `grafeo-server:0.4.0-full`.
+Versioned tags: `grafeo-server:0.4.3`, `grafeo-server:0.4.3-lite`, `grafeo-server:0.4.3-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -130,6 +130,55 @@ curl -X POST http://localhost:7474/cypher \
 ```
 
 Available algorithms include: PageRank, BFS, DFS, Dijkstra, Bellman-Ford, Connected Components, Strongly Connected Components, Louvain, Label Propagation, Betweenness/Closeness/Degree Centrality, Clustering Coefficient, Topological Sort, Kruskal, Prim, Max Flow, Min-Cost Flow, Articulation Points, Bridges, K-Core and more.
+
+### Admin
+
+Database introspection, maintenance, and index management. Available via both HTTP and GWP (gRPC).
+
+```bash
+# Database statistics (node/edge/label/property counts, memory, disk)
+curl http://localhost:7474/admin/default/stats
+
+# WAL status
+curl http://localhost:7474/admin/default/wal
+
+# Force WAL checkpoint
+curl -X POST http://localhost:7474/admin/default/wal/checkpoint
+
+# Database integrity validation
+curl http://localhost:7474/admin/default/validate
+
+# Create a property index
+curl -X POST http://localhost:7474/admin/default/index \
+  -H "Content-Type: application/json" \
+  -d '{"index_type": "property", "label": "Person", "property": "name"}'
+
+# Drop an index
+curl -X DELETE http://localhost:7474/admin/default/index \
+  -H "Content-Type: application/json" \
+  -d '{"index_type": "property", "label": "Person", "property": "name"}'
+```
+
+### Search
+
+Vector, text, and hybrid search endpoints. Require the corresponding engine features (`vector-index`, `text-index`, `hybrid-search`), available in the full tier.
+
+```bash
+# Vector similarity search (KNN via HNSW index)
+curl -X POST http://localhost:7474/search/vector \
+  -H "Content-Type: application/json" \
+  -d '{"database": "default", "vector": [0.1, 0.2, 0.3], "top_k": 10}'
+
+# Full-text BM25 search
+curl -X POST http://localhost:7474/search/text \
+  -H "Content-Type: application/json" \
+  -d '{"database": "default", "query": "graph database", "top_k": 10}'
+
+# Hybrid search (vector + text with rank fusion)
+curl -X POST http://localhost:7474/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"database": "default", "query": "graph database", "vector": [0.1, 0.2, 0.3], "top_k": 10}'
+```
 
 ### Batch Queries
 
@@ -335,6 +384,12 @@ cargo build --release --features auth
 | `json-schema` | JSON Schema validation for database creation | No |
 | `auth` | Bearer token and HTTP Basic authentication | No |
 | `tls` | Built-in HTTPS via rustls | No |
+
+### Engine: Algorithms
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `algos` | 22+ graph algorithms via CALL procedures | Yes |
 
 ### Engine: Query Languages
 
