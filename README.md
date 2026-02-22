@@ -39,7 +39,7 @@ docker run -p 7687:7687 grafeo/grafeo-server:lite --data-dir /data
 docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.3`, `grafeo-server:0.4.3-lite`, `grafeo-server:0.4.3-full`.
+Versioned tags: `grafeo-server:0.4.4`, `grafeo-server:0.4.4-lite`, `grafeo-server:0.4.4-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
