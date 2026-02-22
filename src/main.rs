@@ -67,10 +67,7 @@ async fn main() {
     // -----------------------------------------------------------------
     // Standalone mode: GWP and/or Bolt only (no HTTP)
     // -----------------------------------------------------------------
-    #[cfg(all(
-        any(feature = "gwp", feature = "bolt"),
-        not(feature = "http")
-    ))]
+    #[cfg(all(any(feature = "gwp", feature = "bolt"), not(feature = "http")))]
     {
         let host: std::net::IpAddr = config.host.parse().expect("invalid host");
 
@@ -219,9 +216,7 @@ async fn main() {
     // If no transport is enabled, just warn and exit
     #[cfg(not(any(feature = "http", feature = "gwp", feature = "bolt")))]
     {
-        tracing::error!(
-            "No transport features enabled. Enable 'http', 'gwp', and/or 'bolt'."
-        );
+        tracing::error!("No transport features enabled. Enable 'http', 'gwp', and/or 'bolt'.");
     }
 }
 
