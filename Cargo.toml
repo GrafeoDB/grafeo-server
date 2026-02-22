@@ -29,6 +29,7 @@ grafeo-boltr = { path = "crates/grafeo-boltr" }
 
 # External protocol crates
 boltr = "0.1.0"
+gwp = "0.1.5"
 
 # Async
 tokio = { version = "1.43", features = ["full"] }
