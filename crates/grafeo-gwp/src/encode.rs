@@ -62,6 +62,17 @@ fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
             let converted: Vec<_> = items.iter().filter_map(gwp_to_grafeo).collect();
             Some(Value::List(converted.into()))
         }
+        GwpValue::Record(rec) => {
+            let map: std::collections::BTreeMap<_, _> = rec
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    gwp_to_grafeo(&f.value)
+                        .map(|gv| (grafeo_common::PropertyKey::new(&f.name), gv))
+                })
+                .collect();
+            Some(Value::Map(std::sync::Arc::new(map)))
+        }
         // Temporal and graph types: not supported as engine parameters
         _ => None,
     }
@@ -147,5 +158,71 @@ mod tests {
         )]);
         let converted = convert_params(&params);
         assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn gwp_to_grafeo_record_to_map() {
+        let rec = GwpValue::Record(gwp::types::Record {
+            fields: vec![
+                gwp::types::Field {
+                    name: "src".to_string(),
+                    value: GwpValue::String("person_0".to_string()),
+                },
+                gwp::types::Field {
+                    name: "tgt".to_string(),
+                    value: GwpValue::String("person_1".to_string()),
+                },
+                gwp::types::Field {
+                    name: "weight".to_string(),
+                    value: GwpValue::Float(1.5),
+                },
+            ],
+        });
+        let grafeo = gwp_to_grafeo(&rec).expect("Record should convert to Map");
+        if let Value::Map(map) = grafeo {
+            assert_eq!(map.len(), 3);
+            assert!(matches!(
+                map.get(&grafeo_common::PropertyKey::new("src")),
+                Some(Value::String(s)) if s.as_str() == "person_0"
+            ));
+            assert!(matches!(
+                map.get(&grafeo_common::PropertyKey::new("weight")),
+                Some(Value::Float64(f)) if (*f - 1.5).abs() < f64::EPSILON
+            ));
+        } else {
+            panic!("expected Value::Map");
+        }
+    }
+
+    #[test]
+    fn gwp_to_grafeo_list_of_records() {
+        // This is the UNWIND $edges pattern: list of dicts
+        let edges = GwpValue::List(vec![
+            GwpValue::Record(gwp::types::Record {
+                fields: vec![
+                    gwp::types::Field {
+                        name: "id".to_string(),
+                        value: GwpValue::String("a".to_string()),
+                    },
+                ],
+            }),
+            GwpValue::Record(gwp::types::Record {
+                fields: vec![
+                    gwp::types::Field {
+                        name: "id".to_string(),
+                        value: GwpValue::String("b".to_string()),
+                    },
+                ],
+            }),
+        ]);
+        let grafeo = gwp_to_grafeo(&edges).expect("List of records should convert");
+        if let Value::List(items) = grafeo {
+            assert_eq!(items.len(), 2);
+            // Each item should be a Map
+            assert!(matches!(&items[0], Value::Map(_)));
+            assert!(matches!(&items[1], Value::Map(_)));
+        } else {
+            panic!("expected Value::List");
+        }
     }
 }
