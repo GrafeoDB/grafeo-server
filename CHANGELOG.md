@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bumped grafeo-engine and grafeo-common to 0.5.8
 - GWP default port changed from 7687 to **7688** (`GRAFEO_GWP_PORT=7687` restores previous behavior)
 - BoltR takes standard Bolt port **7687** (Neo4j driver default)
 - GWP added to `default` feature tier (was HTTP + Studio only, now HTTP + GWP + Studio)
