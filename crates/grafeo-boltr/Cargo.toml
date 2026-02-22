@@ -1,0 +1,27 @@
+[package]
+name = "grafeo-boltr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bolt v5 wire protocol transport adapter for Grafeo Server"
+
+[dependencies]
+grafeo-service = { workspace = true }
+grafeo-engine = { workspace = true }
+grafeo-common = { workspace = true }
+boltr = { workspace = true }
+async-trait = "0.1"
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+default = []
+tls = ["boltr/tls"]
+auth = ["grafeo-service/auth"]
+
+[lints]
+workspace = true

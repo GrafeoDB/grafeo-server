@@ -292,6 +292,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "boltr"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2f5d5879ba0c4508dcbf9cc88c9374d3e185035688041d67178e1ab62cc92a0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "rustls-pemfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1089,8 +1105,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "grafeo-bolt"
-version = "0.4.3"
+name = "grafeo-boltr"
+version = "0.4.4"
+dependencies = [
+ "async-trait",
+ "boltr",
+ "dashmap",
+ "grafeo-common",
+ "grafeo-engine",
+ "grafeo-service",
+ "parking_lot",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "grafeo-common"
@@ -1169,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1185,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1213,12 +1241,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "boltr",
  "clap",
  "futures-util",
+ "grafeo-boltr",
  "grafeo-gwp",
  "grafeo-http",
  "grafeo-service",
@@ -1236,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1259,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "axum",
  "mime_guess",

@@ -49,13 +49,23 @@ pub struct Config {
 
     /// GQL Wire Protocol (gRPC) port.
     #[cfg(feature = "gwp")]
-    #[arg(long, default_value_t = 7687, env = "GRAFEO_GWP_PORT")]
+    #[arg(long, default_value_t = 7688, env = "GRAFEO_GWP_PORT")]
     pub gwp_port: u16,
 
     /// Maximum concurrent GWP sessions. 0 = unlimited.
     #[cfg(feature = "gwp")]
     #[arg(long, default_value_t = 0, env = "GRAFEO_GWP_MAX_SESSIONS")]
     pub gwp_max_sessions: usize,
+
+    /// Bolt v5 protocol port.
+    #[cfg(feature = "bolt")]
+    #[arg(long, default_value_t = 7687, env = "GRAFEO_BOLT_PORT")]
+    pub bolt_port: u16,
+
+    /// Maximum concurrent Bolt sessions. 0 = unlimited.
+    #[cfg(feature = "bolt")]
+    #[arg(long, default_value_t = 0, env = "GRAFEO_BOLT_MAX_SESSIONS")]
+    pub bolt_max_sessions: usize,
 
     /// Log level.
     #[arg(long, default_value = "info", env = "GRAFEO_LOG_LEVEL")]

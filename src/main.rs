@@ -2,8 +2,9 @@
 //!
 //! Supports multiple transport modes depending on compiled features:
 //! - `http`  — REST API on the configured port (default 7474)
-//! - `gwp`   — GQL Wire Protocol (gRPC) on the GWP port (default 7687)
-//! - both    — HTTP as primary, GWP spawned alongside
+//! - `gwp`   — GQL Wire Protocol (gRPC) on the GWP port (default 7688)
+//! - `bolt`  — Bolt v5 protocol on the Bolt port (default 7687)
+//! - any combination — HTTP as primary, GWP/Bolt spawned alongside
 
 use grafeo_server::config::Config;
 
@@ -64,30 +65,66 @@ async fn main() {
     });
 
     // -----------------------------------------------------------------
-    // GWP-only mode (no HTTP)
+    // Standalone mode: GWP and/or Bolt only (no HTTP)
     // -----------------------------------------------------------------
-    #[cfg(all(feature = "gwp", not(feature = "http")))]
+    #[cfg(all(
+        any(feature = "gwp", feature = "bolt"),
+        not(feature = "http")
+    ))]
     {
-        let gwp_addr =
-            std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.gwp_port);
-        let mut gwp_options = build_gwp_options(&config, &service);
-        gwp_options.shutdown = Some(Box::pin(async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install signal handler");
-            tracing::info!("Shutdown signal received");
-        }));
-        let backend = grafeo_gwp::GrafeoBackend::new(service);
-        tracing::info!(%gwp_addr, "GWP server ready (standalone)");
-        if let Err(e) = grafeo_gwp::serve(backend, gwp_addr, gwp_options).await {
-            tracing::error!("GWP server error: {e}");
-        }
+        let host: std::net::IpAddr = config.host.parse().expect("invalid host");
+
+        #[cfg(feature = "gwp")]
+        let gwp_handle = {
+            let gwp_state = service.clone();
+            let gwp_addr = std::net::SocketAddr::new(host, config.gwp_port);
+            let mut gwp_options = build_gwp_options(&config, &service);
+            gwp_options.shutdown = Some(Box::pin(async {
+                tokio::signal::ctrl_c().await.ok();
+            }));
+            tokio::spawn(async move {
+                let backend = grafeo_gwp::GrafeoBackend::new(gwp_state);
+                tracing::info!(%gwp_addr, "GWP (gRPC) server ready (standalone)");
+                if let Err(e) = grafeo_gwp::serve(backend, gwp_addr, gwp_options).await {
+                    tracing::error!("GWP server error: {e}");
+                }
+            })
+        };
+
+        #[cfg(feature = "bolt")]
+        let bolt_handle = {
+            let bolt_state = service.clone();
+            let bolt_addr = std::net::SocketAddr::new(host, config.bolt_port);
+            let mut bolt_options = build_bolt_options(&config, &service);
+            bolt_options.shutdown = Some(Box::pin(async {
+                tokio::signal::ctrl_c().await.ok();
+            }));
+            tokio::spawn(async move {
+                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
+                tracing::info!(%bolt_addr, "Bolt server ready (standalone)");
+                if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
+                    tracing::error!("Bolt server error: {e}");
+                }
+            })
+        };
+
+        // Wait for shutdown signal, then await handles
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install signal handler");
+        tracing::info!("Shutdown signal received");
+
+        #[cfg(feature = "gwp")]
+        gwp_handle.await.ok();
+        #[cfg(feature = "bolt")]
+        bolt_handle.await.ok();
+
         tracing::info!("Grafeo Server shut down");
         return;
     }
 
     // -----------------------------------------------------------------
-    // HTTP mode (optionally with GWP alongside)
+    // HTTP mode (optionally with GWP and/or Bolt alongside)
     // -----------------------------------------------------------------
     #[cfg(feature = "http")]
     {
@@ -128,6 +165,24 @@ async fn main() {
             })
         };
 
+        // Spawn Bolt alongside HTTP if both features are enabled
+        #[cfg(feature = "bolt")]
+        let bolt_handle = {
+            let bolt_state = service.clone();
+            let mut bolt_options = build_bolt_options(&config, &service);
+            let bolt_addr = std::net::SocketAddr::new(addr.ip(), config.bolt_port);
+            bolt_options.shutdown = Some(Box::pin(async {
+                tokio::signal::ctrl_c().await.ok();
+            }));
+            tokio::spawn(async move {
+                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
+                tracing::info!(%bolt_addr, "Bolt server ready");
+                if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
+                    tracing::error!("Bolt server error: {e}");
+                }
+            })
+        };
+
         #[cfg(feature = "tls")]
         if config.tls_enabled() {
             let tls_config = grafeo_http::tls::load_rustls_config(
@@ -142,6 +197,8 @@ async fn main() {
 
             #[cfg(feature = "gwp")]
             gwp_handle.await.ok();
+            #[cfg(feature = "bolt")]
+            bolt_handle.await.ok();
 
             tracing::info!("Grafeo Server shut down");
             return;
@@ -153,14 +210,18 @@ async fn main() {
 
         #[cfg(feature = "gwp")]
         gwp_handle.await.ok();
+        #[cfg(feature = "bolt")]
+        bolt_handle.await.ok();
 
         tracing::info!("Grafeo Server shut down");
     }
 
-    // If neither transport is enabled, just warn and exit
-    #[cfg(not(any(feature = "http", feature = "gwp")))]
+    // If no transport is enabled, just warn and exit
+    #[cfg(not(any(feature = "http", feature = "gwp", feature = "bolt")))]
     {
-        tracing::error!("No transport features enabled. Enable 'http' and/or 'gwp'.");
+        tracing::error!(
+            "No transport features enabled. Enable 'http', 'gwp', and/or 'bolt'."
+        );
     }
 }
 
@@ -242,6 +303,9 @@ fn detect_features() -> EnabledFeatures {
     if cfg!(feature = "gwp") {
         server.push("gwp".to_string());
     }
+    if cfg!(feature = "bolt") {
+        server.push("bolt".to_string());
+    }
 
     EnabledFeatures {
         languages,
@@ -259,6 +323,28 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
         idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
         max_sessions: if config.gwp_max_sessions > 0 {
             Some(config.gwp_max_sessions)
+        } else {
+            None
+        },
+        #[cfg(feature = "tls")]
+        tls_cert: config.tls_cert.clone(),
+        #[cfg(feature = "tls")]
+        tls_key: config.tls_key.clone(),
+        #[cfg(feature = "auth")]
+        auth_provider: service.auth().cloned(),
+        shutdown: None,
+    }
+}
+
+/// Builds Bolt server options from CLI config and service state.
+#[cfg(feature = "bolt")]
+fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::BoltrOptions {
+    let _ = service; // used only when auth feature is enabled
+
+    grafeo_boltr::BoltrOptions {
+        idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
+        max_sessions: if config.bolt_max_sessions > 0 {
+            Some(config.bolt_max_sessions)
         } else {
             None
         },

@@ -5,6 +5,37 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-02-22
+
+### Added
+
+- **BoltR protocol** (`grafeo-boltr`): Bolt v5.x wire-compatible binary protocol for Neo4j driver connectivity
+  - Pure-Rust `boltr` crate: PackStream encoding/decoding, chunked framing, 15 Bolt message types, connection state machine, handshake (v5.1–v5.4), server framework with `BoltBackend` trait, client module for testing
+  - `grafeo-boltr` adapter: `GrafeoBackend` implementing `BoltBackend` for grafeo-engine, value encoding (grafeo_common::Value ↔ BoltValue), auth bridging (AuthProvider → AuthValidator)
+  - Grafeo extension: multi-language queries via RUN extra dict (`{"language": "sparql"}`)
+  - Server info in HELLO response: `{"server": "GrafeoDB/0.4.4"}`
+  - `--bolt-port` CLI flag / `GRAFEO_BOLT_PORT` env var (default: 7687)
+  - `--bolt-max-sessions` CLI flag / `GRAFEO_BOLT_MAX_SESSIONS` env var (default: 0 = unlimited)
+  - Idle session reaping via `--session-ttl` (shared with HTTP/GWP)
+  - Auth support: bearer and basic auth via Bolt HELLO/LOGON (feature: `auth`)
+  - Shutdown signal integration (graceful Ctrl-C handling)
+- **`bolt` feature flag**: enables Bolt v5 transport (`dep:grafeo-boltr`)
+- **`boltr` feature tier**: HTTP + Bolt + Studio + all-languages + storage + algos (swaps GWP for Bolt)
+- **`QueryService::dispatch()`**: public method for transport crates to use centralized language dispatch on their own engine sessions
+- **9 new Bolt integration tests**: connect/authenticate, execute query, transaction commit/rollback, reset from failed, query with parameters, health feature detection, multiple queries per session, server info inspection
+- **boltr client module** (feature: `client`): `BoltSession` and `BoltConnection` for integration testing
+
+### Changed
+
+- GWP default port changed from 7687 to **7688** (`GRAFEO_GWP_PORT=7687` restores previous behavior)
+- BoltR takes standard Bolt port **7687** (Neo4j driver default)
+- GWP added to `default` feature tier (was HTTP + Studio only, now HTTP + GWP + Studio)
+- `full` tier now includes all 3 protocols: HTTP + GWP + Bolt
+- Renamed `crates/grafeo-bolt/` → `crates/grafeo-boltr/` (package: `grafeo-boltr`)
+- `auth` and `tls` features now forward to `grafeo-boltr?/auth` and `grafeo-boltr?/tls`
+- Standalone mode supports any combination of GWP/Bolt without HTTP
+- 94 integration tests (85 existing + 9 Bolt)
+
 ## [0.4.3] - 2026-02-19
 
 ### Added
