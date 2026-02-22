@@ -2811,10 +2811,7 @@ async fn bolt_reset_from_failed() {
     session.reset().await.expect("RESET should succeed");
 
     // Should be able to run queries again
-    let result = session
-        .run("MATCH (n) RETURN n LIMIT 1")
-        .await
-        .unwrap();
+    let result = session.run("MATCH (n) RETURN n LIMIT 1").await.unwrap();
     assert!(result.records.len() <= 1);
 
     session.close().await.unwrap();
@@ -2886,18 +2883,9 @@ async fn bolt_multiple_queries_in_session() {
         .unwrap();
 
     // Run multiple queries on the same session
-    session
-        .run("CREATE (:BoltMulti {seq: 1})")
-        .await
-        .unwrap();
-    session
-        .run("CREATE (:BoltMulti {seq: 2})")
-        .await
-        .unwrap();
-    session
-        .run("CREATE (:BoltMulti {seq: 3})")
-        .await
-        .unwrap();
+    session.run("CREATE (:BoltMulti {seq: 1})").await.unwrap();
+    session.run("CREATE (:BoltMulti {seq: 2})").await.unwrap();
+    session.run("CREATE (:BoltMulti {seq: 3})").await.unwrap();
 
     let result = session
         .run("MATCH (n:BoltMulti) RETURN n.seq ORDER BY n.seq")

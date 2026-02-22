@@ -37,10 +37,7 @@ impl GrafeoBackend {
         }
     }
 
-    fn get_session(
-        &self,
-        handle: &SessionHandle,
-    ) -> Result<Arc<Mutex<GrafeoSession>>, BoltError> {
+    fn get_session(&self, handle: &SessionHandle) -> Result<Arc<Mutex<GrafeoSession>>, BoltError> {
         self.sessions
             .get(&handle.0)
             .map(|entry| Arc::clone(entry.value()))
@@ -86,11 +83,10 @@ impl BoltBackend for GrafeoBackend {
     ) -> Result<(), BoltError> {
         match property {
             SessionProperty::Database(db_name) => {
-                let entry = self
-                    .state
-                    .databases()
-                    .get(&db_name)
-                    .ok_or_else(|| BoltError::Session(format!("database '{db_name}' not found")))?;
+                let entry =
+                    self.state.databases().get(&db_name).ok_or_else(|| {
+                        BoltError::Session(format!("database '{db_name}' not found"))
+                    })?;
 
                 let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
                     .await

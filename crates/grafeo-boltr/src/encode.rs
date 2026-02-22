@@ -47,8 +47,7 @@ fn bolt_to_grafeo(value: &BoltValue) -> Option<grafeo_common::Value> {
             let map: std::collections::BTreeMap<_, _> = dict
                 .iter()
                 .filter_map(|(k, v)| {
-                    bolt_to_grafeo(v)
-                        .map(|gv| (grafeo_common::PropertyKey::new(k.as_str()), gv))
+                    bolt_to_grafeo(v).map(|gv| (grafeo_common::PropertyKey::new(k.as_str()), gv))
                 })
                 .collect();
             Some(Value::Map(std::sync::Arc::new(map)))
@@ -136,7 +135,10 @@ mod tests {
     fn convert_params_filters_unsupported() {
         let mut params = HashMap::new();
         params.insert("name".into(), BoltValue::String("Alice".into()));
-        params.insert("date".into(), BoltValue::Date(boltr::types::BoltDate { days: 1 }));
+        params.insert(
+            "date".into(),
+            BoltValue::Date(boltr::types::BoltDate { days: 1 }),
+        );
 
         let result = convert_params(&params);
         assert_eq!(result.len(), 1);
