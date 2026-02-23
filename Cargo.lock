@@ -1082,9 +1082,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d9dc3710c423040d9d77982bb12afdea42357e6e93e4109c52718fc4f390423"
+checksum = "92739143e6c32b374efa471ff42c099133a8164de518c38b788f60b3e21fcd21"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1122,9 +1122,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb63fea6290a2ec0bcb77236f08355dbe44a47f9b52f2e83883f93fa26177767"
+checksum = "60004819191cd1d169d36ec6c0d5a4a441b75ed9391bad168d5d712a6931cb57"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1145,9 +1145,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "643cdc688d0971d3e42bb3cf382a32ce40052cd71b8f8f32fd7498dd6a6048ee"
+checksum = "5a31cc48faea58a4bc35aaf01a48cb6793604faf7e19cd59d58d039f1f79757a"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1171,9 +1171,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ade032f226403175289f34374f42a75783641aa8a7dd9bd8d51796b9ae706754"
+checksum = "cc7d79896482506e8aa57c2d8b1c1a63885509ae1bb5eacef9f72b69f6304829"
 dependencies = [
  "anyhow",
  "bincode",
