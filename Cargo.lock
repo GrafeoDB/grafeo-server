@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "axum",
  "mime_guess",
