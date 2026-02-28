@@ -2708,7 +2708,7 @@ async fn spawn_server_with_bolt() -> (String, SocketAddr) {
     let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
     drop(bolt_listener);
-    let backend = grafeo_boltr::GrafeoBackend::new(state.service().clone());
+    let backend = grafeo_boltr::GrafeoBackend::new(state.service().clone()).with_advertise_addr(bolt_addr);
     tokio::spawn(async move {
         grafeo_boltr::serve(backend, bolt_addr, grafeo_boltr::BoltrOptions::default())
             .await
@@ -2944,4 +2944,120 @@ async fn bolt_server_info() {
     );
 
     conn.goodbye().await.ok();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_database_switching() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let http_client = Client::new();
+
+    // Create a second database via HTTP
+    let resp = http_client
+        .post(format!("{http}/db"))
+        .json(&json!({"name": "bolt-switch-db"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create db failed: {}",
+        resp.status()
+    );
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Create data on the new database using the `db` extra field
+    let extra = boltr::types::BoltDict::from([(
+        "db".to_string(),
+        boltr::types::BoltValue::String("bolt-switch-db".to_string()),
+    )]);
+    session
+        .run_with_params(
+            "CREATE (:SwitchTest {name: 'A'})",
+            std::collections::HashMap::new(),
+            extra.clone(),
+        )
+        .await
+        .unwrap();
+
+    // Query the new database — should see the data
+    let result = session
+        .run_with_params(
+            "MATCH (n:SwitchTest) RETURN n.name",
+            std::collections::HashMap::new(),
+            extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+
+    // Query the default database explicitly — should NOT see the data
+    let default_extra = boltr::types::BoltDict::from([(
+        "db".to_string(),
+        boltr::types::BoltValue::String("default".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "MATCH (n:SwitchTest) RETURN n.name",
+            std::collections::HashMap::new(),
+            default_extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 0);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_language_dispatch() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Seed some data first (auto-detected as Cypher)
+    session
+        .run("CREATE (:LangTest {val: 1})")
+        .await
+        .unwrap();
+
+    // Run a Cypher query using the language extension
+    let cypher_extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("cypher".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "MATCH (n:LangTest) RETURN n.val AS value",
+            std::collections::HashMap::new(),
+            cypher_extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.columns, vec!["value"]);
+    assert_eq!(result.records.len(), 1);
+
+    // Run a SPARQL query using the language extension
+    let sparql_extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("sparql".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1",
+            std::collections::HashMap::new(),
+            sparql_extra,
+        )
+        .await
+        .unwrap();
+    // SPARQL should parse and execute (may return 0 rows on empty DB)
+    assert!(result.columns.contains(&"s".to_string()));
+
+    session.close().await.unwrap();
 }
