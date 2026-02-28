@@ -97,7 +97,8 @@ async fn main() {
                 tokio::signal::ctrl_c().await.ok();
             }));
             tokio::spawn(async move {
-                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
+                let backend =
+                    grafeo_boltr::GrafeoBackend::new(bolt_state).with_advertise_addr(bolt_addr);
                 tracing::info!(%bolt_addr, "Bolt server ready (standalone)");
                 if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
                     tracing::error!("Bolt server error: {e}");
@@ -172,7 +173,8 @@ async fn main() {
                 tokio::signal::ctrl_c().await.ok();
             }));
             tokio::spawn(async move {
-                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
+                let backend =
+                    grafeo_boltr::GrafeoBackend::new(bolt_state).with_advertise_addr(bolt_addr);
                 tracing::info!(%bolt_addr, "Bolt server ready");
                 if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
                     tracing::error!("Bolt server error: {e}");

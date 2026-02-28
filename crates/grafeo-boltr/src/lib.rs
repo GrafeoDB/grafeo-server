@@ -49,6 +49,16 @@ pub async fn serve(
         builder = builder.auth(auth::BoltrAuthValidator::new(provider));
     }
 
+    #[cfg(feature = "tls")]
+    if let (Some(cert_path), Some(key_path)) = (options.tls_cert, options.tls_key) {
+        let cert_pem = std::fs::read(&cert_path)
+            .map_err(|e| format!("cannot read Bolt TLS cert '{cert_path}': {e}"))?;
+        let key_pem = std::fs::read(&key_path)
+            .map_err(|e| format!("cannot read Bolt TLS key '{key_path}': {e}"))?;
+        let tls_config = boltr::server::TlsConfig::from_pem(&cert_pem, &key_pem)?;
+        builder = builder.tls(tls_config);
+    }
+
     if let Some(signal) = options.shutdown {
         builder = builder.shutdown(signal);
     }
