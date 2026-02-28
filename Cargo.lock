@@ -1298,9 +1298,9 @@ dependencies = [
 
 [[package]]
 name = "gwp"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a35ee8f0aef681cb177dc52595a37acb255f52855805574caebce52c5f05d8d6"
+checksum = "282dcd5c5e478b669948c811eb5d75ec317afbfe269d41027325dd0d4f7803ea"
 dependencies = [
  "prost",
  "prost-build",

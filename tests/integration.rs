@@ -2083,7 +2083,7 @@ async fn gwp_list_databases_returns_default() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
     let databases = db_client.list().await.unwrap();
     assert_eq!(databases.len(), 1);
@@ -2098,11 +2098,12 @@ async fn gwp_create_and_delete_database() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
     // Create a database
     let info = db_client
-        .create(gwp::server::CreateDatabaseConfig {
+        .create(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "gwp-test-db".to_string(),
             database_type: "lpg".to_string(),
             storage_mode: "inmemory".to_string(),
@@ -2138,7 +2139,7 @@ async fn gwp_get_database_info() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
     let info = db_client.get_info("default").await.unwrap();
     assert_eq!(info.name, "default");
@@ -2156,9 +2157,10 @@ async fn gwp_create_database_then_query() {
         .unwrap();
 
     // Create database via GWP
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
     db_client
-        .create(gwp::server::CreateDatabaseConfig {
+        .create(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "query-db".to_string(),
             database_type: "lpg".to_string(),
             storage_mode: "inmemory".to_string(),
@@ -2200,9 +2202,10 @@ async fn gwp_delete_then_recreate_database() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
-    let config = gwp::server::CreateDatabaseConfig {
+    let config = gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
         name: "ephemeral".to_string(),
         database_type: "lpg".to_string(),
         storage_mode: "inmemory".to_string(),
@@ -2243,7 +2246,7 @@ async fn gwp_delete_nonexistent_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
     let result = db_client.delete("nonexistent").await;
     assert!(result.is_err(), "deleting nonexistent database should fail");
@@ -2257,9 +2260,10 @@ async fn gwp_create_duplicate_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
-    let config = gwp::server::CreateDatabaseConfig {
+    let config = gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
         name: "dup".to_string(),
         database_type: "lpg".to_string(),
         storage_mode: "inmemory".to_string(),
@@ -2283,11 +2287,12 @@ async fn gwp_configure_deleted_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut db_client = conn.create_catalog_client();
 
     // Create then delete a database
     db_client
-        .create(gwp::server::CreateDatabaseConfig {
+        .create(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "doomed".to_string(),
             database_type: "lpg".to_string(),
             storage_mode: "inmemory".to_string(),
