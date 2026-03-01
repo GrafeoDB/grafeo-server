@@ -130,10 +130,11 @@ impl GqlBackend for GrafeoBackend {
     ) -> Result<(), GqlError> {
         match property {
             SessionProperty::Graph(db_name) => {
-                let entry =
-                    self.state.databases().get(&db_name).ok_or_else(|| {
-                        GqlError::Session(format!("graph '{db_name}' not found"))
-                    })?;
+                let entry = self
+                    .state
+                    .databases()
+                    .get(&db_name)
+                    .ok_or_else(|| GqlError::Session(format!("graph '{db_name}' not found")))?;
 
                 let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
                     .await
@@ -342,10 +343,10 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn create_graph(&self, config: CreateGraphConfig) -> Result<GraphInfo, GqlError> {
-        use gwp::server::GraphTypeSpec;
         use grafeo_service::types::{
             CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode,
         };
+        use gwp::server::GraphTypeSpec;
 
         let database_type = match &config.type_spec {
             Some(GraphTypeSpec::Named(name)) => match name.to_lowercase().as_str() {
@@ -446,9 +447,7 @@ impl GqlBackend for GrafeoBackend {
         _if_not_exists: bool,
         _or_replace: bool,
     ) -> Result<(), GqlError> {
-        Err(GqlError::Session(
-            "graph types not supported".to_owned(),
-        ))
+        Err(GqlError::Session("graph types not supported".to_owned()))
     }
 
     async fn drop_graph_type(
@@ -457,9 +456,7 @@ impl GqlBackend for GrafeoBackend {
         _name: &str,
         _if_exists: bool,
     ) -> Result<bool, GqlError> {
-        Err(GqlError::Session(
-            "graph types not supported".to_owned(),
-        ))
+        Err(GqlError::Session("graph types not supported".to_owned()))
     }
 
     // -----------------------------------------------------------------

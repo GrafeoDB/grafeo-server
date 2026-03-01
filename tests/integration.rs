@@ -2126,7 +2126,10 @@ async fn gwp_create_and_delete_database() {
     assert_eq!(databases.len(), 2);
 
     // Delete
-    let deleted = catalog_client.drop_graph("default", "gwp-test-db", false).await.unwrap();
+    let deleted = catalog_client
+        .drop_graph("default", "gwp-test-db", false)
+        .await
+        .unwrap();
     assert!(deleted);
 
     // List should show 1 database
@@ -2144,7 +2147,10 @@ async fn gwp_get_database_info() {
         .unwrap();
     let mut catalog_client = conn.create_catalog_client();
 
-    let info = catalog_client.get_graph_info("default","default").await.unwrap();
+    let info = catalog_client
+        .get_graph_info("default", "default")
+        .await
+        .unwrap();
     assert_eq!(info.name, "default");
     assert_eq!(info.graph_type, "lpg");
 }
@@ -2193,7 +2199,10 @@ async fn gwp_create_database_then_query() {
     assert_eq!(rows.len(), 1);
 
     // Verify node count via get_info
-    let info = catalog_client.get_graph_info("default","query-db").await.unwrap();
+    let info = catalog_client
+        .get_graph_info("default", "query-db")
+        .await
+        .unwrap();
     assert_eq!(info.node_count, 1);
 
     session.close().await.unwrap();
@@ -2226,7 +2235,10 @@ async fn gwp_delete_then_recreate_database() {
 
     // Create, delete, recreate — exercises the close barrier path
     catalog_client.create_graph(config.clone()).await.unwrap();
-    catalog_client.drop_graph("default", "ephemeral", false).await.unwrap();
+    catalog_client
+        .drop_graph("default", "ephemeral", false)
+        .await
+        .unwrap();
     catalog_client.create_graph(config).await.unwrap();
 
     // Should be queryable
@@ -2256,7 +2268,9 @@ async fn gwp_delete_nonexistent_database_fails() {
         .unwrap();
     let mut catalog_client = conn.create_catalog_client();
 
-    let result = catalog_client.drop_graph("default", "nonexistent", false).await;
+    let result = catalog_client
+        .drop_graph("default", "nonexistent", false)
+        .await;
     assert!(result.is_err(), "deleting nonexistent database should fail");
 }
 
@@ -2318,7 +2332,10 @@ async fn gwp_configure_deleted_database_fails() {
         })
         .await
         .unwrap();
-    catalog_client.drop_graph("default", "doomed", false).await.unwrap();
+    catalog_client
+        .drop_graph("default", "doomed", false)
+        .await
+        .unwrap();
 
     // Configuring a session to the deleted database should fail
     let mut session = conn.create_session().await.unwrap();
@@ -2708,7 +2725,8 @@ async fn spawn_server_with_bolt() -> (String, SocketAddr) {
     let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
     drop(bolt_listener);
-    let backend = grafeo_boltr::GrafeoBackend::new(state.service().clone()).with_advertise_addr(bolt_addr);
+    let backend =
+        grafeo_boltr::GrafeoBackend::new(state.service().clone()).with_advertise_addr(bolt_addr);
     tokio::spawn(async move {
         grafeo_boltr::serve(backend, bolt_addr, grafeo_boltr::BoltrOptions::default())
             .await
@@ -3022,10 +3040,7 @@ async fn bolt_language_dispatch() {
         .unwrap();
 
     // Seed some data first (auto-detected as Cypher)
-    session
-        .run("CREATE (:LangTest {val: 1})")
-        .await
-        .unwrap();
+    session.run("CREATE (:LangTest {val: 1})").await.unwrap();
 
     // Run a Cypher query using the language extension
     let cypher_extra = boltr::types::BoltDict::from([(
