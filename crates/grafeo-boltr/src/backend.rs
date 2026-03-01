@@ -41,6 +41,7 @@ impl GrafeoBackend {
     }
 
     /// Sets the address to advertise in ROUTE responses.
+    #[must_use]
     pub fn with_advertise_addr(mut self, addr: SocketAddr) -> Self {
         self.advertise_addr = Some(addr);
         self
@@ -258,8 +259,7 @@ impl BoltBackend for GrafeoBackend {
     ) -> Result<RoutingTable, BoltError> {
         let addr = self
             .advertise_addr
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "localhost:7687".to_string());
+            .map_or_else(|| "localhost:7687".to_string(), |a| a.to_string());
 
         let db_name = db.unwrap_or("default").to_string();
 

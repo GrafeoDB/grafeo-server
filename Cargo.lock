@@ -294,6 +294,8 @@ dependencies = [
 [[package]]
 name = "boltr"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7f7dbf96df0885f07338f2e4e56be9cb74b1442f6f539e1bf79e297bd54f6ac"
 dependencies = [
  "async-trait",
  "bytes",

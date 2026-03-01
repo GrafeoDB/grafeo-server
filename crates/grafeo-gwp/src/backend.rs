@@ -68,6 +68,7 @@ impl GrafeoBackend {
     }
 
     /// Builds a `GraphInfo` from a database entry.
+    #[allow(clippy::result_large_err)]
     fn build_graph_info(&self, name: &str) -> Result<GraphInfo, GqlError> {
         let entry = self
             .state
