@@ -5,6 +5,25 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-02-28
+
+### Added
+
+- **Bolt ROUTE message**: Neo4j driver cluster discovery via ROUTE (0x66) with single-server routing table (WRITE + READ + ROUTE roles). `GrafeoBackend::with_advertise_addr()` configures the address returned in routing responses.
+- **Bolt TLS support**: `boltr` crate now supports TLS via `tokio-rustls` (feature: `tls`). `TlsConfig::from_pem()` for certificate loading, `BoltServer::tls()` builder method. `grafeo-boltr` `serve()` reads `tls_cert`/`tls_key` from `BoltrOptions` and wraps connections transparently.
+- **Bolt TELEMETRY message**: Bolt 5.4+ driver telemetry (0x54) acknowledged with SUCCESS (no-op).
+- **Bolt bookmark utilities**: `extract_bookmarks()` helper in `boltr` to parse bookmarks from Bolt extra dicts. Bookmarks are already passthrough-functional via `begin_transaction`/`execute` extra dicts.
+- **2 new Bolt integration tests**: database switching via `db` extra field, multi-language dispatch via `language` extra field (Cypher + SPARQL).
+
+### Changed
+
+- **GWP 0.1.6 migration (breaking)**: migrated from flat Database model to GQL Catalog hierarchy (Schema → Graph → Graph Type). Single `"default"` schema maps Grafeo's database namespace. New catalog methods: `list_schemas`, `list_graphs`, `create_graph`, `drop_graph`, `get_graph_info`, plus graph type stubs. `ResultHeader` now includes `ordered: false`. `TypeDescriptor` gains precision, scale, min/max length, max cardinality, is_group, is_open, duration_qualifier, component_types fields.
+- **Multi-language dispatch in GWP**: `GrafeoSession` tracks `language` field; `execute` routes through `QueryService::dispatch()` for language-specific execution; `reset_session` clears language. Same extension mechanism as Bolt (`{"language": "sparql"}`).
+- Bumped grafeo-engine and grafeo-common to **0.5.10** (bidirectional BFS, compact properties, skip index, union graph improvements)
+- Bumped boltr to **0.1.1** (ROUTE, TELEMETRY, TLS, bookmark utilities, state machine update)
+- Bumped gwp to **0.1.6** (GQL Catalog model: schemas, graphs, graph types)
+- 96 integration tests (85 default + 11 Bolt), 131 total with workspace unit tests
+
 ## [0.4.4] - 2026-02-22
 
 ### Added
@@ -313,7 +332,8 @@ Initial release.
 - **Pre-commit hooks** (prek): fmt, clippy, deny, typos
 - **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.1...v0.4.2

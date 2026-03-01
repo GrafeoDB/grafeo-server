@@ -2083,9 +2083,9 @@ async fn gwp_list_databases_returns_default() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
-    let databases = db_client.list().await.unwrap();
+    let databases = catalog_client.list_graphs("default").await.unwrap();
     assert_eq!(databases.len(), 1);
     assert_eq!(databases[0].name, "default");
 }
@@ -2098,13 +2098,17 @@ async fn gwp_create_and_delete_database() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
     // Create a database
-    let info = db_client
-        .create(gwp::server::CreateDatabaseConfig {
+    let info = catalog_client
+        .create_graph(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "gwp-test-db".to_string(),
-            database_type: "lpg".to_string(),
+            if_not_exists: false,
+            or_replace: false,
+            type_spec: None,
+            copy_of: None,
             storage_mode: "inmemory".to_string(),
             memory_limit_bytes: None,
             backward_edges: None,
@@ -2118,15 +2122,18 @@ async fn gwp_create_and_delete_database() {
     assert_eq!(info.node_count, 0);
 
     // List should show 2 databases
-    let databases = db_client.list().await.unwrap();
+    let databases = catalog_client.list_graphs("default").await.unwrap();
     assert_eq!(databases.len(), 2);
 
     // Delete
-    let deleted = db_client.delete("gwp-test-db").await.unwrap();
-    assert_eq!(deleted, "gwp-test-db");
+    let deleted = catalog_client
+        .drop_graph("default", "gwp-test-db", false)
+        .await
+        .unwrap();
+    assert!(deleted);
 
     // List should show 1 database
-    let databases = db_client.list().await.unwrap();
+    let databases = catalog_client.list_graphs("default").await.unwrap();
     assert_eq!(databases.len(), 1);
 }
 
@@ -2138,12 +2145,14 @@ async fn gwp_get_database_info() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
-    let info = db_client.get_info("default").await.unwrap();
+    let info = catalog_client
+        .get_graph_info("default", "default")
+        .await
+        .unwrap();
     assert_eq!(info.name, "default");
-    assert_eq!(info.database_type, "lpg");
-    assert!(!info.persistent);
+    assert_eq!(info.graph_type, "lpg");
 }
 
 #[cfg(feature = "gwp")]
@@ -2156,11 +2165,15 @@ async fn gwp_create_database_then_query() {
         .unwrap();
 
     // Create database via GWP
-    let mut db_client = conn.create_database_client();
-    db_client
-        .create(gwp::server::CreateDatabaseConfig {
+    let mut catalog_client = conn.create_catalog_client();
+    catalog_client
+        .create_graph(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "query-db".to_string(),
-            database_type: "lpg".to_string(),
+            if_not_exists: false,
+            or_replace: false,
+            type_spec: None,
+            copy_of: None,
             storage_mode: "inmemory".to_string(),
             memory_limit_bytes: None,
             backward_edges: None,
@@ -2186,7 +2199,10 @@ async fn gwp_create_database_then_query() {
     assert_eq!(rows.len(), 1);
 
     // Verify node count via get_info
-    let info = db_client.get_info("query-db").await.unwrap();
+    let info = catalog_client
+        .get_graph_info("default", "query-db")
+        .await
+        .unwrap();
     assert_eq!(info.node_count, 1);
 
     session.close().await.unwrap();
@@ -2200,11 +2216,15 @@ async fn gwp_delete_then_recreate_database() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
-    let config = gwp::server::CreateDatabaseConfig {
+    let config = gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
         name: "ephemeral".to_string(),
-        database_type: "lpg".to_string(),
+        if_not_exists: false,
+        or_replace: false,
+        type_spec: None,
+        copy_of: None,
         storage_mode: "inmemory".to_string(),
         memory_limit_bytes: None,
         backward_edges: None,
@@ -2214,9 +2234,12 @@ async fn gwp_delete_then_recreate_database() {
     };
 
     // Create, delete, recreate — exercises the close barrier path
-    db_client.create(config.clone()).await.unwrap();
-    db_client.delete("ephemeral").await.unwrap();
-    db_client.create(config).await.unwrap();
+    catalog_client.create_graph(config.clone()).await.unwrap();
+    catalog_client
+        .drop_graph("default", "ephemeral", false)
+        .await
+        .unwrap();
+    catalog_client.create_graph(config).await.unwrap();
 
     // Should be queryable
     let mut session = conn.create_session().await.unwrap();
@@ -2243,9 +2266,11 @@ async fn gwp_delete_nonexistent_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
-    let result = db_client.delete("nonexistent").await;
+    let result = catalog_client
+        .drop_graph("default", "nonexistent", false)
+        .await;
     assert!(result.is_err(), "deleting nonexistent database should fail");
 }
 
@@ -2257,11 +2282,15 @@ async fn gwp_create_duplicate_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
-    let config = gwp::server::CreateDatabaseConfig {
+    let config = gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
         name: "dup".to_string(),
-        database_type: "lpg".to_string(),
+        if_not_exists: false,
+        or_replace: false,
+        type_spec: None,
+        copy_of: None,
         storage_mode: "inmemory".to_string(),
         memory_limit_bytes: None,
         backward_edges: None,
@@ -2270,8 +2299,8 @@ async fn gwp_create_duplicate_database_fails() {
         wal_durability: None,
     };
 
-    db_client.create(config.clone()).await.unwrap();
-    let result = db_client.create(config).await;
+    catalog_client.create_graph(config.clone()).await.unwrap();
+    let result = catalog_client.create_graph(config).await;
     assert!(result.is_err(), "creating duplicate database should fail");
 }
 
@@ -2283,13 +2312,17 @@ async fn gwp_configure_deleted_database_fails() {
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
-    let mut db_client = conn.create_database_client();
+    let mut catalog_client = conn.create_catalog_client();
 
     // Create then delete a database
-    db_client
-        .create(gwp::server::CreateDatabaseConfig {
+    catalog_client
+        .create_graph(gwp::server::CreateGraphConfig {
+            schema: "default".to_string(),
             name: "doomed".to_string(),
-            database_type: "lpg".to_string(),
+            if_not_exists: false,
+            or_replace: false,
+            type_spec: None,
+            copy_of: None,
             storage_mode: "inmemory".to_string(),
             memory_limit_bytes: None,
             backward_edges: None,
@@ -2299,7 +2332,10 @@ async fn gwp_configure_deleted_database_fails() {
         })
         .await
         .unwrap();
-    db_client.delete("doomed").await.unwrap();
+    catalog_client
+        .drop_graph("default", "doomed", false)
+        .await
+        .unwrap();
 
     // Configuring a session to the deleted database should fail
     let mut session = conn.create_session().await.unwrap();
@@ -2310,6 +2346,79 @@ async fn gwp_configure_deleted_database_fails() {
     );
 
     session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_list_schemas() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    let schemas = catalog_client.list_schemas().await.unwrap();
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].name, "default");
+    assert!(schemas[0].graph_count > 0);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_schema_operations_return_errors() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    // Creating default schema with if_not_exists should succeed (no-op)
+    catalog_client.create_schema("default", true).await.unwrap();
+
+    // Creating default schema without if_not_exists should fail
+    let result = catalog_client.create_schema("default", false).await;
+    assert!(result.is_err());
+
+    // Creating a non-default schema should fail (not supported)
+    let result = catalog_client.create_schema("other", false).await;
+    assert!(result.is_err());
+
+    // Dropping default schema should fail
+    let result = catalog_client.drop_schema("default", false).await;
+    assert!(result.is_err());
+
+    // Dropping nonexistent schema should fail
+    let result = catalog_client.drop_schema("nonexistent", false).await;
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_graph_type_stubs() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    // list_graph_types returns empty
+    let types = catalog_client.list_graph_types("default").await.unwrap();
+    assert!(types.is_empty());
+
+    // create_graph_type returns error
+    let result = catalog_client
+        .create_graph_type("default", "MyType", false, false)
+        .await;
+    assert!(result.is_err());
+
+    // drop_graph_type returns error
+    let result = catalog_client
+        .drop_graph_type("default", "MyType", false)
+        .await;
+    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -2556,8 +2665,8 @@ async fn gwp_admin_stats() {
     let mut admin_client = gwp::proto::admin_service_client::AdminServiceClient::new(channel);
 
     let resp = admin_client
-        .get_database_stats(gwp::proto::GetDatabaseStatsRequest {
-            database: "default".to_string(),
+        .get_graph_stats(gwp::proto::GetGraphStatsRequest {
+            graph: "default".to_string(),
         })
         .await
         .unwrap()
@@ -2581,7 +2690,7 @@ async fn gwp_admin_wal_status() {
 
     let resp = admin_client
         .wal_status(gwp::proto::WalStatusRequest {
-            database: "default".to_string(),
+            graph: "default".to_string(),
         })
         .await
         .unwrap()
@@ -2604,7 +2713,7 @@ async fn gwp_admin_validate() {
 
     let resp = admin_client
         .validate(gwp::proto::ValidateRequest {
-            database: "default".to_string(),
+            graph: "default".to_string(),
         })
         .await
         .unwrap()
@@ -2629,7 +2738,7 @@ async fn gwp_admin_create_index() {
     // Create a property index
     admin_client
         .create_index(gwp::proto::CreateIndexRequest {
-            database: "default".to_string(),
+            graph: "default".to_string(),
             index: Some(gwp::proto::create_index_request::Index::PropertyIndex(
                 gwp::proto::PropertyIndexDef {
                     property: "name".to_string(),
@@ -2642,7 +2751,7 @@ async fn gwp_admin_create_index() {
     // Drop the index
     let resp = admin_client
         .drop_index(gwp::proto::DropIndexRequest {
-            database: "default".to_string(),
+            graph: "default".to_string(),
             index: Some(gwp::proto::drop_index_request::Index::PropertyIndex(
                 gwp::proto::PropertyIndexDef {
                     property: "name".to_string(),
@@ -2689,7 +2798,8 @@ async fn spawn_server_with_bolt() -> (String, SocketAddr) {
     let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
     drop(bolt_listener);
-    let backend = grafeo_boltr::GrafeoBackend::new(state.service().clone());
+    let backend =
+        grafeo_boltr::GrafeoBackend::new(state.service().clone()).with_advertise_addr(bolt_addr);
     tokio::spawn(async move {
         grafeo_boltr::serve(backend, bolt_addr, grafeo_boltr::BoltrOptions::default())
             .await
@@ -2925,4 +3035,117 @@ async fn bolt_server_info() {
     );
 
     conn.goodbye().await.ok();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_database_switching() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let http_client = Client::new();
+
+    // Create a second database via HTTP
+    let resp = http_client
+        .post(format!("{http}/db"))
+        .json(&json!({"name": "bolt-switch-db"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create db failed: {}",
+        resp.status()
+    );
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Create data on the new database using the `db` extra field
+    let extra = boltr::types::BoltDict::from([(
+        "db".to_string(),
+        boltr::types::BoltValue::String("bolt-switch-db".to_string()),
+    )]);
+    session
+        .run_with_params(
+            "CREATE (:SwitchTest {name: 'A'})",
+            std::collections::HashMap::new(),
+            extra.clone(),
+        )
+        .await
+        .unwrap();
+
+    // Query the new database — should see the data
+    let result = session
+        .run_with_params(
+            "MATCH (n:SwitchTest) RETURN n.name",
+            std::collections::HashMap::new(),
+            extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+
+    // Query the default database explicitly — should NOT see the data
+    let default_extra = boltr::types::BoltDict::from([(
+        "db".to_string(),
+        boltr::types::BoltValue::String("default".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "MATCH (n:SwitchTest) RETURN n.name",
+            std::collections::HashMap::new(),
+            default_extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 0);
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_language_dispatch() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    // Seed some data first (auto-detected as Cypher)
+    session.run("CREATE (:LangTest {val: 1})").await.unwrap();
+
+    // Run a Cypher query using the language extension
+    let cypher_extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("cypher".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "MATCH (n:LangTest) RETURN n.val AS value",
+            std::collections::HashMap::new(),
+            cypher_extra,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.columns, vec!["value"]);
+    assert_eq!(result.records.len(), 1);
+
+    // Run a SPARQL query using the language extension
+    let sparql_extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("sparql".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1",
+            std::collections::HashMap::new(),
+            sparql_extra,
+        )
+        .await
+        .unwrap();
+    // SPARQL should parse and execute (may return 0 rows on empty DB)
+    assert!(result.columns.contains(&"s".to_string()));
+
+    session.close().await.unwrap();
 }

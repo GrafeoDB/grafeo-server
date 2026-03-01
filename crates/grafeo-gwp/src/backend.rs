@@ -9,10 +9,10 @@ use dashmap::DashMap;
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{
-    AdminStats, AdminValidationResult, AdminWalStatus, CreateDatabaseConfig, DatabaseInfo,
-    GqlBackend, HybridSearchParams, IndexDefinition, ResetTarget, ResultFrame, ResultStream,
-    SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams, TransactionHandle,
-    ValidationDiagnostic, VectorSearchParams,
+    AdminStats, AdminValidationResult, AdminWalStatus, CreateGraphConfig, GqlBackend, GraphInfo,
+    GraphTypeInfo, HybridSearchParams, IndexDefinition, ResetTarget, ResultFrame, ResultStream,
+    SchemaInfo, SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams,
+    TransactionHandle, ValidationDiagnostic, VectorSearchParams,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -21,14 +21,21 @@ use uuid::Uuid;
 
 use grafeo_service::ServiceState;
 use grafeo_service::admin::AdminService;
+use grafeo_service::query::QueryService;
 use grafeo_service::search::SearchService;
 
 use crate::encode::{convert_params, grafeo_to_gwp};
+
+/// Default schema name. Grafeo uses a flat database namespace, so all
+/// graphs live in a single implicit schema.
+const DEFAULT_SCHEMA: &str = "default";
 
 /// A GWP session backed by a grafeo-engine `Session`.
 struct GrafeoSession {
     engine_session: grafeo_engine::Session,
     database: String,
+    /// Query language override (e.g. "cypher"). When `None`, defaults to GQL.
+    language: Option<String>,
 }
 
 /// GQL Wire Protocol backend for Grafeo.
@@ -59,6 +66,28 @@ impl GrafeoBackend {
             .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| GqlError::Session(format!("session '{}' not found", handle.0)))
     }
+
+    /// Builds a `GraphInfo` from a database entry.
+    #[allow(clippy::result_large_err)]
+    fn build_graph_info(&self, name: &str) -> Result<GraphInfo, GqlError> {
+        let entry = self
+            .state
+            .databases()
+            .get(name)
+            .ok_or_else(|| GqlError::Session(format!("graph '{name}' not found")))?;
+
+        Ok(GraphInfo {
+            schema: DEFAULT_SCHEMA.to_owned(),
+            name: name.to_owned(),
+            node_count: entry.db.node_count() as u64,
+            edge_count: entry.db.edge_count() as u64,
+            graph_type: entry.metadata.database_type.clone(),
+            storage_mode: entry.metadata.storage_mode.clone(),
+            memory_limit_bytes: entry.db.memory_limit().map(|v| v as u64),
+            backward_edges: Some(entry.metadata.backward_edges),
+            threads: Some(entry.metadata.threads as u32),
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -80,6 +109,7 @@ impl GqlBackend for GrafeoBackend {
             Arc::new(Mutex::new(GrafeoSession {
                 engine_session,
                 database: "default".to_owned(),
+                language: None,
             })),
         );
 
@@ -100,10 +130,11 @@ impl GqlBackend for GrafeoBackend {
     ) -> Result<(), GqlError> {
         match property {
             SessionProperty::Graph(db_name) => {
-                let entry =
-                    self.state.databases().get(&db_name).ok_or_else(|| {
-                        GqlError::Session(format!("database '{db_name}' not found"))
-                    })?;
+                let entry = self
+                    .state
+                    .databases()
+                    .get(&db_name)
+                    .ok_or_else(|| GqlError::Session(format!("graph '{db_name}' not found")))?;
 
                 let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
                     .await
@@ -113,6 +144,16 @@ impl GqlBackend for GrafeoBackend {
                 let mut s = session_arc.lock();
                 s.engine_session = engine_session;
                 s.database = db_name;
+            }
+            SessionProperty::Parameter { name, value } if name == "language" => {
+                if let GwpValue::String(ref lang) = value {
+                    tracing::info!(language = %lang, "GWP session language set");
+                    let session_arc = self.get_session(session)?;
+                    let mut s = session_arc.lock();
+                    s.language = Some(lang.clone());
+                } else {
+                    tracing::warn!(?value, "language parameter is not a string");
+                }
             }
             SessionProperty::Schema(_)
             | SessionProperty::TimeZone(_)
@@ -140,6 +181,7 @@ impl GqlBackend for GrafeoBackend {
         let mut s = session_arc.lock();
         s.engine_session = engine_session;
         "default".clone_into(&mut s.database);
+        s.language = None;
         Ok(())
     }
 
@@ -156,12 +198,29 @@ impl GqlBackend for GrafeoBackend {
 
         let result = tokio::task::spawn_blocking(move || {
             let session = session_arc.lock();
-            if params.is_empty() {
-                session.engine_session.execute(&statement)
+            if let Some(ref lang) = session.language {
+                // Language override set via Configure — route through dispatch
+                let params_opt = if params.is_empty() {
+                    None
+                } else {
+                    Some(params)
+                };
+                QueryService::dispatch(
+                    &session.engine_session,
+                    &statement,
+                    Some(lang.as_str()),
+                    params_opt.as_ref(),
+                )
+            } else if params.is_empty() {
+                session
+                    .engine_session
+                    .execute(&statement)
+                    .map_err(|e| grafeo_service::error::ServiceError::BadRequest(e.to_string()))
             } else {
                 session
                     .engine_session
                     .execute_with_params(&statement, params)
+                    .map_err(|e| grafeo_service::error::ServiceError::BadRequest(e.to_string()))
             }
         })
         .await
@@ -223,19 +282,58 @@ impl GqlBackend for GrafeoBackend {
     }
 
     // -----------------------------------------------------------------
-    // Database lifecycle
+    // Catalog: Schema operations
     // -----------------------------------------------------------------
 
-    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, GqlError> {
+    async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, GqlError> {
+        let databases = self.state.databases().list();
+        Ok(vec![SchemaInfo {
+            name: DEFAULT_SCHEMA.to_owned(),
+            graph_count: databases.len() as u32,
+            graph_type_count: 0,
+        }])
+    }
+
+    async fn create_schema(&self, name: &str, if_not_exists: bool) -> Result<(), GqlError> {
+        if name == DEFAULT_SCHEMA {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(GqlError::Session(
+                "schema 'default' already exists".to_owned(),
+            ));
+        }
+        Err(GqlError::Session(
+            "multiple schemas not supported".to_owned(),
+        ))
+    }
+
+    async fn drop_schema(&self, name: &str, if_exists: bool) -> Result<bool, GqlError> {
+        if name == DEFAULT_SCHEMA {
+            return Err(GqlError::Session(
+                "cannot drop the default schema".to_owned(),
+            ));
+        }
+        if if_exists {
+            return Ok(false);
+        }
+        Err(GqlError::Session(format!("schema '{name}' not found")))
+    }
+
+    // -----------------------------------------------------------------
+    // Catalog: Graph operations (maps to Grafeo databases)
+    // -----------------------------------------------------------------
+
+    async fn list_graphs(&self, _schema: &str) -> Result<Vec<GraphInfo>, GqlError> {
         let list = self.state.databases().list();
         Ok(list
             .into_iter()
-            .map(|s| DatabaseInfo {
+            .map(|s| GraphInfo {
+                schema: DEFAULT_SCHEMA.to_owned(),
                 name: s.name,
                 node_count: s.node_count as u64,
                 edge_count: s.edge_count as u64,
-                persistent: s.persistent,
-                database_type: s.database_type,
+                graph_type: s.database_type,
                 storage_mode: String::new(),
                 memory_limit_bytes: None,
                 backward_edges: None,
@@ -244,22 +342,23 @@ impl GqlBackend for GrafeoBackend {
             .collect())
     }
 
-    async fn create_database(
-        &self,
-        config: CreateDatabaseConfig,
-    ) -> Result<DatabaseInfo, GqlError> {
+    async fn create_graph(&self, config: CreateGraphConfig) -> Result<GraphInfo, GqlError> {
         use grafeo_service::types::{
             CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode,
         };
+        use gwp::server::GraphTypeSpec;
 
-        let database_type = match config.database_type.to_lowercase().as_str() {
-            "lpg" => DatabaseType::Lpg,
-            "rdf" => DatabaseType::Rdf,
-            other => {
-                return Err(GqlError::Session(format!(
-                    "unsupported database type: {other}"
-                )));
-            }
+        let database_type = match &config.type_spec {
+            Some(GraphTypeSpec::Named(name)) => match name.to_lowercase().as_str() {
+                "lpg" => DatabaseType::Lpg,
+                "rdf" => DatabaseType::Rdf,
+                other => {
+                    return Err(GqlError::Session(format!(
+                        "unsupported graph type: {other}"
+                    )));
+                }
+            },
+            Some(GraphTypeSpec::Open) | None => DatabaseType::Lpg,
         };
 
         let storage_mode = match config.storage_mode.to_lowercase().as_str() {
@@ -293,11 +392,16 @@ impl GqlBackend for GrafeoBackend {
             .create(&req)
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
-        self.get_database_info(&config.name).await
+        self.build_graph_info(&config.name)
     }
 
-    async fn delete_database(&self, name: &str) -> Result<String, GqlError> {
-        // Invalidate GWP sessions targeting this database before deleting
+    async fn drop_graph(
+        &self,
+        _schema: &str,
+        name: &str,
+        _if_exists: bool,
+    ) -> Result<bool, GqlError> {
+        // Invalidate GWP sessions targeting this graph before deleting
         let sessions_to_remove: Vec<String> = self
             .sessions
             .iter()
@@ -307,9 +411,9 @@ impl GqlBackend for GrafeoBackend {
 
         if !sessions_to_remove.is_empty() {
             tracing::info!(
-                database = %name,
+                graph = %name,
                 count = sessions_to_remove.len(),
-                "Invalidating GWP sessions for deleted database"
+                "Invalidating GWP sessions for dropped graph"
             );
             for sid in &sessions_to_remove {
                 self.sessions.remove(sid);
@@ -321,35 +425,46 @@ impl GqlBackend for GrafeoBackend {
             .delete(name)
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
-        Ok(name.to_owned())
+        Ok(true)
     }
 
-    async fn get_database_info(&self, name: &str) -> Result<DatabaseInfo, GqlError> {
-        let entry = self
-            .state
-            .databases()
-            .get(name)
-            .ok_or_else(|| GqlError::Session(format!("database '{name}' not found")))?;
+    async fn get_graph_info(&self, _schema: &str, name: &str) -> Result<GraphInfo, GqlError> {
+        self.build_graph_info(name)
+    }
 
-        Ok(DatabaseInfo {
-            name: name.to_owned(),
-            node_count: entry.db.node_count() as u64,
-            edge_count: entry.db.edge_count() as u64,
-            persistent: entry.db.path().is_some(),
-            database_type: entry.metadata.database_type.clone(),
-            storage_mode: entry.metadata.storage_mode.clone(),
-            memory_limit_bytes: entry.db.memory_limit().map(|v| v as u64),
-            backward_edges: Some(entry.metadata.backward_edges),
-            threads: Some(entry.metadata.threads as u32),
-        })
+    // -----------------------------------------------------------------
+    // Catalog: Graph Type operations (stubs)
+    // -----------------------------------------------------------------
+
+    async fn list_graph_types(&self, _schema: &str) -> Result<Vec<GraphTypeInfo>, GqlError> {
+        Ok(Vec::new())
+    }
+
+    async fn create_graph_type(
+        &self,
+        _schema: &str,
+        _name: &str,
+        _if_not_exists: bool,
+        _or_replace: bool,
+    ) -> Result<(), GqlError> {
+        Err(GqlError::Session("graph types not supported".to_owned()))
+    }
+
+    async fn drop_graph_type(
+        &self,
+        _schema: &str,
+        _name: &str,
+        _if_exists: bool,
+    ) -> Result<bool, GqlError> {
+        Err(GqlError::Session("graph types not supported".to_owned()))
     }
 
     // -----------------------------------------------------------------
     // Admin operations
     // -----------------------------------------------------------------
 
-    async fn get_database_stats(&self, name: &str) -> Result<AdminStats, GqlError> {
-        let stats = AdminService::database_stats(self.state.databases(), name)
+    async fn get_graph_stats(&self, graph: &str) -> Result<AdminStats, GqlError> {
+        let stats = AdminService::database_stats(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -365,8 +480,8 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn wal_status(&self, name: &str) -> Result<AdminWalStatus, GqlError> {
-        let status = AdminService::wal_status(self.state.databases(), name)
+    async fn wal_status(&self, graph: &str) -> Result<AdminWalStatus, GqlError> {
+        let status = AdminService::wal_status(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -380,14 +495,14 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn wal_checkpoint(&self, name: &str) -> Result<(), GqlError> {
-        AdminService::wal_checkpoint(self.state.databases(), name)
+    async fn wal_checkpoint(&self, graph: &str) -> Result<(), GqlError> {
+        AdminService::wal_checkpoint(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))
     }
 
-    async fn validate(&self, name: &str) -> Result<AdminValidationResult, GqlError> {
-        let result = AdminService::validate(self.state.databases(), name)
+    async fn validate(&self, graph: &str) -> Result<AdminValidationResult, GqlError> {
+        let result = AdminService::validate(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -414,7 +529,7 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn create_index(&self, name: &str, index: IndexDefinition) -> Result<(), GqlError> {
+    async fn create_index(&self, graph: &str, index: IndexDefinition) -> Result<(), GqlError> {
         let service_index = match index {
             IndexDefinition::Property { property } => {
                 grafeo_service::types::IndexDef::Property { property }
@@ -439,12 +554,12 @@ impl GqlBackend for GrafeoBackend {
             }
         };
 
-        AdminService::create_index(self.state.databases(), name, service_index)
+        AdminService::create_index(self.state.databases(), graph, service_index)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))
     }
 
-    async fn drop_index(&self, name: &str, index: IndexDefinition) -> Result<bool, GqlError> {
+    async fn drop_index(&self, graph: &str, index: IndexDefinition) -> Result<bool, GqlError> {
         let service_index = match index {
             IndexDefinition::Property { property } => {
                 grafeo_service::types::IndexDef::Property { property }
@@ -469,7 +584,7 @@ impl GqlBackend for GrafeoBackend {
             }
         };
 
-        AdminService::drop_index(self.state.databases(), name, service_index)
+        AdminService::drop_index(self.state.databases(), graph, service_index)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))
     }
@@ -480,7 +595,7 @@ impl GqlBackend for GrafeoBackend {
 
     async fn vector_search(&self, req: VectorSearchParams) -> Result<Vec<SearchHit>, GqlError> {
         let service_req = grafeo_service::types::VectorSearchReq {
-            database: req.database.clone(),
+            database: req.graph.clone(),
             label: req.label,
             property: req.property,
             query_vector: req.query_vector,
@@ -493,7 +608,7 @@ impl GqlBackend for GrafeoBackend {
                 .collect(),
         };
 
-        let hits = SearchService::vector_search(self.state.databases(), &req.database, service_req)
+        let hits = SearchService::vector_search(self.state.databases(), &req.graph, service_req)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -509,14 +624,14 @@ impl GqlBackend for GrafeoBackend {
 
     async fn text_search(&self, req: TextSearchParams) -> Result<Vec<SearchHit>, GqlError> {
         let service_req = grafeo_service::types::TextSearchReq {
-            database: req.database.clone(),
+            database: req.graph.clone(),
             label: req.label,
             property: req.property,
             query: req.query,
             k: req.k,
         };
 
-        let hits = SearchService::text_search(self.state.databases(), &req.database, service_req)
+        let hits = SearchService::text_search(self.state.databases(), &req.graph, service_req)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -532,7 +647,7 @@ impl GqlBackend for GrafeoBackend {
 
     async fn hybrid_search(&self, req: HybridSearchParams) -> Result<Vec<SearchHit>, GqlError> {
         let service_req = grafeo_service::types::HybridSearchReq {
-            database: req.database.clone(),
+            database: req.graph.clone(),
             label: req.label,
             text_property: req.text_property,
             vector_property: req.vector_property,
@@ -541,7 +656,7 @@ impl GqlBackend for GrafeoBackend {
             k: req.k,
         };
 
-        let hits = SearchService::hybrid_search(self.state.databases(), &req.database, service_req)
+        let hits = SearchService::hybrid_search(self.state.databases(), &req.graph, service_req)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
 
@@ -613,6 +728,16 @@ impl ResultStream for GrafeoResultStream {
                             nullable: true,
                             element_type: None,
                             fields: Vec::new(),
+                            precision: None,
+                            scale: None,
+                            min_length: None,
+                            max_length: None,
+                            max_cardinality: None,
+                            is_group: false,
+                            is_open: false,
+                            duration_qualifier: proto::DurationQualifier::DurationUnspecified
+                                .into(),
+                            component_types: Vec::new(),
                         }),
                     })
                     .collect();
@@ -626,6 +751,7 @@ impl ResultStream for GrafeoResultStream {
                         proto::ResultType::Omitted.into()
                     },
                     columns,
+                    ordered: false,
                 });
 
                 self.phase = if self.result.rows.is_empty() {

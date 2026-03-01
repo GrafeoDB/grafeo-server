@@ -1,12 +1,13 @@
 //! `GrafeoBackend` — implements `boltr::server::BoltBackend` for Grafeo.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use boltr::error::BoltError;
 use boltr::server::{
-    BoltBackend, BoltRecord, ResultMetadata, ResultStream, SessionConfig, SessionHandle,
-    SessionProperty, TransactionHandle,
+    BoltBackend, BoltRecord, ResultMetadata, ResultStream, RoutingServer, RoutingTable,
+    SessionConfig, SessionHandle, SessionProperty, TransactionHandle,
 };
 use boltr::types::{BoltDict, BoltValue};
 use dashmap::DashMap;
@@ -27,6 +28,7 @@ struct GrafeoSession {
 pub struct GrafeoBackend {
     state: ServiceState,
     sessions: DashMap<String, Arc<Mutex<GrafeoSession>>>,
+    advertise_addr: Option<SocketAddr>,
 }
 
 impl GrafeoBackend {
@@ -34,7 +36,15 @@ impl GrafeoBackend {
         Self {
             state,
             sessions: DashMap::new(),
+            advertise_addr: None,
         }
+    }
+
+    /// Sets the address to advertise in ROUTE responses.
+    #[must_use]
+    pub fn with_advertise_addr(mut self, addr: SocketAddr) -> Self {
+        self.advertise_addr = Some(addr);
+        self
     }
 
     fn get_session(&self, handle: &SessionHandle) -> Result<Arc<Mutex<GrafeoSession>>, BoltError> {
@@ -239,5 +249,38 @@ impl BoltBackend for GrafeoBackend {
             "server".to_string(),
             BoltValue::String(format!("GrafeoDB/{}", env!("CARGO_PKG_VERSION"))),
         )]))
+    }
+
+    async fn route(
+        &self,
+        _routing_context: &BoltDict,
+        _bookmarks: &[String],
+        db: Option<&str>,
+    ) -> Result<RoutingTable, BoltError> {
+        let addr = self
+            .advertise_addr
+            .map_or_else(|| "localhost:7687".to_string(), |a| a.to_string());
+
+        let db_name = db.unwrap_or("default").to_string();
+
+        // Single-server routing: this node serves all roles.
+        Ok(RoutingTable {
+            ttl: 300,
+            db: db_name,
+            servers: vec![
+                RoutingServer {
+                    addresses: vec![addr.clone()],
+                    role: "WRITE".to_string(),
+                },
+                RoutingServer {
+                    addresses: vec![addr.clone()],
+                    role: "READ".to_string(),
+                },
+                RoutingServer {
+                    addresses: vec![addr],
+                    role: "ROUTE".to_string(),
+                },
+            ],
+        })
     }
 }

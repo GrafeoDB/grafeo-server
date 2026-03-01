@@ -3,8 +3,8 @@
 //! Supports multiple transport modes depending on compiled features:
 //! - `http`  — REST API on the configured port (default 7474)
 //! - `gwp`   — GQL Wire Protocol (gRPC) on the GWP port (default 7688)
-//! - `bolt`  — Bolt v5 protocol on the Bolt port (default 7687)
-//! - any combination — HTTP as primary, GWP/Bolt spawned alongside
+//! - `bolt`  — BoltR (Bolt v5.x) on the Bolt port (default 7687)
+//! - any combination — HTTP as primary, GWP/BoltR spawned alongside
 
 use grafeo_server::config::Config;
 
@@ -65,7 +65,7 @@ async fn main() {
     });
 
     // -----------------------------------------------------------------
-    // Standalone mode: GWP and/or Bolt only (no HTTP)
+    // Standalone mode: GWP and/or BoltR only (no HTTP)
     // -----------------------------------------------------------------
     #[cfg(all(any(feature = "gwp", feature = "bolt"), not(feature = "http")))]
     {
@@ -97,10 +97,11 @@ async fn main() {
                 tokio::signal::ctrl_c().await.ok();
             }));
             tokio::spawn(async move {
-                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
-                tracing::info!(%bolt_addr, "Bolt server ready (standalone)");
+                let backend =
+                    grafeo_boltr::GrafeoBackend::new(bolt_state).with_advertise_addr(bolt_addr);
+                tracing::info!(%bolt_addr, "BoltR server ready (standalone)");
                 if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
-                    tracing::error!("Bolt server error: {e}");
+                    tracing::error!("BoltR server error: {e}");
                 }
             })
         };
@@ -121,7 +122,7 @@ async fn main() {
     }
 
     // -----------------------------------------------------------------
-    // HTTP mode (optionally with GWP and/or Bolt alongside)
+    // HTTP mode (optionally with GWP and/or BoltR alongside)
     // -----------------------------------------------------------------
     #[cfg(feature = "http")]
     {
@@ -162,7 +163,7 @@ async fn main() {
             })
         };
 
-        // Spawn Bolt alongside HTTP if both features are enabled
+        // Spawn BoltR alongside HTTP if both features are enabled
         #[cfg(feature = "bolt")]
         let bolt_handle = {
             let bolt_state = service.clone();
@@ -172,10 +173,11 @@ async fn main() {
                 tokio::signal::ctrl_c().await.ok();
             }));
             tokio::spawn(async move {
-                let backend = grafeo_boltr::GrafeoBackend::new(bolt_state);
-                tracing::info!(%bolt_addr, "Bolt server ready");
+                let backend =
+                    grafeo_boltr::GrafeoBackend::new(bolt_state).with_advertise_addr(bolt_addr);
+                tracing::info!(%bolt_addr, "BoltR server ready");
                 if let Err(e) = grafeo_boltr::serve(backend, bolt_addr, bolt_options).await {
-                    tracing::error!("Bolt server error: {e}");
+                    tracing::error!("BoltR server error: {e}");
                 }
             })
         };
@@ -331,7 +333,7 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
     }
 }
 
-/// Builds Bolt server options from CLI config and service state.
+/// Builds BoltR server options from CLI config and service state.
 #[cfg(feature = "bolt")]
 fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::BoltrOptions {
     let _ = service; // used only when auth feature is enabled
