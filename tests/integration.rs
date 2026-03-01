@@ -2348,6 +2348,79 @@ async fn gwp_configure_deleted_database_fails() {
     session.close().await.unwrap();
 }
 
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_list_schemas() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    let schemas = catalog_client.list_schemas().await.unwrap();
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].name, "default");
+    assert!(schemas[0].graph_count > 0);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_schema_operations_return_errors() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    // Creating default schema with if_not_exists should succeed (no-op)
+    catalog_client.create_schema("default", true).await.unwrap();
+
+    // Creating default schema without if_not_exists should fail
+    let result = catalog_client.create_schema("default", false).await;
+    assert!(result.is_err());
+
+    // Creating a non-default schema should fail (not supported)
+    let result = catalog_client.create_schema("other", false).await;
+    assert!(result.is_err());
+
+    // Dropping default schema should fail
+    let result = catalog_client.drop_schema("default", false).await;
+    assert!(result.is_err());
+
+    // Dropping nonexistent schema should fail
+    let result = catalog_client.drop_schema("nonexistent", false).await;
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_graph_type_stubs() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog_client = conn.create_catalog_client();
+
+    // list_graph_types returns empty
+    let types = catalog_client.list_graph_types("default").await.unwrap();
+    assert!(types.is_empty());
+
+    // create_graph_type returns error
+    let result = catalog_client
+        .create_graph_type("default", "MyType", false, false)
+        .await;
+    assert!(result.is_err());
+
+    // drop_graph_type returns error
+    let result = catalog_client
+        .drop_graph_type("default", "MyType", false)
+        .await;
+    assert!(result.is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Admin endpoints (v0.4.3)
 // ---------------------------------------------------------------------------
