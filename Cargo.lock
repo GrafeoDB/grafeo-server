@@ -1120,18 +1120,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "139ef39800118c7683f2fd3c98c1b23c09ae076556b435f8e9064ae108aaeeec"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core 0.10.0",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f13af5a9886587774ca5ed0f231b05327b5917b777884bc1e655249a57ca45ff"
+version = "0.5.12"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1169,9 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7f479ceee3404acd3c25576e941a7138b160308790a9848db9acdd735f7315a"
+version = "0.5.12"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1180,7 +1178,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "dashmap",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "hashbrown 0.16.1",
  "indexmap",
  "parking_lot",
@@ -1192,9 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd3f59e231d6df7c118490762ad736af958f93e09d2355d6eaeb4c43431d24f7"
+version = "0.5.12"
 dependencies = [
  "ahash",
  "arcstr",
@@ -1218,9 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5416c116f30cd19294cf02e2c26748f2d180cd6b5b97e1a9c714a06ce13ff090"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "bincode",

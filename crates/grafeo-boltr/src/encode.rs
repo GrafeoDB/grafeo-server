@@ -15,6 +15,29 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
         Value::String(s) => BoltValue::String(s.to_string()),
         Value::Bytes(b) => BoltValue::Bytes(b.to_vec()),
         Value::Timestamp(t) => BoltValue::String(format!("{t:?}")),
+        Value::Date(d) => BoltValue::Date(boltr::types::BoltDate {
+            days: i64::from(d.as_days()),
+        }),
+        Value::Time(t) => match t.offset_seconds() {
+            Some(off) => BoltValue::Time(boltr::types::BoltTime {
+                nanoseconds: t.as_nanos() as i64,
+                tz_offset_seconds: i64::from(off),
+            }),
+            None => BoltValue::LocalTime(boltr::types::BoltLocalTime {
+                nanoseconds: t.as_nanos() as i64,
+            }),
+        },
+        Value::Duration(d) => {
+            let total_nanos = d.nanos();
+            let secs = total_nanos / 1_000_000_000;
+            let nanos = total_nanos % 1_000_000_000;
+            BoltValue::Duration(boltr::types::BoltDuration {
+                months: d.months(),
+                days: d.days(),
+                seconds: secs,
+                nanoseconds: nanos,
+            })
+        }
         Value::List(items) => BoltValue::List(items.iter().map(grafeo_to_bolt).collect()),
         Value::Map(map) => {
             let dict: BoltDict = map
@@ -25,6 +48,21 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
         }
         Value::Vector(v) => {
             BoltValue::List(v.iter().map(|f| BoltValue::Float(f64::from(*f))).collect())
+        }
+        Value::Path { nodes, edges } => {
+            let dict: BoltDict = vec![
+                (
+                    "nodes".to_string(),
+                    BoltValue::List(nodes.iter().map(grafeo_to_bolt).collect()),
+                ),
+                (
+                    "edges".to_string(),
+                    BoltValue::List(edges.iter().map(grafeo_to_bolt).collect()),
+                ),
+            ]
+            .into_iter()
+            .collect();
+            BoltValue::Dict(dict)
         }
     }
 }
@@ -52,7 +90,20 @@ fn bolt_to_grafeo(value: &BoltValue) -> Option<grafeo_common::Value> {
                 .collect();
             Some(Value::Map(std::sync::Arc::new(map)))
         }
-        // Graph structures and temporals are not supported as query parameters.
+        BoltValue::Date(d) => Some(Value::Date(grafeo_common::types::Date::from_days(
+            d.days as i32,
+        ))),
+        BoltValue::Time(t) => grafeo_common::types::Time::from_nanos(t.nanoseconds as u64)
+            .map(|time| Value::Time(time.with_offset(t.tz_offset_seconds as i32))),
+        BoltValue::LocalTime(t) => {
+            grafeo_common::types::Time::from_nanos(t.nanoseconds as u64).map(Value::Time)
+        }
+        BoltValue::Duration(d) => Some(Value::Duration(grafeo_common::types::Duration::new(
+            d.months,
+            d.days,
+            d.seconds * 1_000_000_000 + d.nanoseconds,
+        ))),
+        // Graph structures and datetime not yet supported as query parameters
         _ => None,
     }
 }
@@ -127,12 +178,24 @@ mod tests {
 
     #[test]
     fn bolt_to_grafeo_unsupported_returns_none() {
-        let bolt = BoltValue::Date(boltr::types::BoltDate { days: 100 });
+        // Spatial types are still unsupported
+        let bolt = BoltValue::Point2D(boltr::types::BoltPoint2D {
+            srid: 4326,
+            x: 1.0,
+            y: 2.0,
+        });
         assert!(bolt_to_grafeo(&bolt).is_none());
     }
 
     #[test]
-    fn convert_params_filters_unsupported() {
+    fn bolt_to_grafeo_date_roundtrip() {
+        let bolt = BoltValue::Date(boltr::types::BoltDate { days: 100 });
+        let grafeo = bolt_to_grafeo(&bolt).unwrap();
+        assert!(matches!(grafeo, grafeo_common::Value::Date(_)));
+    }
+
+    #[test]
+    fn convert_params_includes_temporal() {
         let mut params = HashMap::new();
         params.insert("name".into(), BoltValue::String("Alice".into()));
         params.insert(
@@ -141,7 +204,8 @@ mod tests {
         );
 
         let result = convert_params(&params);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert!(result.contains_key("name"));
+        assert!(result.contains_key("date"));
     }
 }

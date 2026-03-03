@@ -1,11 +1,30 @@
-//! Grafeo GWP — GQL Wire Protocol (gRPC) transport adapter.
+//! Grafeo GWP: GQL Wire Protocol (gRPC) transport adapter.
 //!
-//! Implements the `GqlBackend` trait from the `gwp` crate, bridging
-//! GWP sessions to grafeo-engine via `grafeo-service::ServiceState`.
+//! Implements the [`GqlBackend`](gwp::server::GqlBackend) trait from the
+//! `gwp` crate, bridging GWP sessions to grafeo-engine via
+//! `grafeo-service::ServiceState`.
 //!
 //! Each GWP session maps to one engine session on a specific database.
 //! All engine operations run via `spawn_blocking` to avoid blocking
 //! the async runtime.
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! use std::net::SocketAddr;
+//! use std::time::Duration;
+//! use grafeo_gwp::{GrafeoBackend, GwpOptions, serve};
+//!
+//! let state = /* grafeo_service::ServiceState */;
+//! let backend = GrafeoBackend::new(state);
+//! let addr: SocketAddr = "0.0.0.0:7688".parse().unwrap();
+//!
+//! serve(backend, addr, GwpOptions {
+//!     idle_timeout: Some(Duration::from_secs(600)),
+//!     max_sessions: Some(128),
+//!     ..Default::default()
+//! }).await?;
+//! ```
 
 #[cfg(feature = "auth")]
 mod auth;
@@ -21,8 +40,19 @@ use std::time::Duration;
 
 /// Configuration options for the GWP server.
 ///
-/// All fields are optional — `Default` gives a bare server with no
+/// All fields are optional: `Default` gives a bare server with no
 /// TLS, no auth, no idle reaper, and unlimited sessions.
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use grafeo_gwp::GwpOptions;
+///
+/// let opts = GwpOptions {
+///     idle_timeout: Some(Duration::from_secs(600)),
+///     max_sessions: Some(128),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Default)]
 pub struct GwpOptions {
     /// Idle session timeout. Sessions inactive longer than this are
@@ -53,8 +83,16 @@ pub struct GwpOptions {
 
 /// Starts the GWP (gRPC) server on the given address.
 ///
-/// Uses the `GqlServer` builder from gwp to configure TLS,
+/// Uses the `GqlServer` builder from the `gwp` crate to configure TLS,
 /// authentication, idle timeout, and session limits.
+///
+/// ```rust,ignore
+/// use grafeo_gwp::{GrafeoBackend, GwpOptions, serve};
+///
+/// let backend = GrafeoBackend::new(service_state);
+/// let addr = "0.0.0.0:7688".parse().unwrap();
+/// serve(backend, addr, GwpOptions::default()).await?;
+/// ```
 pub async fn serve(
     backend: GrafeoBackend,
     addr: SocketAddr,

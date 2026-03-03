@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.10", default-features = false }
-grafeo-common = "0.5.10"
+grafeo-engine = { version = "0.5.13", default-features = false }
+grafeo-common = "0.5.13"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -177,6 +177,13 @@ axum = { version = "0.8" }
 
 [lints]
 workspace = true
+
+# Temporary: use local engine source until 0.5.13 is published on crates.io
+[patch.crates-io]
+grafeo-engine = { path = "../grafeo/crates/grafeo-engine" }
+grafeo-common = { path = "../grafeo/crates/grafeo-common" }
+grafeo-core = { path = "../grafeo/crates/grafeo-core" }
+grafeo-adapters = { path = "../grafeo/crates/grafeo-adapters" }
 
 [profile.release]
 lto = "thin"

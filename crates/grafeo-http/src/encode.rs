@@ -29,6 +29,9 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Bytes(b) => serde_json::json!(b.as_ref()),
         Value::Timestamp(t) => serde_json::Value::String(format!("{t:?}")),
+        Value::Date(d) => serde_json::json!({ "$date": d.to_string() }),
+        Value::Time(t) => serde_json::json!({ "$time": t.to_string() }),
+        Value::Duration(d) => serde_json::json!({ "$duration": d.to_string() }),
         Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
@@ -38,6 +41,10 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
             serde_json::Value::Object(obj)
         }
         Value::Vector(v) => serde_json::json!(v.as_ref()),
+        Value::Path { nodes, edges } => serde_json::json!({
+            "nodes": nodes.iter().map(value_to_json).collect::<Vec<_>>(),
+            "edges": edges.iter().map(value_to_json).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -253,6 +260,7 @@ mod tests {
             rows: vec![vec![Value::String("Alice".into())]],
             execution_time_ms: Some(1.5),
             rows_scanned: Some(10),
+            status_message: None,
         };
         let resp = query_result_to_response(&result);
         assert_eq!(resp.columns, vec!["name"]);
@@ -281,6 +289,7 @@ mod tests {
                 .collect(),
             execution_time_ms: Some(1.0),
             rows_scanned: Some(num_rows as u64),
+            status_message: None,
         }
     }
 

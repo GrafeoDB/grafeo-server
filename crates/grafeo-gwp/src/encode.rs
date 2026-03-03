@@ -15,6 +15,30 @@ pub fn grafeo_to_gwp(value: &grafeo_common::Value) -> GwpValue {
         Value::String(s) => GwpValue::String(s.to_string()),
         Value::Bytes(b) => GwpValue::Bytes(b.to_vec()),
         Value::Timestamp(t) => GwpValue::String(format!("{t:?}")),
+        Value::Date(d) => GwpValue::Date(gwp::types::Date {
+            year: d.year(),
+            month: d.month(),
+            day: d.day(),
+        }),
+        Value::Time(t) => {
+            let local = gwp::types::LocalTime {
+                hour: t.hour(),
+                minute: t.minute(),
+                second: t.second(),
+                nanosecond: t.nanosecond(),
+            };
+            match t.offset_seconds() {
+                Some(off) => GwpValue::ZonedTime(gwp::types::ZonedTime {
+                    time: local,
+                    offset_minutes: off / 60,
+                }),
+                None => GwpValue::LocalTime(local),
+            }
+        }
+        Value::Duration(d) => GwpValue::Duration(gwp::types::Duration {
+            months: d.months(),
+            nanoseconds: d.days() * 86_400_000_000_000 + d.nanos(),
+        }),
         Value::List(items) => GwpValue::List(items.iter().map(grafeo_to_gwp).collect()),
         Value::Map(map) => {
             let fields: Vec<gwp::types::Field> = map
@@ -28,6 +52,19 @@ pub fn grafeo_to_gwp(value: &grafeo_common::Value) -> GwpValue {
         }
         Value::Vector(v) => {
             GwpValue::List(v.iter().map(|f| GwpValue::Float(f64::from(*f))).collect())
+        }
+        Value::Path { nodes, edges } => {
+            let fields = vec![
+                gwp::types::Field {
+                    name: "nodes".to_string(),
+                    value: GwpValue::List(nodes.iter().map(grafeo_to_gwp).collect()),
+                },
+                gwp::types::Field {
+                    name: "edges".to_string(),
+                    value: GwpValue::List(edges.iter().map(grafeo_to_gwp).collect()),
+                },
+            ];
+            GwpValue::Record(gwp::types::Record { fields })
         }
     }
 }
@@ -72,7 +109,29 @@ fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
                 .collect();
             Some(Value::Map(std::sync::Arc::new(map)))
         }
-        // Temporal and graph types: not supported as engine parameters
+        GwpValue::Date(d) => {
+            grafeo_common::types::Date::from_ymd(d.year, d.month, d.day).map(Value::Date)
+        }
+        GwpValue::LocalTime(t) => {
+            grafeo_common::types::Time::from_hms_nano(t.hour, t.minute, t.second, t.nanosecond)
+                .map(Value::Time)
+        }
+        GwpValue::ZonedTime(zt) => grafeo_common::types::Time::from_hms_nano(
+            zt.time.hour,
+            zt.time.minute,
+            zt.time.second,
+            zt.time.nanosecond,
+        )
+        .map(|t| Value::Time(t.with_offset(zt.offset_minutes * 60))),
+        GwpValue::Duration(d) => {
+            let day_nanos = 86_400_000_000_000i64;
+            let days = d.nanoseconds / day_nanos;
+            let nanos = d.nanoseconds % day_nanos;
+            Some(Value::Duration(grafeo_common::types::Duration::new(
+                d.months, days, nanos,
+            )))
+        }
+        // Graph types and datetime not yet supported as engine parameters
         _ => None,
     }
 }
