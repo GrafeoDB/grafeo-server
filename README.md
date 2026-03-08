@@ -8,7 +8,7 @@
 
 # Grafeo Server
 
-Graph database server for the [Grafeo](https://github.com/GrafeoDB/grafeo) engine. Provides REST API, embedded web UI and GQL Wire Protocol (gRPC) access to Grafeo's multi-language query engine.
+Graph database server for the [Grafeo](https://github.com/GrafeoDB/grafeo) engine. Provides REST API, embedded web UI, GQL Wire Protocol (gRPC), and Bolt v5.x wire protocol access to Grafeo's multi-language query engine.
 
 Pure Rust, single binary. Available in three tiers to match different deployment needs.
 
@@ -28,23 +28,23 @@ Four image tiers are available:
 
 | Tier         | Tag                    | Transport         | Languages | AI/Search   | Web UI | Binary  |
 | ------------ | ---------------------- | ----------------- | --------- | ----------- | ------ | ------- |
-| **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7687)  | GQL       | No          | No     | ~7 MB   |
+| **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7688)  | GQL       | No          | No     | ~7 MB   |
 | **bolt**     | `grafeo-server:bolt`   | Bolt v5 (:7687)   | Cypher    | No          | No     | ~8 MB   |
 | **standard** | `grafeo-server:latest` | HTTP (:7474)      | All 6     | No          | Studio | ~21 MB  |
 | **full**     | `grafeo-server:full`   | HTTP + GWP + Bolt | All 6     | Yes + embed | Studio | ~25 MB  |
 
 ```bash
 # GWP - gRPC wire protocol, GQL only
-docker run -p 7687:7687 grafeo/grafeo-server:gwp --data-dir /data
+docker run -p 7688:7688 grafeo/grafeo-server:gwp --data-dir /data
 
 # Bolt - Neo4j-compatible wire protocol, Cypher
 docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
 
 # Full - everything including AI, auth, TLS, schemas
-docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
+docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.5`, `grafeo-server:0.4.5-gwp`, `grafeo-server:0.4.5-bolt`, `grafeo-server:0.4.5-full`.
+Versioned tags: `grafeo-server:0.4.6`, `grafeo-server:0.4.6-gwp`, `grafeo-server:0.4.6-bolt`, `grafeo-server:0.4.6-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -162,6 +162,12 @@ curl -X POST http://localhost:7474/admin/default/index \
 curl -X DELETE http://localhost:7474/admin/default/index \
   -H "Content-Type: application/json" \
   -d '{"index_type": "property", "label": "Person", "property": "name"}'
+
+# Query plan cache statistics
+curl http://localhost:7474/admin/default/cache
+
+# Clear the query plan cache
+curl -X POST http://localhost:7474/admin/default/cache/clear
 ```
 
 ### Search
@@ -244,13 +250,13 @@ The `id` field is optional and echoed back for request/response correlation.
 
 ### GQL Wire Protocol (GWP)
 
-The lite and full builds include a gRPC-based binary wire protocol on port 7687, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) Rust client or any gRPC client.
+The gwp and full builds include a gRPC-based binary wire protocol on port 7688, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) (0.1.6) Rust client or any gRPC client.
 
 ```rust
 use gwp::client::GqlConnection;
 use std::collections::HashMap;
 
-let conn = GqlConnection::connect("http://localhost:7687").await?;
+let conn = GqlConnection::connect("http://localhost:7688").await?;
 let mut session = conn.create_session().await?;
 
 let mut cursor = session.execute(
@@ -262,7 +268,13 @@ let rows = cursor.collect_rows().await?;
 session.close().await?;
 ```
 
-Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7687).
+Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
+
+### Bolt v5.x (BoltR)
+
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.1.1) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+
+Configure the port with `--bolt-port` or `GRAFEO_BOLT_PORT` (default: 7687).
 
 ### Health Check
 
@@ -285,8 +297,10 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_DATA_DIR` | `--data-dir` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
-| `GRAFEO_GWP_PORT` | `--gwp-port` | `7687` | GQL Wire Protocol (gRPC) port |
+| `GRAFEO_GWP_PORT` | `--gwp-port` | `7688` | GQL Wire Protocol (gRPC) port |
 | `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `0` | Max concurrent GWP sessions (0 = unlimited) |
+| `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
+| `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
@@ -379,7 +393,7 @@ Start with `--no-default-features` and pick what you need. The matrix below show
 | Feature | Description | Port |
 |---------|-------------|------|
 | `http` | REST API via axum (Swagger, OpenAPI, WebSocket) | 7474 |
-| `gwp` | GQL Wire Protocol (gRPC) | 7687 |
+| `gwp` | GQL Wire Protocol (gRPC) | 7688 |
 | `bolt` | Bolt v5 wire protocol (Neo4j compatible) | 7687 |
 
 **Query languages** (pick individually or use `all-languages`):
@@ -417,7 +431,7 @@ Start with `--no-default-features` and pick what you need. The matrix below show
 **Compatibility notes**:
 - `studio` requires `http` (no standalone Studio)
 - `sparql` implies `rdf` (RDF store is always created)
-- `gwp` and `bolt` share port 7687 by default, use `--gwp-port` / `--bolt-port` to separate
+- `gwp` uses port 7688 and `bolt` uses port 7687 by default, configurable via `--gwp-port` / `--bolt-port`
 - `auth` and `tls` apply to whichever transports are enabled
 - All features compose freely otherwise
 
@@ -445,7 +459,7 @@ cargo build --release --no-default-features --features "gwp,gql,storage"
 The Dockerfile supports four build targets matching the tiers:
 
 ```bash
-docker build --target gwp      -t grafeo-server:gwp .       # GWP-only, port 7687
+docker build --target gwp      -t grafeo-server:gwp .       # GWP-only, port 7688
 docker build --target bolt     -t grafeo-server:bolt .       # Bolt-only, port 7687
 docker build --target standard -t grafeo-server:standard .   # HTTP + UI, port 7474 (default)
 docker build --target full     -t grafeo-server:full .       # All ports
