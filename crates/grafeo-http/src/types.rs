@@ -46,6 +46,9 @@ pub struct QueryResponse {
     /// Number of rows scanned during query execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows_scanned: Option<u64>,
+    /// GQLSTATUS code per ISO/IEC 39075 (e.g. "00000" for success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gql_status: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]

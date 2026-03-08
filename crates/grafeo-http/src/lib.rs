@@ -71,6 +71,8 @@ pub use state::AppState;
         routes::admin::admin_validate,
         routes::admin::admin_create_index,
         routes::admin::admin_drop_index,
+        routes::admin::admin_cache_stats,
+        routes::admin::admin_clear_cache,
         routes::search::vector_search,
         routes::search::text_search,
         routes::search::hybrid_search,
@@ -88,6 +90,7 @@ pub use state::AppState;
             grafeo_service::types::DatabaseStats, grafeo_service::types::WalStatusInfo,
             grafeo_service::types::ValidationInfo, grafeo_service::types::ValidationErrorItem,
             grafeo_service::types::ValidationWarningItem, grafeo_service::types::IndexDef,
+            grafeo_service::types::CacheStatsInfo,
             grafeo_service::types::VectorSearchReq, grafeo_service::types::TextSearchReq,
             grafeo_service::types::HybridSearchReq, grafeo_service::types::SearchHit,
             SearchResponse,
@@ -151,6 +154,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/admin/{db}/index",
             post(routes::admin::admin_create_index).delete(routes::admin::admin_drop_index),
+        )
+        .route("/admin/{db}/cache", get(routes::admin::admin_cache_stats))
+        .route(
+            "/admin/{db}/cache/clear",
+            post(routes::admin::admin_clear_cache),
         )
         // Search
         .route("/search/vector", post(routes::search::vector_search))
