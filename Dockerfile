@@ -56,8 +56,16 @@ COPY --from=ui-builder /ui/dist client/dist/
 RUN cargo build --release --features full && \
     strip target/release/grafeo-server
 
-# --- Runtime: wire-protocol-only (no HTTP healthcheck) ---
-FROM debian:bookworm-slim AS runtime-wire
+# --- Runtime: GWP wire-protocol-only (no HTTP healthcheck) ---
+FROM debian:bookworm-slim AS runtime-gwp
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+VOLUME /data
+EXPOSE 7688
+ENTRYPOINT ["grafeo-server"]
+CMD ["--host", "0.0.0.0", "--data-dir", "/data"]
+
+# --- Runtime: Bolt wire-protocol-only (no HTTP healthcheck) ---
+FROM debian:bookworm-slim AS runtime-bolt
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 VOLUME /data
 EXPOSE 7687
@@ -78,18 +86,18 @@ CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 FROM debian:bookworm-slim AS runtime-full
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 VOLUME /data
-EXPOSE 7474 7687
+EXPOSE 7474 7687 7688
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:7474/health || exit 1
 ENTRYPOINT ["grafeo-server"]
 CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 
 # --- Final: gwp ---
-FROM runtime-wire AS gwp
+FROM runtime-gwp AS gwp
 COPY --from=build-gwp /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # --- Final: bolt ---
-FROM runtime-wire AS bolt
+FROM runtime-bolt AS bolt
 COPY --from=build-bolt /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # --- Final: standard ---

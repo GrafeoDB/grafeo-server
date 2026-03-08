@@ -10,7 +10,7 @@
 
 Graph database server for the [Grafeo](https://github.com/GrafeoDB/grafeo) engine. Provides REST API, embedded web UI, GQL Wire Protocol (gRPC), and Bolt v5.x wire protocol access to Grafeo's multi-language query engine.
 
-Pure Rust, single binary. Available in three tiers to match different deployment needs.
+Pure Rust, single binary. Available in four tiers to match different deployment needs.
 
 ## Quick Start
 
