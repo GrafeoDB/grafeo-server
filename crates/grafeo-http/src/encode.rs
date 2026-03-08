@@ -51,6 +51,14 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
 
 /// Converts an engine `QueryResult` to an HTTP `QueryResponse` with JSON values.
 pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
+    let gql_status = {
+        let code = result.gql_status.as_str();
+        if code == "00000" {
+            None
+        } else {
+            Some(code.to_owned())
+        }
+    };
     QueryResponse {
         columns: result.columns.clone(),
         rows: result
@@ -60,6 +68,7 @@ pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
             .collect(),
         execution_time_ms: result.execution_time_ms,
         rows_scanned: result.rows_scanned,
+        gql_status,
     }
 }
 
@@ -184,6 +193,14 @@ impl Stream for StreamingQueryBody {
                     suffix.push_str(r#","rows_scanned":"#);
                     let v = serde_json::json!(scanned);
                     suffix.push_str(&v.to_string());
+                }
+                {
+                    let code = this.result.gql_status.as_str();
+                    if code != "00000" {
+                        suffix.push_str(r#","gql_status":""#);
+                        suffix.push_str(code);
+                        suffix.push('"');
+                    }
                 }
                 suffix.push('}');
 
