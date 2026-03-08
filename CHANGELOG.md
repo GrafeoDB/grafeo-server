@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.6] - 2026-03-08
 
+### Added
+
+- **Cache stats endpoint**: `GET /admin/{db}/cache` returns query plan cache statistics (parsed/optimized sizes, hit/miss counts, hit rates, invalidation count)
+- **Cache clear endpoint**: `POST /admin/{db}/cache/clear` manually clears the query plan cache (forces re-parsing and re-optimization)
+- **GQLSTATUS in HTTP responses**: non-success GQLSTATUS codes (per ISO/IEC 39075) included in `QueryResponse` JSON as `gql_status` field; omitted for standard success (`"00000"`)
+
 ### Changed
 
 - Bumped grafeo-engine and grafeo-common to **0.5.16** (EXPLAIN/PROFILE statements, LOAD CSV, Cypher DDL, savepoints, correlated EXISTS subqueries, subpath variable binding, temporal map constructors, relationship WHERE clause, plan cache invalidation, SPARQL params fix)
