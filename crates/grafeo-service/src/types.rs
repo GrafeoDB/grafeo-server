@@ -311,6 +311,32 @@ pub enum IndexDef {
     Text { label: String, property: String },
 }
 
+/// Query plan cache statistics.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheStatsInfo {
+    /// Number of entries in the parsed query cache.
+    pub parsed_size: usize,
+    /// Number of entries in the optimized query cache.
+    pub optimized_size: usize,
+    /// Parsed cache hit count.
+    pub parsed_hits: u64,
+    /// Parsed cache miss count.
+    pub parsed_misses: u64,
+    /// Optimized cache hit count.
+    pub optimized_hits: u64,
+    /// Optimized cache miss count.
+    pub optimized_misses: u64,
+    /// Number of cache invalidations (DDL-triggered clears).
+    pub invalidations: u64,
+    /// Parsed cache hit rate (0.0 to 1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parsed_hit_rate: Option<f64>,
+    /// Optimized cache hit rate (0.0 to 1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimized_hit_rate: Option<f64>,
+}
+
 // ============================================================================
 // Search types
 // ============================================================================

@@ -2,16 +2,18 @@
 # Grafeo Server — Multi-variant Docker build
 #
 # Build targets:
-#   docker build --target lite     -t grafeo-server:lite .
+#   docker build --target gwp      -t grafeo-server:gwp .
+#   docker build --target bolt     -t grafeo-server:bolt .
 #   docker build --target standard -t grafeo-server:standard .
 #   docker build --target full     -t grafeo-server:full .
 #
 # Default target (no --target) builds "standard".
 #
 # Tiers:
-#   lite     — GWP-only (gRPC), GQL + storage, no HTTP/UI
-#   standard — HTTP + Studio UI + all languages + storage (default)
-#   full     — HTTP + GWP + Studio + AI + auth + TLS + schemas
+#   gwp      — GWP (gRPC), GQL + storage, no HTTP/UI
+#   bolt     — Bolt v5, Cypher + storage, no HTTP/UI
+#   standard — HTTP + Studio UI + all languages + algos + storage (default)
+#   full     — HTTP + GWP + Bolt + Studio + AI + auth + TLS + schemas
 # =============================================================================
 
 # --- Stage: Build the web UI ---
@@ -30,10 +32,16 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates/ crates/
 COPY src/ src/
 
-# --- Build: lite (GWP-only, GQL + storage, no HTTP/UI) ---
-FROM rust-base AS build-lite
+# --- Build: gwp (GWP-only, GQL + storage, no HTTP/UI) ---
+FROM rust-base AS build-gwp
 RUN mkdir -p client/dist && \
-    cargo build --release --no-default-features --features "lite" && \
+    cargo build --release --no-default-features --features "gwp" && \
+    strip target/release/grafeo-server
+
+# --- Build: bolt (Bolt v5, Cypher + storage, no HTTP/UI) ---
+FROM rust-base AS build-bolt
+RUN mkdir -p client/dist && \
+    cargo build --release --no-default-features --features "bolt" && \
     strip target/release/grafeo-server
 
 # --- Build: standard (HTTP + Studio UI, all languages, default features) ---
@@ -42,14 +50,14 @@ COPY --from=ui-builder /ui/dist client/dist/
 RUN cargo build --release && \
     strip target/release/grafeo-server
 
-# --- Build: full (HTTP + GWP + Studio + AI + auth + TLS + schemas) ---
+# --- Build: full (HTTP + GWP + Bolt + Studio + AI + auth + TLS + schemas) ---
 FROM rust-base AS build-full
 COPY --from=ui-builder /ui/dist client/dist/
 RUN cargo build --release --features full && \
     strip target/release/grafeo-server
 
-# --- Runtime: lite (GWP-only, no HTTP healthcheck) ---
-FROM debian:bookworm-slim AS runtime-lite
+# --- Runtime: wire-protocol-only (no HTTP healthcheck) ---
+FROM debian:bookworm-slim AS runtime-wire
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 VOLUME /data
 EXPOSE 7687
@@ -66,7 +74,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 ENTRYPOINT ["grafeo-server"]
 CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 
-# --- Runtime: full (both ports) ---
+# --- Runtime: full (all ports) ---
 FROM debian:bookworm-slim AS runtime-full
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 VOLUME /data
@@ -76,9 +84,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 ENTRYPOINT ["grafeo-server"]
 CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
 
-# --- Final: lite ---
-FROM runtime-lite AS lite
-COPY --from=build-lite /build/target/release/grafeo-server /usr/local/bin/grafeo-server
+# --- Final: gwp ---
+FROM runtime-wire AS gwp
+COPY --from=build-gwp /build/target/release/grafeo-server /usr/local/bin/grafeo-server
+
+# --- Final: bolt ---
+FROM runtime-wire AS bolt
+COPY --from=build-bolt /build/target/release/grafeo-server /usr/local/bin/grafeo-server
 
 # --- Final: standard ---
 FROM runtime-http AS standard

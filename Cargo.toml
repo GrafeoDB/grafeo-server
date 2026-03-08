@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.10", default-features = false }
-grafeo-common = "0.5.10"
+grafeo-engine = { version = "0.5.16", default-features = false }
+grafeo-common = "0.5.16"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -90,8 +90,8 @@ default = ["http", "gwp", "studio", "all-languages", "storage", "algos"]
 
 # Transport layers
 http = ["dep:grafeo-http", "grafeo-service/openapi"]
-gwp = ["dep:grafeo-gwp"]
-bolt = ["dep:grafeo-boltr"]
+gwp = ["gql", "storage", "dep:grafeo-gwp"]
+bolt = ["cypher", "storage", "dep:grafeo-boltr"]
 studio = ["http", "dep:grafeo-studio"]
 
 # Server-specific features
@@ -131,9 +131,7 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 # Engine: data models (forwarded)
 rdf = ["grafeo-service/rdf"]
 
-# Tiers
-lite = ["gql", "storage", "gwp"]
-boltr = ["http", "bolt", "studio", "all-languages", "storage", "algos"]
+# Tiers (named build profiles)
 full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",

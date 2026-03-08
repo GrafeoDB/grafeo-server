@@ -162,6 +162,60 @@ impl AdminService {
         .map_err(|e| ServiceError::Internal(e.to_string()))?
     }
 
+    /// Get query plan cache statistics.
+    pub async fn cache_stats(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<types::CacheStatsInfo, ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        let stats = tokio::task::spawn_blocking(move || entry.db.query_cache().stats())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+        let parsed_hit_rate = if stats.parsed_hits + stats.parsed_misses > 0 {
+            Some(stats.parsed_hits as f64 / (stats.parsed_hits + stats.parsed_misses) as f64)
+        } else {
+            None
+        };
+        let optimized_hit_rate = if stats.optimized_hits + stats.optimized_misses > 0 {
+            Some(
+                stats.optimized_hits as f64
+                    / (stats.optimized_hits + stats.optimized_misses) as f64,
+            )
+        } else {
+            None
+        };
+
+        Ok(types::CacheStatsInfo {
+            parsed_size: stats.parsed_size,
+            optimized_size: stats.optimized_size,
+            parsed_hits: stats.parsed_hits,
+            parsed_misses: stats.parsed_misses,
+            optimized_hits: stats.optimized_hits,
+            optimized_misses: stats.optimized_misses,
+            invalidations: stats.invalidations,
+            parsed_hit_rate,
+            optimized_hit_rate,
+        })
+    }
+
+    /// Clear the query plan cache for a database.
+    pub async fn clear_cache(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<(), ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        tokio::task::spawn_blocking(move || entry.db.clear_plan_cache())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
     /// Drop an index from a database.
     pub async fn drop_index(
         databases: &DatabaseManager,
@@ -256,6 +310,49 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cache_stats_empty_db() {
+        let state = ServiceState::new_in_memory(300);
+        let stats = AdminService::cache_stats(state.databases(), "default")
+            .await
+            .unwrap();
+        // Fresh DB: no queries executed, all counters at zero
+        assert_eq!(stats.parsed_hits, 0);
+        assert_eq!(stats.parsed_misses, 0);
+        assert_eq!(stats.optimized_hits, 0);
+        assert_eq!(stats.optimized_misses, 0);
+        // No queries means hit rate is undefined (None)
+        assert!(stats.parsed_hit_rate.is_none());
+        assert!(stats.optimized_hit_rate.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cache_stats_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::cache_stats(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache() {
+        let state = ServiceState::new_in_memory(300);
+        // Should succeed even on a fresh DB
+        AdminService::clear_cache(state.databases(), "default")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::clear_cache(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
     #[tokio::test]

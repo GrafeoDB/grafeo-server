@@ -114,7 +114,7 @@ impl QueryService {
         let session_id = tokio::task::spawn_blocking(move || {
             let mut engine_session = entry.db.session();
             engine_session
-                .begin_tx()
+                .begin_transaction()
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;
             Ok::<_, ServiceError>(engine_session)
         })
@@ -200,7 +200,7 @@ impl QueryService {
         let results = run_with_timeout(timeout, move || {
             let mut session = entry.db.session();
             session
-                .begin_tx()
+                .begin_transaction()
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
             let mut results: Vec<QueryResult> = Vec::with_capacity(queries.len());

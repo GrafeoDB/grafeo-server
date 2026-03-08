@@ -29,6 +29,10 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Bytes(b) => serde_json::json!(b.as_ref()),
         Value::Timestamp(t) => serde_json::Value::String(format!("{t:?}")),
+        Value::Date(d) => serde_json::json!({ "$date": d.to_string() }),
+        Value::Time(t) => serde_json::json!({ "$time": t.to_string() }),
+        Value::Duration(d) => serde_json::json!({ "$duration": d.to_string() }),
+        Value::ZonedDatetime(zdt) => serde_json::json!({ "$datetime": zdt.to_string() }),
         Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
@@ -38,11 +42,23 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
             serde_json::Value::Object(obj)
         }
         Value::Vector(v) => serde_json::json!(v.as_ref()),
+        Value::Path { nodes, edges } => serde_json::json!({
+            "nodes": nodes.iter().map(value_to_json).collect::<Vec<_>>(),
+            "edges": edges.iter().map(value_to_json).collect::<Vec<_>>(),
+        }),
     }
 }
 
 /// Converts an engine `QueryResult` to an HTTP `QueryResponse` with JSON values.
 pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
+    let gql_status = {
+        let code = result.gql_status.as_str();
+        if code == "00000" {
+            None
+        } else {
+            Some(code.to_owned())
+        }
+    };
     QueryResponse {
         columns: result.columns.clone(),
         rows: result
@@ -52,6 +68,7 @@ pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
             .collect(),
         execution_time_ms: result.execution_time_ms,
         rows_scanned: result.rows_scanned,
+        gql_status,
     }
 }
 
@@ -177,6 +194,14 @@ impl Stream for StreamingQueryBody {
                     let v = serde_json::json!(scanned);
                     suffix.push_str(&v.to_string());
                 }
+                {
+                    let code = this.result.gql_status.as_str();
+                    if code != "00000" {
+                        suffix.push_str(r#","gql_status":""#);
+                        suffix.push_str(code);
+                        suffix.push('"');
+                    }
+                }
                 suffix.push('}');
 
                 this.phase = JsonStreamPhase::Done;
@@ -238,6 +263,58 @@ mod tests {
     }
 
     #[test]
+    fn value_to_json_temporal_types() {
+        // Date wraps in {"$date": "..."}
+        let date = grafeo_common::types::Date::from_ymd(2024, 6, 15).unwrap();
+        let json = value_to_json(&Value::Date(date));
+        assert_eq!(json["$date"].as_str().unwrap(), "2024-06-15");
+
+        // Time wraps in {"$time": "..."}
+        let time = grafeo_common::types::Time::from_hms(14, 30, 0).unwrap();
+        let json = value_to_json(&Value::Time(time));
+        assert!(json["$time"].is_string());
+
+        // Duration wraps in {"$duration": "..."}
+        let dur = grafeo_common::types::Duration::new(1, 2, 0);
+        let json = value_to_json(&Value::Duration(dur));
+        assert!(json["$duration"].is_string());
+
+        // ZonedDatetime wraps in {"$datetime": "..."}
+        let zdt = grafeo_common::types::ZonedDatetime::parse("2024-06-15T10:30:00+05:30").unwrap();
+        let json = value_to_json(&Value::ZonedDatetime(zdt));
+        assert_eq!(
+            json["$datetime"].as_str().unwrap(),
+            "2024-06-15T10:30:00+05:30"
+        );
+    }
+
+    #[test]
+    fn value_to_json_path() {
+        let path = Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(2)].into(),
+            edges: vec![Value::Int64(3)].into(),
+        };
+        let json = value_to_json(&path);
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn query_response_includes_gql_status_when_non_success() {
+        let result = QueryResult {
+            columns: vec!["x".to_string()],
+            column_types: vec![grafeo_common::types::LogicalType::Int64],
+            rows: vec![],
+            execution_time_ms: None,
+            rows_scanned: None,
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::from_str("02000").unwrap(),
+        };
+        let resp = query_result_to_response(&result);
+        assert_eq!(resp.gql_status.as_deref(), Some("02000"));
+    }
+
+    #[test]
     fn value_to_json_vector() {
         let vec = Value::Vector(vec![1.0f32, 2.0, 3.0].into());
         let json = value_to_json(&vec);
@@ -253,6 +330,8 @@ mod tests {
             rows: vec![vec![Value::String("Alice".into())]],
             execution_time_ms: Some(1.5),
             rows_scanned: Some(10),
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         };
         let resp = query_result_to_response(&result);
         assert_eq!(resp.columns, vec!["name"]);
@@ -281,6 +360,8 @@ mod tests {
                 .collect(),
             execution_time_ms: Some(1.0),
             rows_scanned: Some(num_rows as u64),
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         }
     }
 
@@ -307,6 +388,16 @@ mod tests {
         let expected = serde_json::to_string(&query_result_to_response(&result)).unwrap();
         let actual = collect_stream(StreamingQueryBody::new(result)).await;
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn streaming_gql_status_included_when_non_success() {
+        let mut result = make_result(2);
+        result.gql_status = grafeo_common::utils::GqlStatus::from_str("02000").unwrap();
+        let expected = serde_json::to_string(&query_result_to_response(&result)).unwrap();
+        let actual = collect_stream(StreamingQueryBody::new(result)).await;
+        assert_eq!(actual, expected);
+        assert!(actual.contains("\"gql_status\":\"02000\""));
     }
 
     #[tokio::test]

@@ -1,7 +1,8 @@
 [![CI](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo-server/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo-server/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo-server)
 [![Docker standard](https://img.shields.io/docker/v/grafeo/grafeo-server/latest?label=standard&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
-[![Docker lite](https://img.shields.io/docker/v/grafeo/grafeo-server/lite?label=lite&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
+[![Docker gwp](https://img.shields.io/docker/v/grafeo/grafeo-server/gwp?label=gwp&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
+[![Docker bolt](https://img.shields.io/docker/v/grafeo/grafeo-server/bolt?label=bolt&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
 [![Docker full](https://img.shields.io/docker/v/grafeo/grafeo-server/full?label=full&logo=docker)](https://hub.docker.com/r/grafeo/grafeo-server)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -23,23 +24,27 @@ docker run -p 7474:7474 grafeo/grafeo-server
 docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /data
 ```
 
-Three image tiers are available:
+Four image tiers are available:
 
-| Tier         | Tag                    | Transport        | Languages | AI/Search   | Web UI | Binary  |
-| ------------ | ---------------------- | ---------------- | --------- | ----------- | ------ | ------- |
-| **lite**     | `grafeo-server:lite`   | GWP (gRPC :7687) | GQL       | No          | No     | ~7 MB   |
-| **standard** | `grafeo-server:latest` | HTTP (:7474)     | All 6     | No          | Studio | ~21 MB  |
-| **full**     | `grafeo-server:full`   | HTTP + GWP       | All 6     | Yes + embed | Studio | ~25 MB  |
+| Tier         | Tag                    | Transport         | Languages | AI/Search   | Web UI | Binary  |
+| ------------ | ---------------------- | ----------------- | --------- | ----------- | ------ | ------- |
+| **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7687)  | GQL       | No          | No     | ~7 MB   |
+| **bolt**     | `grafeo-server:bolt`   | Bolt v5 (:7687)   | Cypher    | No          | No     | ~8 MB   |
+| **standard** | `grafeo-server:latest` | HTTP (:7474)      | All 6     | No          | Studio | ~21 MB  |
+| **full**     | `grafeo-server:full`   | HTTP + GWP + Bolt | All 6     | Yes + embed | Studio | ~25 MB  |
 
 ```bash
-# Lite - GWP-only, GQL + storage, no HTTP/UI
-docker run -p 7687:7687 grafeo/grafeo-server:lite --data-dir /data
+# GWP - gRPC wire protocol, GQL only
+docker run -p 7687:7687 grafeo/grafeo-server:gwp --data-dir /data
 
-# Full - everything including GWP, AI, auth, TLS, schemas
+# Bolt - Neo4j-compatible wire protocol, Cypher
+docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
+
+# Full - everything including AI, auth, TLS, schemas
 docker run -p 7474:7474 -p 7687:7687 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.4`, `grafeo-server:0.4.4-lite`, `grafeo-server:0.4.4-full`.
+Versioned tags: `grafeo-server:0.4.5`, `grafeo-server:0.4.5-gwp`, `grafeo-server:0.4.5-bolt`, `grafeo-server:0.4.5-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -346,80 +351,104 @@ Grafeo Server uses Cargo feature flags to control which capabilities are compile
 
 | Tier | Cargo Command | Transport | Contents |
 |------|--------------|-----------|--------------|
-| **Lite** | `--no-default-features --features lite` | GWP only | GQL + storage, ~7 MB binary |
-| **Standard** | _(default)_ | HTTP | All languages + Studio UI, ~21 MB binary |
-| **Full** | `--features full` | HTTP + GWP | Everything including AI, auth, TLS, ~25 MB binary |
+| **GWP** | `--no-default-features --features gwp` | GWP (gRPC) | GQL + storage, ~7 MB |
+| **Bolt** | `--no-default-features --features bolt` | Bolt v5 | Cypher + storage, ~8 MB |
+| **Standard** | _(default)_ | HTTP | All languages, Studio UI, algos, ~21 MB |
+| **Full** | `--features full` | HTTP + GWP + Bolt | Everything including AI, auth, TLS, ~25 MB |
 
 ```bash
 # Standard (default)
 cargo build --release
 
-# Lite - GWP-only, GQL + storage
-cargo build --release --no-default-features --features lite
+# GWP - gRPC wire protocol, GQL only
+cargo build --release --no-default-features --features gwp
+
+# Bolt - Neo4j-compatible, Cypher only
+cargo build --release --no-default-features --features bolt
 
 # Full - everything
 cargo build --release --features full
-
-# Custom - HTTP API without Studio UI
-cargo build --release --no-default-features --features "http,all-languages,storage"
-
-# Custom - add auth to standard
-cargo build --release --features auth
 ```
 
-### Transport Features
+### Build Your Own
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `http` | REST API via axum (Swagger UI, OpenAPI) | Yes |
-| `studio` | Embedded web UI via rust-embed (requires `http`) | Yes |
-| `gwp` | GQL Wire Protocol (gRPC) on port 7687 | No |
+Start with `--no-default-features` and pick what you need. The matrix below shows what works with what.
 
-### Server Features
+**Transport** (pick one or more):
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `owl-schema` | OWL/Turtle schema parsing for database creation | No |
-| `rdfs-schema` | RDFS schema support (implies `owl-schema`) | No |
-| `json-schema` | JSON Schema validation for database creation | No |
-| `auth` | Bearer token and HTTP Basic authentication | No |
-| `tls` | Built-in HTTPS via rustls | No |
+| Feature | Description | Port |
+|---------|-------------|------|
+| `http` | REST API via axum (Swagger, OpenAPI, WebSocket) | 7474 |
+| `gwp` | GQL Wire Protocol (gRPC) | 7687 |
+| `bolt` | Bolt v5 wire protocol (Neo4j compatible) | 7687 |
 
-### Engine: Algorithms
+**Query languages** (pick individually or use `all-languages`):
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `algos` | 22+ graph algorithms via CALL procedures | Yes |
+| Feature | Description | Notes |
+|---------|-------------|-------|
+| `gql` | GQL (ISO/IEC 39075) | Works with all transports |
+| `cypher` | Cypher (openCypher 9.0) | Works with all transports |
+| `sparql` | SPARQL (W3C 1.1) | Implies `rdf` |
+| `gremlin` | Gremlin (Apache TinkerPop) | Works with all transports |
+| `graphql` | GraphQL | Works with all transports |
+| `sql-pgq` | SQL/PGQ (SQL:2023 GRAPH_TABLE) | Works with all transports |
 
-### Engine: Query Languages
+**Engine capabilities**:
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `gql` | GQL (ISO/IEC 39075) | Yes |
-| `cypher` | Cypher (openCypher 9.0) | Yes |
-| `sparql` | SPARQL (W3C 1.1) - implies `rdf` | Yes |
-| `gremlin` | Gremlin (Apache TinkerPop) | Yes |
-| `graphql` | GraphQL | Yes |
-| `sql-pgq` | SQL/PGQ (SQL:2023 GRAPH_TABLE) | Yes |
-| `all-languages` | All of the above | Yes |
+| Feature | Description | Requires |
+|---------|-------------|----------|
+| `storage` | parallel + wal + spill + mmap | Nothing (recommended for all builds) |
+| `algos` | 22+ graph algorithms via CALL procedures | Nothing |
+| `ai` | vector-index + text-index + hybrid-search + cdc | Nothing |
+| `rdf` | RDF triple store | Enabled automatically by `sparql` |
+| `embed` | In-process ONNX embedding generation (~17 MB) | Nothing |
 
-### Engine: Storage & AI
+**Server extras** (require `http`):
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `storage` | parallel + wal + spill + mmap | Yes |
-| `ai` | vector-index + text-index + hybrid-search + cdc | No |
-| `rdf` | RDF graph model support | No |
-| `embed` | ONNX embedding generation | No |
+| Feature | Description | Requires |
+|---------|-------------|----------|
+| `studio` | Embedded web UI | `http` |
+| `auth` | Bearer token + HTTP Basic auth | Any transport |
+| `tls` | Built-in HTTPS/gRPCS via rustls | Any transport |
+| `owl-schema` | OWL/Turtle schema loading | Nothing |
+| `rdfs-schema` | RDFS schema support | `owl-schema` (implied) |
+| `json-schema` | JSON Schema validation | Nothing |
+
+**Compatibility notes**:
+- `studio` requires `http` (no standalone Studio)
+- `sparql` implies `rdf` (RDF store is always created)
+- `gwp` and `bolt` share port 7687 by default, use `--gwp-port` / `--bolt-port` to separate
+- `auth` and `tls` apply to whichever transports are enabled
+- All features compose freely otherwise
+
+**Examples**:
+
+```bash
+# HTTP API without Studio UI
+cargo build --release --no-default-features --features "http,all-languages,storage"
+
+# Standard + auth
+cargo build --release --features auth
+
+# GWP + Bolt (both wire protocols, no HTTP)
+cargo build --release --no-default-features --features "gwp,bolt,gql,cypher,storage"
+
+# Minimal AI server (HTTP + GQL + vector/text search)
+cargo build --release --no-default-features --features "http,gql,storage,ai"
+
+# Edge deployment (GWP + GQL, no algorithms)
+cargo build --release --no-default-features --features "gwp,gql,storage"
+```
 
 ### Docker Build Targets
 
-The Dockerfile supports three build targets matching these tiers:
+The Dockerfile supports four build targets matching the tiers:
 
 ```bash
-docker build --target lite     -t grafeo-server:lite .      # GWP-only, port 7687
-docker build --target standard -t grafeo-server:standard .  # HTTP + UI, port 7474 (default)
-docker build --target full     -t grafeo-server:full .      # Both ports
+docker build --target gwp      -t grafeo-server:gwp .       # GWP-only, port 7687
+docker build --target bolt     -t grafeo-server:bolt .       # Bolt-only, port 7687
+docker build --target standard -t grafeo-server:standard .   # HTTP + UI, port 7474 (default)
+docker build --target full     -t grafeo-server:full .       # All ports
 ```
 
 ### Feature Discovery

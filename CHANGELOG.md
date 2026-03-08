@@ -5,6 +5,29 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-03-08
+
+### Added
+
+- **Cache stats endpoint**: `GET /admin/{db}/cache` returns query plan cache statistics (parsed/optimized sizes, hit/miss counts, hit rates, invalidation count)
+- **Cache clear endpoint**: `POST /admin/{db}/cache/clear` manually clears the query plan cache (forces re-parsing and re-optimization)
+- **GQLSTATUS in HTTP responses**: non-success GQLSTATUS codes (per ISO/IEC 39075) included in `QueryResponse` JSON as `gql_status` field; omitted for standard success (`"00000"`)
+
+### Changed
+
+- Bumped grafeo-engine and grafeo-common to **0.5.16** (EXPLAIN/PROFILE statements, LOAD CSV, Cypher DDL, savepoints, correlated EXISTS subqueries, subpath variable binding, temporal map constructors, relationship WHERE clause, plan cache invalidation, SPARQL params fix)
+- **ZonedDatetime support**: new `Value::ZonedDatetime` variant encoded across all transports:
+  - HTTP: `{"$datetime": "2024-06-15T10:30:00+05:30"}`
+  - GWP: native `ZonedDateTime` with date, time, offset components
+  - Bolt: native `DateTime` with seconds, nanoseconds, tz_offset_seconds
+- **SPARQL regex support**: `sparql` feature now enables `grafeo-engine/regex` for SPARQL FILTER regex functions
+- Fixed duplicate `gwp`/`bolt` feature keys in workspace Cargo.toml (merged transport and tier definitions)
+
+### Internal
+
+- `Session::begin_tx()` renamed to `begin_transaction()` (engine API change)
+- `QueryResult` gains `gql_status` field (GQLSTATUS code per ISO/IEC 39075)
+
 ## [0.4.5] - 2026-02-28
 
 ### Added
@@ -332,7 +355,8 @@ Initial release.
 - **Pre-commit hooks** (prek): fmt, clippy, deny, typos
 - **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.2...v0.4.3

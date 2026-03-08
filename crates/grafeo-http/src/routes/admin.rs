@@ -127,6 +127,52 @@ pub async fn admin_create_index(
     Ok(Json(serde_json::json!({ "created": true })))
 }
 
+/// Get query plan cache statistics.
+///
+/// Returns hit/miss counts, cache sizes, and invalidation count.
+#[utoipa::path(
+    get,
+    path = "/admin/{db}/cache",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Cache statistics", body = types::CacheStatsInfo),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_cache_stats(
+    State(state): State<AppState>,
+    Path(db): Path<String>,
+) -> Result<Json<types::CacheStatsInfo>, ApiError> {
+    let stats = AdminService::cache_stats(state.databases(), &db).await?;
+    Ok(Json(stats))
+}
+
+/// Clear the query plan cache.
+///
+/// Forces re-parsing and re-optimization of all queries.
+#[utoipa::path(
+    post,
+    path = "/admin/{db}/cache/clear",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Cache cleared"),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_clear_cache(
+    State(state): State<AppState>,
+    Path(db): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    AdminService::clear_cache(state.databases(), &db).await?;
+    Ok(Json(serde_json::json!({ "cleared": true })))
+}
+
 /// Drop an index from a database.
 ///
 /// Returns whether the index existed and was removed.

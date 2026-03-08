@@ -239,7 +239,7 @@ impl GqlBackend for GrafeoBackend {
 
         tokio::task::spawn_blocking(move || {
             let mut s = session_arc.lock();
-            s.engine_session.begin_tx()
+            s.engine_session.begin_transaction()
         })
         .await
         .map_err(GqlError::backend)?
@@ -829,6 +829,8 @@ mod tests {
                 .collect(),
             execution_time_ms: Some(1.0),
             rows_scanned: Some(num_rows as u64),
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         }
     }
 

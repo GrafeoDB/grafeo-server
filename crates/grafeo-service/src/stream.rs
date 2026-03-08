@@ -82,6 +82,8 @@ mod tests {
                 .collect(),
             execution_time_ms: Some(1.0),
             rows_scanned: Some(num_rows as u64),
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         }
     }
 
