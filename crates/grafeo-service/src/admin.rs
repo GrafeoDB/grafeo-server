@@ -313,6 +313,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cache_stats_empty_db() {
+        let state = ServiceState::new_in_memory(300);
+        let stats = AdminService::cache_stats(state.databases(), "default")
+            .await
+            .unwrap();
+        // Fresh DB: no queries executed, all counters at zero
+        assert_eq!(stats.parsed_hits, 0);
+        assert_eq!(stats.parsed_misses, 0);
+        assert_eq!(stats.optimized_hits, 0);
+        assert_eq!(stats.optimized_misses, 0);
+        // No queries means hit rate is undefined (None)
+        assert!(stats.parsed_hit_rate.is_none());
+        assert!(stats.optimized_hit_rate.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cache_stats_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::cache_stats(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache() {
+        let state = ServiceState::new_in_memory(300);
+        // Should succeed even on a fresh DB
+        AdminService::clear_cache(state.databases(), "default")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::clear_cache(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
     async fn test_drop_property_index() {
         let state = ServiceState::new_in_memory(300);
         AdminService::create_index(

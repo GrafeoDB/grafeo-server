@@ -271,6 +271,112 @@ mod tests {
     }
 
     #[test]
+    fn temporal_round_trip_date() {
+        let date = grafeo_common::types::Date::from_ymd(2024, 6, 15).unwrap();
+        let gwp = grafeo_to_gwp(&Value::Date(date));
+        let GwpValue::Date(d) = &gwp else {
+            panic!("expected GwpValue::Date");
+        };
+        assert_eq!((d.year, d.month, d.day), (2024, 6, 15));
+
+        // Round-trip back to grafeo
+        let grafeo = gwp_to_grafeo(&gwp).unwrap();
+        assert_eq!(grafeo, Value::Date(date));
+    }
+
+    #[test]
+    fn temporal_round_trip_local_time() {
+        let time = grafeo_common::types::Time::from_hms_nano(14, 30, 45, 123_000_000).unwrap();
+        let gwp = grafeo_to_gwp(&Value::Time(time));
+        let GwpValue::LocalTime(t) = &gwp else {
+            panic!("expected GwpValue::LocalTime, got {gwp:?}");
+        };
+        assert_eq!((t.hour, t.minute, t.second, t.nanosecond), (14, 30, 45, 123_000_000));
+
+        let grafeo = gwp_to_grafeo(&gwp).unwrap();
+        if let Value::Time(t) = grafeo {
+            assert_eq!((t.hour(), t.minute(), t.second()), (14, 30, 45));
+            assert!(t.offset_seconds().is_none());
+        } else {
+            panic!("expected Value::Time");
+        }
+    }
+
+    #[test]
+    fn temporal_round_trip_zoned_time() {
+        let time = grafeo_common::types::Time::from_hms(10, 0, 0)
+            .unwrap()
+            .with_offset(3600); // +01:00
+        let gwp = grafeo_to_gwp(&Value::Time(time));
+        let GwpValue::ZonedTime(zt) = &gwp else {
+            panic!("expected GwpValue::ZonedTime, got {gwp:?}");
+        };
+        assert_eq!(zt.offset_minutes, 60);
+
+        let grafeo = gwp_to_grafeo(&gwp).unwrap();
+        if let Value::Time(t) = grafeo {
+            assert_eq!(t.offset_seconds(), Some(3600));
+        } else {
+            panic!("expected Value::Time");
+        }
+    }
+
+    #[test]
+    fn temporal_duration_preserves_components() {
+        let dur = grafeo_common::types::Duration::new(2, 10, 500_000_000);
+        let gwp = grafeo_to_gwp(&Value::Duration(dur));
+        let GwpValue::Duration(d) = &gwp else {
+            panic!("expected GwpValue::Duration");
+        };
+        assert_eq!(d.months, 2);
+        // GWP packs days into nanoseconds: 10 * 86_400_000_000_000 + 500_000_000
+        let expected_nanos = 10 * 86_400_000_000_000i64 + 500_000_000;
+        assert_eq!(d.nanoseconds, expected_nanos);
+
+        // Round-trip: should reconstruct the same days and sub-day nanos
+        let grafeo = gwp_to_grafeo(&gwp).unwrap();
+        if let Value::Duration(rt) = grafeo {
+            assert_eq!(rt.months(), 2);
+            assert_eq!(rt.days(), 10);
+            assert_eq!(rt.nanos(), 500_000_000);
+        } else {
+            panic!("expected Value::Duration");
+        }
+    }
+
+    #[test]
+    fn zoned_datetime_encodes_correctly() {
+        let zdt = grafeo_common::types::ZonedDatetime::parse("2024-06-15T10:30:00+05:30").unwrap();
+        let gwp = grafeo_to_gwp(&Value::ZonedDatetime(zdt));
+        let GwpValue::ZonedDateTime(dt) = &gwp else {
+            panic!("expected GwpValue::ZonedDateTime");
+        };
+        assert_eq!((dt.date.year, dt.date.month, dt.date.day), (2024, 6, 15));
+        assert_eq!((dt.time.hour, dt.time.minute), (10, 30));
+        assert_eq!(dt.offset_minutes, 330); // 5h30m = 330 minutes
+    }
+
+    #[test]
+    fn path_encodes_as_record_with_nodes_and_edges() {
+        let path = Value::Path {
+            nodes: vec![Value::String("a".into()), Value::String("b".into())].into(),
+            edges: vec![Value::String("e1".into())].into(),
+        };
+        let gwp = grafeo_to_gwp(&path);
+        let GwpValue::Record(rec) = &gwp else {
+            panic!("expected GwpValue::Record for path");
+        };
+        assert_eq!(rec.fields.len(), 2);
+        assert_eq!(rec.fields[0].name, "nodes");
+        assert_eq!(rec.fields[1].name, "edges");
+        if let GwpValue::List(nodes) = &rec.fields[0].value {
+            assert_eq!(nodes.len(), 2);
+        } else {
+            panic!("expected List for nodes");
+        }
+    }
+
+    #[test]
     fn gwp_to_grafeo_list_of_records() {
         // This is the UNWIND $edges pattern: list of dicts
         let edges = GwpValue::List(vec![
