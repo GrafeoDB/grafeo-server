@@ -204,7 +204,7 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         tokio::task::spawn_blocking(move || {
             let mut s = session_arc.lock();
-            s.engine_session.begin_tx()
+            s.engine_session.begin_transaction()
         })
         .await
         .map_err(BoltError::backend)?

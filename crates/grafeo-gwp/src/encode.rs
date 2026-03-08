@@ -39,6 +39,24 @@ pub fn grafeo_to_gwp(value: &grafeo_common::Value) -> GwpValue {
             months: d.months(),
             nanoseconds: d.days() * 86_400_000_000_000 + d.nanos(),
         }),
+        Value::ZonedDatetime(zdt) => {
+            let local_date = zdt.to_local_date();
+            let local_time = zdt.to_local_time();
+            GwpValue::ZonedDateTime(gwp::types::ZonedDateTime {
+                date: gwp::types::Date {
+                    year: local_date.year(),
+                    month: local_date.month(),
+                    day: local_date.day(),
+                },
+                time: gwp::types::LocalTime {
+                    hour: local_time.hour(),
+                    minute: local_time.minute(),
+                    second: local_time.second(),
+                    nanosecond: local_time.nanosecond(),
+                },
+                offset_minutes: zdt.offset_seconds() / 60,
+            })
+        }
         Value::List(items) => GwpValue::List(items.iter().map(grafeo_to_gwp).collect()),
         Value::Map(map) => {
             let fields: Vec<gwp::types::Field> = map
@@ -205,17 +223,17 @@ mod tests {
     }
 
     #[test]
-    fn gwp_to_grafeo_unsupported_returns_none() {
-        // Temporal types are not supported — should be filtered out
+    fn gwp_to_grafeo_duration_supported() {
         let params = HashMap::from([(
-            "time".to_string(),
+            "dur".to_string(),
             GwpValue::Duration(gwp::types::Duration {
                 months: 0,
                 nanoseconds: 86_400_000_000_000,
             }),
         )]);
         let converted = convert_params(&params);
-        assert!(converted.is_empty());
+        assert_eq!(converted.len(), 1);
+        assert!(matches!(converted.get("dur"), Some(Value::Duration(_))));
     }
 
     #[test]

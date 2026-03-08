@@ -32,6 +32,7 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
         Value::Date(d) => serde_json::json!({ "$date": d.to_string() }),
         Value::Time(t) => serde_json::json!({ "$time": t.to_string() }),
         Value::Duration(d) => serde_json::json!({ "$duration": d.to_string() }),
+        Value::ZonedDatetime(zdt) => serde_json::json!({ "$datetime": zdt.to_string() }),
         Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
@@ -261,6 +262,7 @@ mod tests {
             execution_time_ms: Some(1.5),
             rows_scanned: Some(10),
             status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         };
         let resp = query_result_to_response(&result);
         assert_eq!(resp.columns, vec!["name"]);
@@ -290,6 +292,7 @@ mod tests {
             execution_time_ms: Some(1.0),
             rows_scanned: Some(num_rows as u64),
             status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         }
     }
 

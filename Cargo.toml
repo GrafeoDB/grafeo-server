@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.13", default-features = false }
-grafeo-common = "0.5.13"
+grafeo-engine = { version = "0.5.16", default-features = false }
+grafeo-common = "0.5.16"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -90,8 +90,8 @@ default = ["http", "gwp", "studio", "all-languages", "storage", "algos"]
 
 # Transport layers
 http = ["dep:grafeo-http", "grafeo-service/openapi"]
-gwp = ["dep:grafeo-gwp"]
-bolt = ["dep:grafeo-boltr"]
+gwp = ["gql", "storage", "dep:grafeo-gwp"]
+bolt = ["cypher", "storage", "dep:grafeo-boltr"]
 studio = ["http", "dep:grafeo-studio"]
 
 # Server-specific features
@@ -132,8 +132,6 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 rdf = ["grafeo-service/rdf"]
 
 # Tiers (named build profiles)
-gwp = ["gql", "storage", "dep:grafeo-gwp"]
-bolt = ["cypher", "storage", "dep:grafeo-boltr"]
 full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
@@ -178,7 +176,7 @@ axum = { version = "0.8" }
 [lints]
 workspace = true
 
-# Temporary: use local engine source until 0.5.13 is published on crates.io
+# Temporary: use local engine source until 0.5.16 is published on crates.io
 [patch.crates-io]
 grafeo-engine = { path = "../grafeo/crates/grafeo-engine" }
 grafeo-common = { path = "../grafeo/crates/grafeo-common" }

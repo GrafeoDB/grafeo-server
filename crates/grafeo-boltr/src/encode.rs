@@ -49,6 +49,19 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
         Value::Vector(v) => {
             BoltValue::List(v.iter().map(|f| BoltValue::Float(f64::from(*f))).collect())
         }
+        Value::ZonedDatetime(zdt) => {
+            let local_date = zdt.to_local_date();
+            let local_time = zdt.to_local_time();
+            let epoch_days = i64::from(local_date.as_days());
+            let nanos_of_day = local_time.as_nanos() as i64;
+            let epoch_seconds = epoch_days * 86400 + nanos_of_day / 1_000_000_000;
+            let nanoseconds = nanos_of_day % 1_000_000_000;
+            BoltValue::DateTime(boltr::types::BoltDateTime {
+                seconds: epoch_seconds,
+                nanoseconds,
+                tz_offset_seconds: i64::from(zdt.offset_seconds()),
+            })
+        }
         Value::Path { nodes, edges } => {
             let dict: BoltDict = vec![
                 (
