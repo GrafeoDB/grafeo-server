@@ -42,14 +42,13 @@ tokio = { workspace = true }
 # TLS (optional)
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
-rustls-pemfile = { version = "2", optional = true }
 hyper = { version = "1", features = ["http1", "http2", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
 
 [features]
 default = []
 auth = ["grafeo-service/auth"]
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:hyper", "dep:hyper-util"]
 
 [lints]
 workspace = true

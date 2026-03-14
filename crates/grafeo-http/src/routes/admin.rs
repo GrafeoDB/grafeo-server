@@ -173,6 +173,30 @@ pub async fn admin_clear_cache(
     Ok(Json(serde_json::json!({ "cleared": true })))
 }
 
+/// Get hierarchical memory usage breakdown.
+///
+/// Returns a detailed breakdown of memory usage across store, indexes,
+/// MVCC, caches, string pools, and buffer manager.
+#[utoipa::path(
+    get,
+    path = "/admin/{db}/memory",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Memory usage breakdown"),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_memory_usage(
+    State(state): State<AppState>,
+    Path(db): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let usage = AdminService::memory_usage(state.databases(), &db).await?;
+    Ok(Json(usage))
+}
+
 /// Drop an index from a database.
 ///
 /// Returns whether the index existed and was removed.

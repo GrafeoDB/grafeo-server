@@ -2,8 +2,6 @@
 //!
 //! Enabled only when the `tls` Cargo feature is active.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,7 +10,8 @@ use axum::extract::ConnectInfo;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, private_key};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -21,21 +20,16 @@ pub fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<ServerConfi
     // Install ring as the default crypto provider (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cert_file =
-        File::open(cert_path).map_err(|e| format!("cannot open TLS cert '{cert_path}': {e}"))?;
-    let key_file =
-        File::open(key_path).map_err(|e| format!("cannot open TLS key '{key_path}': {e}"))?;
-
-    let certs: Vec<_> = certs(&mut BufReader::new(cert_file))
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| format!("cannot open TLS cert '{cert_path}': {e}"))?
         .collect::<Result<_, _>>()
         .map_err(|e| format!("invalid certificate: {e}"))?;
     if certs.is_empty() {
         return Err("no certificates found in cert file".into());
     }
 
-    let key = private_key(&mut BufReader::new(key_file))
-        .map_err(|e| format!("invalid private key: {e}"))?
-        .ok_or("no private key found in key file")?;
+    let key = PrivateKeyDer::from_pem_file(key_path)
+        .map_err(|e| format!("cannot read TLS key '{key_path}': {e}"))?;
 
     ServerConfig::builder()
         .with_no_client_auth()

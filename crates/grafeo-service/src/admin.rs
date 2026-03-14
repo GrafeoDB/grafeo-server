@@ -216,6 +216,71 @@ impl AdminService {
             .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
+    /// Get hierarchical memory usage breakdown for a database.
+    pub async fn memory_usage(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<serde_json::Value, ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        let usage = tokio::task::spawn_blocking(move || entry.db.memory_usage())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+        serde_json::to_value(&usage).map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// List named graphs within a database.
+    pub async fn list_graphs(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<Vec<String>, ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        tokio::task::spawn_blocking(move || entry.db.list_graphs())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Create a named graph within a database.
+    ///
+    /// Returns true if the graph was created, false if it already existed.
+    pub async fn create_graph(
+        databases: &DatabaseManager,
+        db_name: &str,
+        graph_name: String,
+    ) -> Result<bool, ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        tokio::task::spawn_blocking(move || entry.db.create_graph(&graph_name))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Drop a named graph within a database.
+    ///
+    /// Returns true if the graph existed and was dropped, false otherwise.
+    pub async fn drop_graph(
+        databases: &DatabaseManager,
+        db_name: &str,
+        graph_name: String,
+    ) -> Result<bool, ServiceError> {
+        let entry = databases
+            .get(db_name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+
+        tokio::task::spawn_blocking(move || entry.db.drop_graph(&graph_name))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
     /// Drop an index from a database.
     pub async fn drop_index(
         databases: &DatabaseManager,
@@ -387,5 +452,80 @@ mod tests {
         .await
         .unwrap();
         assert!(!existed);
+    }
+
+    #[tokio::test]
+    async fn test_memory_usage_default_db() {
+        let state = ServiceState::new_in_memory(300);
+        let usage = AdminService::memory_usage(state.databases(), "default")
+            .await
+            .unwrap();
+        assert!(usage["total_bytes"].is_u64());
+        assert!(usage["store"].is_object());
+        assert!(usage["indexes"].is_object());
+        assert!(usage["mvcc"].is_object());
+        assert!(usage["caches"].is_object());
+        assert!(usage["string_pool"].is_object());
+        assert!(usage["buffer_manager"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_memory_usage_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::memory_usage(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_list_graphs_empty() {
+        let state = ServiceState::new_in_memory(300);
+        let graphs = AdminService::list_graphs(state.databases(), "default")
+            .await
+            .unwrap();
+        assert!(graphs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_and_drop_graph() {
+        let state = ServiceState::new_in_memory(300);
+        let created =
+            AdminService::create_graph(state.databases(), "default", "analytics".to_owned())
+                .await
+                .unwrap();
+        assert!(created);
+
+        let graphs = AdminService::list_graphs(state.databases(), "default")
+            .await
+            .unwrap();
+        assert_eq!(graphs, vec!["analytics"]);
+
+        let created_again =
+            AdminService::create_graph(state.databases(), "default", "analytics".to_owned())
+                .await
+                .unwrap();
+        assert!(!created_again);
+
+        let dropped =
+            AdminService::drop_graph(state.databases(), "default", "analytics".to_owned())
+                .await
+                .unwrap();
+        assert!(dropped);
+
+        let dropped_again =
+            AdminService::drop_graph(state.databases(), "default", "analytics".to_owned())
+                .await
+                .unwrap();
+        assert!(!dropped_again);
+    }
+
+    #[tokio::test]
+    async fn test_list_graphs_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::list_graphs(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
     }
 }

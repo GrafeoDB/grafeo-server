@@ -5,6 +5,14 @@
 db-path = "~/.cargo/advisory-db"
 unmaintained = "workspace"
 yanked = "warn"
+ignore = [
+    # paste is a compile-time proc-macro only (no runtime code). 1.0.15 is the
+    # latest version; fix must come from upstream (tokenizers, parquet).
+    "RUSTSEC-2024-0436",
+    # bincode 2.0.1 is unmaintained but deeply embedded in grafeo-engine and
+    # grafeo-common (serialization layer). Fix must come from upstream engine.
+    "RUSTSEC-2025-0141",
+]
 
 [licenses]
 version = 2

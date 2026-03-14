@@ -10,6 +10,8 @@ use crate::types::{
     DatabaseSummary, EdgeTypeInfo, LabelInfo, ListDatabasesResponse,
 };
 
+use grafeo_service::admin::AdminService;
+
 /// List all databases.
 ///
 /// Returns summary information for each database including node/edge counts.
@@ -219,4 +221,84 @@ pub async fn database_schema(
             "RDF schema not supported via this endpoint",
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Named graph endpoints (sub-graphs within a database)
+// ---------------------------------------------------------------------------
+
+/// List named graphs within a database.
+///
+/// Returns all named sub-graphs within the specified database.
+/// Named graphs are distinct from databases: they are sub-graphs
+/// within a single database instance.
+#[utoipa::path(
+    get,
+    path = "/db/{name}/graphs",
+    params(
+        ("name" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "List of named graphs", body = grafeo_service::types::GraphListResponse),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn list_graphs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<grafeo_service::types::GraphListResponse>, ApiError> {
+    let graphs = AdminService::list_graphs(state.databases(), &name).await?;
+    Ok(Json(grafeo_service::types::GraphListResponse { graphs }))
+}
+
+/// Create a named graph within a database.
+///
+/// Creates a new sub-graph within the specified database.
+/// Returns whether the graph was newly created (false if it already existed).
+#[utoipa::path(
+    post,
+    path = "/db/{name}/graphs",
+    params(
+        ("name" = String, Path, description = "Database name"),
+    ),
+    request_body = grafeo_service::types::CreateGraphRequest,
+    responses(
+        (status = 200, description = "Graph created"),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn create_graph(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<grafeo_service::types::CreateGraphRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let created = AdminService::create_graph(state.databases(), &name, req.name).await?;
+    Ok(Json(serde_json::json!({ "created": created })))
+}
+
+/// Drop a named graph from a database.
+///
+/// Removes a sub-graph from the specified database.
+/// Returns whether the graph existed and was removed.
+#[utoipa::path(
+    delete,
+    path = "/db/{name}/graphs/{graph}",
+    params(
+        ("name" = String, Path, description = "Database name"),
+        ("graph" = String, Path, description = "Graph name to drop"),
+    ),
+    responses(
+        (status = 200, description = "Graph drop result"),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn drop_graph(
+    State(state): State<AppState>,
+    Path((name, graph)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let dropped = AdminService::drop_graph(state.databases(), &name, graph).await?;
+    Ok(Json(serde_json::json!({ "dropped": dropped })))
 }

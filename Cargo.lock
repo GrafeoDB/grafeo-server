@@ -293,13 +293,13 @@ dependencies = [
 
 [[package]]
 name = "boltr"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7f7dbf96df0885f07338f2e4e56be9cb74b1442f6f539e1bf79e297bd54f6ac"
+checksum = "f26543694ef60712b1da09c347581fec86a27fe115f80f3fdf641a06fec559d8"
 dependencies = [
  "async-trait",
  "bytes",
- "rustls-pemfile",
+ "rustls-pki-types",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -983,6 +983,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1129,15 +1139,16 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.16"
+version = "0.5.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525a973590231a7cfa019f901f7c9e2996c58595d73b9b680fc4f8625a7ca7b8"
+checksum = "333cb74cd0b81bf9363188e32ba9cc329b9e65d42b129d238f3ed6080be1d7d3"
 dependencies = [
  "bincode",
  "byteorder",
  "bytes",
  "crc32fast",
  "crossbeam",
+ "fs2",
  "grafeo-common",
  "grafeo-core",
  "hashbrown 0.16.1",
@@ -1153,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1169,9 +1180,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.16"
+version = "0.5.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c088a015c73cdf7fd765bbefaf18a433da4fb4699f55bc139226e77bd12bf14c"
+checksum = "fa0b067dc74c08773d0471e23553c192756cbffa0b2d4de1951c99b5a44d854e"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1190,9 +1201,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.16"
+version = "0.5.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee46eb6214e571af3032f174fa705b451b01cd7212bb3a9ce453f2e30f392480"
+checksum = "92d66df305bbba5c406e89769332c7d50d2373b260fadcce0efcd730f2007d7f"
 dependencies = [
  "arcstr",
  "byteorder",
@@ -1217,9 +1228,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.16"
+version = "0.5.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a938bcd1f432403219cccd9c6d62d1da6548098a35e590aa9db7812b04c4cc7b"
+checksum = "f37c949e9b4c64fabe217cfa29d2a3ae1f54223d97b0f29eb0115047d6023fd4"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -1247,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1263,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1274,7 +1285,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1291,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1316,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1339,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1445,12 +1455,6 @@ dependencies = [
  "ureq",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "hmac-sha256"
-version = "1.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
 name = "http"
@@ -1862,6 +1866,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1908,12 +1922,6 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
-
-[[package]]
-name = "lzma-rust2"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1670343e58806300d87950e3401e820b519b9384281bbabfb15e3636689ffd69"
 
 [[package]]
 name = "macro_rules_attribute"
@@ -2327,11 +2335,11 @@ version = "2.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
 dependencies = [
+ "libloading",
  "ndarray",
  "ort-sys",
  "smallvec",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -2339,11 +2347,6 @@ name = "ort-sys"
 version = "2.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
-dependencies = [
- "hmac-sha256",
- "lzma-rust2",
- "ureq",
-]
 
 [[package]]
 name = "outref"
@@ -2612,9 +2615,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.13"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31"
+checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3035,15 +3038,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

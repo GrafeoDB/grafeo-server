@@ -42,7 +42,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.4.6",
+        version = "0.4.7",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -65,6 +65,9 @@ pub use state::AppState;
         routes::database::database_info,
         routes::database::database_stats,
         routes::database::database_schema,
+        routes::database::list_graphs,
+        routes::database::create_graph,
+        routes::database::drop_graph,
         routes::admin::admin_stats,
         routes::admin::admin_wal_status,
         routes::admin::admin_wal_checkpoint,
@@ -73,6 +76,7 @@ pub use state::AppState;
         routes::admin::admin_drop_index,
         routes::admin::admin_cache_stats,
         routes::admin::admin_clear_cache,
+        routes::admin::admin_memory_usage,
         routes::search::vector_search,
         routes::search::text_search,
         routes::search::hybrid_search,
@@ -93,6 +97,8 @@ pub use state::AppState;
             grafeo_service::types::CacheStatsInfo,
             grafeo_service::types::VectorSearchReq, grafeo_service::types::TextSearchReq,
             grafeo_service::types::HybridSearchReq, grafeo_service::types::SearchHit,
+            grafeo_service::types::CreateGraphRequest,
+            grafeo_service::types::GraphListResponse,
             SearchResponse,
         )
     ),
@@ -143,6 +149,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/db/{name}/stats", get(routes::database::database_stats))
         .route("/db/{name}/schema", get(routes::database::database_schema))
+        .route(
+            "/db/{name}/graphs",
+            get(routes::database::list_graphs).post(routes::database::create_graph),
+        )
+        .route(
+            "/db/{name}/graphs/{graph}",
+            delete(routes::database::drop_graph),
+        )
         // Admin
         .route("/admin/{db}/stats", get(routes::admin::admin_stats))
         .route("/admin/{db}/wal", get(routes::admin::admin_wal_status))
@@ -160,6 +174,7 @@ pub fn router(state: AppState) -> Router {
             "/admin/{db}/cache/clear",
             post(routes::admin::admin_clear_cache),
         )
+        .route("/admin/{db}/memory", get(routes::admin::admin_memory_usage))
         // Search
         .route("/search/vector", post(routes::search::vector_search))
         .route("/search/text", post(routes::search::text_search))
