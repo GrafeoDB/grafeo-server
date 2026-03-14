@@ -2601,6 +2601,9 @@ async fn openapi_includes_admin_and_search_paths() {
     assert!(paths.contains_key("/search/vector"));
     assert!(paths.contains_key("/search/text"));
     assert!(paths.contains_key("/search/hybrid"));
+    assert!(paths.contains_key("/admin/{db}/memory"));
+    assert!(paths.contains_key("/db/{name}/graphs"));
+    assert!(paths.contains_key("/db/{name}/graphs/{graph}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -3148,4 +3151,130 @@ async fn bolt_language_dispatch() {
     assert!(result.columns.contains(&"s".to_string()));
 
     session.close().await.unwrap();
+}
+
+// ===========================================================================
+// Memory usage endpoint (v0.4.7)
+// ===========================================================================
+
+#[tokio::test]
+async fn admin_memory_usage_returns_breakdown() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/memory"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["total_bytes"].is_u64());
+    assert!(body["store"].is_object());
+    assert!(body["store"]["total_bytes"].is_u64());
+    assert!(body["indexes"].is_object());
+    assert!(body["mvcc"].is_object());
+    assert!(body["caches"].is_object());
+    assert!(body["string_pool"].is_object());
+    assert!(body["buffer_manager"].is_object());
+}
+
+#[tokio::test]
+async fn admin_memory_usage_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/nonexistent/memory"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ===========================================================================
+// Named graphs (v0.4.7)
+// ===========================================================================
+
+#[tokio::test]
+async fn named_graphs_crud() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // List graphs (initially empty)
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["graphs"].as_array().unwrap().is_empty());
+
+    // Create a named graph
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "analytics"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], true);
+
+    // List again (should have one)
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["graphs"].as_array().unwrap().len(), 1);
+    assert_eq!(body["graphs"][0], "analytics");
+
+    // Create duplicate (should return false)
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "analytics"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], false);
+
+    // Drop the graph
+    let resp = client
+        .delete(format!("{base}/db/default/graphs/analytics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], true);
+
+    // Drop again (should return false)
+    let resp = client
+        .delete(format!("{base}/db/default/graphs/analytics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], false);
+}
+
+#[tokio::test]
+async fn named_graphs_database_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/db/nonexistent/graphs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }

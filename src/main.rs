@@ -262,6 +262,9 @@ fn detect_features() -> EnabledFeatures {
     if cfg!(feature = "mmap") {
         engine.push("mmap".to_string());
     }
+    if cfg!(feature = "grafeo-file") {
+        engine.push("grafeo-file".to_string());
+    }
     if cfg!(feature = "rdf") {
         engine.push("rdf".to_string());
     }

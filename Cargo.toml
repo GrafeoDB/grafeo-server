@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.16", default-features = false }
-grafeo-common = "0.5.16"
+grafeo-engine = { version = "0.5.21", default-features = false }
+grafeo-common = "0.5.21"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -118,7 +118,8 @@ parallel = ["grafeo-service/parallel"]
 wal = ["grafeo-service/wal"]
 spill = ["grafeo-service/spill"]
 mmap = ["grafeo-service/mmap"]
-storage = ["parallel", "wal", "spill", "mmap"]
+grafeo-file = ["grafeo-service/grafeo-file"]
+storage = ["parallel", "wal", "grafeo-file", "spill", "mmap"]
 
 # Engine: search & AI (forwarded)
 vector-index = ["grafeo-service/vector-index"]

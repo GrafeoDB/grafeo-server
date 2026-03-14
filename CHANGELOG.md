@@ -5,6 +5,28 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-03-14
+
+### Added
+
+- **Memory usage endpoint**: `GET /admin/{db}/memory` returns a hierarchical breakdown of memory usage across store (nodes, edges, properties), indexes (adjacency, label, property, vector, text), MVCC versioning, caches (parsed/optimized plan cache), string pools (label/type registries), and buffer manager regions
+- **Named graph endpoints**: manage sub-graphs within a database, distinct from databases themselves
+  - `GET /db/{name}/graphs`: list all named graphs in a database
+  - `POST /db/{name}/graphs`: create a named graph (`{"name": "..."}`)
+  - `DELETE /db/{name}/graphs/{graph}`: drop a named graph
+- **`grafeo-file` feature**: forwards the engine's single-file `.grafeo` database format through the feature chain (included in `storage` profile); enables `GrafeoDB::save("mydb.grafeo")` for DuckDB-style single-file databases with sidecar WAL
+- **5 new unit tests**: memory usage (default DB, not found), named graph CRUD (list empty, create/drop lifecycle, not found)
+- **4 new integration tests**: memory usage endpoint (success, 404), named graph CRUD (full lifecycle, 404)
+- **OpenAPI**: memory usage, named graph list/create/drop endpoints documented; `CreateGraphRequest` and `GraphListResponse` schemas added
+
+### Changed
+
+- Bumped grafeo-engine and grafeo-common to **0.5.21** (single-file `.grafeo` format, DDL schema persistence, memory introspection API, named graph WAL/snapshot persistence, LOAD DATA multi-format import, graph type enforcement, query introspection functions, snapshot v3 format, C#/Dart bindings, 1300+ spec tests)
+- Engine query compliance fixes (transparent to server): `SUM()` on empty set returns NULL, `CASE WHEN` with NULL correctly falls through, `SESSION SET SCHEMA`/`GRAPH` are independent per ISO/IEC 39075, `COUNT(*)` parsing, `CALL subquery` variable scope, correlated `EXISTS` via semi-join
+- `storage` feature group now includes `grafeo-file` alongside `parallel`, `wal`, `spill`, `mmap`
+- `detect_features()` reports `grafeo-file` in health endpoint when enabled
+- 164 total tests (92 integration + 72 workspace unit tests)
+
 ## [0.4.6] - 2026-03-08
 
 ### Added
@@ -355,7 +377,8 @@ Initial release.
 - **Pre-commit hooks** (prek): fmt, clippy, deny, typos
 - **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.3...v0.4.4

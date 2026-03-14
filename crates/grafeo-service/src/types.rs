@@ -419,3 +419,23 @@ pub struct SearchHit {
 fn default_db_name() -> String {
     "default".to_owned()
 }
+
+// ============================================================================
+// Named graph types
+// ============================================================================
+
+/// Request to create a named graph within a database.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateGraphRequest {
+    /// Name for the new graph.
+    pub name: String,
+}
+
+/// Response for listing named graphs in a database.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GraphListResponse {
+    /// Named graphs within the database.
+    pub graphs: Vec<String>,
+}

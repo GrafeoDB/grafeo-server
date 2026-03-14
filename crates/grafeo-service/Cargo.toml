@@ -53,7 +53,8 @@ parallel = ["grafeo-engine/parallel"]
 wal = ["grafeo-engine/wal"]
 spill = ["grafeo-engine/spill"]
 mmap = ["grafeo-engine/mmap"]
-storage = ["parallel", "wal", "spill", "mmap"]
+grafeo-file = ["grafeo-engine/grafeo-file"]
+storage = ["parallel", "wal", "grafeo-file", "spill", "mmap"]
 
 # Engine: search & AI
 vector-index = ["grafeo-engine/vector-index"]
