@@ -44,7 +44,7 @@ docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
 docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.6`, `grafeo-server:0.4.6-gwp`, `grafeo-server:0.4.6-bolt`, `grafeo-server:0.4.6-full`.
+Versioned tags: `grafeo-server:0.4.7`, `grafeo-server:0.4.7-gwp`, `grafeo-server:0.4.7-bolt`, `grafeo-server:0.4.7-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -272,7 +272,7 @@ Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 
 ### Bolt v5.x (BoltR)
 
-The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.1.1) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.1.2) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
 
 Configure the port with `--bolt-port` or `GRAFEO_BOLT_PORT` (default: 7687).
 
