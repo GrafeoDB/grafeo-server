@@ -5,20 +5,36 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.9] - Unreleased
+## [0.4.9] - 2026-03-25
 
 ### Added
 
 - **Offline-first changefeed** (`sync` feature): `GET /db/{name}/changes?since={epoch}&limit={n}` returns a paginated JSON array of CDC events (creates, updates, deletes) for nodes, edges, and RDF triples. Store `server_epoch` from the response and pass it as `since` on the next poll to receive only new changes
 - **Offline-first sync apply** (`sync` feature): `POST /db/{name}/sync` accepts a `{ client_id, last_seen_epoch, changes: [...] }` body and applies the changeset with last-write-wins (LWW) conflict resolution. Returns `{ server_epoch, applied, skipped, conflicts, id_mappings }`. The `id_mappings` array maps each create request (by index) to the server-assigned entity ID. Idempotent: replaying the same request twice produces the same state
 - **RDF triple events in changefeed**: SPARQL INSERT DATA / DELETE DATA mutations now appear in the changefeed with `entity_type: "triple"` and N-Triples-encoded `triple_subject`, `triple_predicate`, `triple_object`, and `triple_graph` fields (requires `cdc` + `rdf` features in grafeo-engine)
+- **SSE push changefeed** (`push-changefeed` feature): `GET /db/{name}/changes/stream` streams CDC events as Server-Sent Events in real time. A `ChangeHub` background task polls each database at 100ms intervals and broadcasts to all connected subscribers. Clients receive a JSON-encoded `ChangeEventDto` in each `data:` field. Compatible with browsers, Dart/Flutter, and any HTTP/1.1 SSE client
+- **WebSocket CRDT subscriptions** (`push-changefeed` feature): the existing `/ws` WebSocket endpoint now accepts `Subscribe` and `Unsubscribe` messages. Each subscription is identified by a client-supplied `sub_id` and receives `Change` events as they arrive; multiple databases can be subscribed simultaneously on a single connection
+- **Schema version awareness** (`sync` feature): `SyncRequest` now accepts an optional `schema_version` field (FNV-1a hex hash over sorted label names and property keys). When present and mismatched, `SyncResponse` sets `schema_mismatch: true` and always returns `server_schema_version` so clients can detect drift even without sending their own version
+- **CRDT counter properties** (`sync` feature): `SyncChangeRequest` accepts a `crdt_op` field (`GrowAdd` for G-Counter, `Increment` for PN-Counter) alongside `crdt_property`. When set, the server merges the counter value instead of applying last-write-wins. CRDT operations are commutative and idempotent across replicas
+- **`grafeo-sync` helper crate**: thin async HTTP client wrapping the sync wire protocol. `SyncClient::pull()`, `push()`, and `sync()` handle epoch tracking automatically. Suitable for use in Dart/Flutter, WASM, and Rust-native clients
+- **Offline-first guide**: `docs/guides/offline-first.md` covers the full poll-push-sync cycle, wire protocol reference, Dart/Flutter example (local `grafeo_dart` FFI + `SharedPreferences` epoch tracking), WASM/browser example (`localStorage` + Service Worker buffering), conflict handling, and ID mapping patterns
+- **Primary-replica replication** (`replication` feature): CDC-based streaming replication for read-scalability
+  - `ReplicationMode` enum: `Standalone` (default), `Primary` (read-write, advertises itself), `Replica` (read-only, polls primary)
+  - Replica instances reject all write operations (POST/PUT/PATCH/DELETE) with `503 Service Unavailable` and `{"error": "replica_mode"}`
+  - Background poll task fetches `GET /db/{name}/changes?since={epoch}&limit=500` on the primary every 500ms and applies events via `SyncService::apply()`; per-database epoch progress tracked in `ReplicationState`
+  - `GET /admin/replication`: returns current mode, primary URL (replica mode), and per-database `{ last_applied_epoch, last_error }`
+  - Configured via `--replication-mode` (`standalone` | `primary` | `replica`) and `--primary-url` CLI args, or `GRAFEO_REPLICATION_MODE` / `GRAFEO_PRIMARY_URL` env vars
+
+### Fixed
+
+- **Bolt encoding for CRDT counters**: `grafeo-boltr` now encodes `Value::GCounter` and `Value::PnCounter` to `BoltValue::Integer` (resolved totals) so Bolt clients receive a usable scalar rather than a missing match arm compile error
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to **0.5.25** (RDF CDC bridge, CDC structural metadata on create events)
-- `ChangeEventDto` extended with `triple_subject`, `triple_predicate`, `triple_object`, `triple_graph` fields; `entity_type` now also accepts `"triple"`
-- `full` tier now includes `sync` feature
-- 42 total unit tests (21 new sync tests)
+- Bumped grafeo-engine and grafeo-common to **0.5.25** (RDF CDC bridge, CDC structural metadata on create events, `Value::GCounter` and `Value::PnCounter` variants)
+- `ChangeEventDto` extended with `triple_subject`, `triple_predicate`, `triple_object`, `triple_graph` fields; `entity_type` now also accepts `"triple"`; `#[derive(Clone)]` added for broadcast channel support
+- `full` tier now includes `sync`, `push-changefeed`, and `replication` features
+- 123 total integration tests (10 new sync/CRDT/SSE/schema tests); 57 grafeo-service unit tests (6 new replication tests); new tests cover edge creates with id_mappings remapping, updates/deletes applied count, LWW conflict detection, limit/pagination, validation error reasons, and replication mode/epoch tracking
 
 ## [0.4.8] - 2026-03-24
 
