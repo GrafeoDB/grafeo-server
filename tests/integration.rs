@@ -3993,7 +3993,7 @@ async fn e2e_database_with_full_options() {
             "database_type": "Lpg",
             "storage_mode": "InMemory",
             "options": {
-                "memory_limit_bytes": 268435456,
+                "memory_limit_bytes": 268_435_456,
                 "backward_edges": false,
                 "threads": 2
             }
