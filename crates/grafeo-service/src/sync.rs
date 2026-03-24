@@ -43,7 +43,7 @@ use crate::error::ServiceError;
 // ---------------------------------------------------------------------------
 
 /// Response from `GET /db/{name}/changes`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChangesResponse {
     /// Current server epoch. Use as `since` in your next poll.
@@ -63,7 +63,7 @@ pub struct ChangesResponse {
 /// create on a remote database. For RDF triple events the `triple_subject`,
 /// `triple_predicate`, `triple_object`, and `triple_graph` fields carry the
 /// N-Triples-encoded terms.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChangeEventDto {
     /// Raw entity ID (`NodeId::as_u64()`, `EdgeId::as_u64()`, or triple hash).
@@ -114,7 +114,7 @@ pub struct ChangeEventDto {
 // ---------------------------------------------------------------------------
 
 /// Request body for `POST /db/{name}/sync`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SyncRequest {
     /// Opaque client identifier (device ID, user ID, etc.).
@@ -133,7 +133,7 @@ pub struct SyncRequest {
 /// `"update"` and `"delete"` operations. For `"create"` operations it must
 /// be omitted (or `null`); the server assigns a new ID and returns the
 /// mapping in `SyncResponse.id_mappings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SyncChangeRequest {
     /// `"create"`, `"update"`, or `"delete"`.
@@ -159,7 +159,7 @@ pub struct SyncChangeRequest {
 }
 
 /// Response from `POST /db/{name}/sync`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SyncResponse {
     /// Current server epoch after all changes were applied.
@@ -176,7 +176,7 @@ pub struct SyncResponse {
 }
 
 /// A conflict detected during sync apply.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ConflictRecord {
     /// Zero-based index of the change in the request's `changes` array.
@@ -186,7 +186,7 @@ pub struct ConflictRecord {
 }
 
 /// Maps a client create request to the server-assigned entity ID.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct IdMapping {
     /// Zero-based index of the create change in the request's `changes` array.

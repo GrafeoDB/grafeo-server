@@ -14,8 +14,14 @@ use tokio_tungstenite::tungstenite;
 /// Boots an in-memory Grafeo server on an OS-assigned port.
 /// Returns the base URL (e.g. "http://127.0.0.1:12345").
 async fn spawn_server() -> String {
-    // Inline the same setup as main.rs but with in-memory config
-    let state = grafeo_server::AppState::new_in_memory(300);
+    spawn_server_from_state(grafeo_server::AppState::new_in_memory(300)).await
+}
+
+/// Boots a server from a pre-configured `AppState`.
+///
+/// Use this when you need to seed the database before the server starts
+/// (e.g. to populate the CDC log via the direct API before testing sync).
+async fn spawn_server_from_state(state: grafeo_server::AppState) -> String {
     let mut app = grafeo_server::router(state);
 
     #[cfg(feature = "studio")]
@@ -4148,4 +4154,104 @@ async fn e2e_metrics_reflect_activity() {
 
     // Error counter
     assert!(body.contains("grafeo_query_errors_total{language=\"gql\"}"));
+}
+
+// ===========================================================================
+// Offline-first sync: HTTP round-trip (v0.4.9)
+// ===========================================================================
+
+/// Boots a server from a pre-seeded state, pulls its changefeed via HTTP,
+/// then pushes those changes to a second fresh server and verifies the result.
+///
+/// This test exercises the full client workflow:
+///   1. Seed nodes via the direct API (populates CDC log)
+///   2. Pull `GET /db/default/changes?since=0`
+///   3. Convert `ChangeEventDto` → `SyncChangeRequest`
+///   4. Push `POST /db/default/sync` to a second server
+///   5. Verify `applied`, `id_mappings`, and lack of conflicts
+#[cfg(feature = "sync")]
+#[tokio::test]
+async fn sync_round_trip_two_databases() {
+    // --- Server A: seed 3 Person nodes via direct API ---
+    let state_a = grafeo_server::AppState::new_in_memory(300);
+    {
+        let entry = state_a.databases().get("default").unwrap();
+        entry.db.create_node(&["Person"]);
+        entry.db.create_node(&["Person"]);
+        entry.db.create_node(&["Person"]);
+    }
+    let base_a = spawn_server_from_state(state_a).await;
+
+    // --- Pull changefeed from server A ---
+    let client = Client::new();
+    let pull_resp = client
+        .get(format!("{base_a}/db/default/changes?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pull_resp.status(), 200);
+
+    let pull_body: Value = pull_resp.json().await.unwrap();
+    let changes = pull_body["changes"].as_array().unwrap();
+
+    // 3 node create events
+    assert_eq!(changes.len(), 3);
+    assert!(changes.iter().all(|e| e["kind"] == "create"));
+    assert!(changes.iter().all(|e| e["entity_type"] == "node"));
+    assert!(changes.iter().all(|e| {
+        e["labels"]
+            .as_array()
+            .is_some_and(|ls| ls.contains(&Value::String("Person".into())))
+    }));
+
+    let server_epoch = pull_body["server_epoch"].as_u64().unwrap();
+
+    // --- Convert ChangeEventDto → SyncChangeRequest (node creates) ---
+    let sync_changes: Vec<Value> = changes
+        .iter()
+        .map(|e| {
+            json!({
+                "kind":        "create",
+                "entity_type": "node",
+                "labels":      e["labels"],
+                "after":       e["after"],
+                "timestamp":   e["timestamp"],
+            })
+        })
+        .collect();
+
+    let sync_req = json!({
+        "client_id":       "test-round-trip",
+        "last_seen_epoch": server_epoch,
+        "changes":         sync_changes,
+    });
+
+    // --- Apply to server B (fresh, empty) ---
+    let base_b = spawn_server().await;
+    let apply_resp = client
+        .post(format!("{base_b}/db/default/sync"))
+        .json(&sync_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(apply_resp.status(), 200);
+
+    let apply_body: Value = apply_resp.json().await.unwrap();
+
+    // All 3 creates applied, no conflicts
+    assert_eq!(apply_body["applied"], 3);
+    assert_eq!(apply_body["skipped"], 0);
+    assert!(apply_body["conflicts"].as_array().unwrap().is_empty());
+
+    // Server B assigned a new ID for each create
+    let mappings = apply_body["id_mappings"].as_array().unwrap();
+    assert_eq!(mappings.len(), 3);
+    for (idx, mapping) in mappings.iter().enumerate() {
+        assert_eq!(mapping["request_index"].as_u64().unwrap(), idx as u64);
+        assert!(mapping["server_id"].as_u64().is_some());
+        assert_ne!(mapping["server_id"].as_u64().unwrap(), u64::MAX);
+    }
+
+    // server_epoch in the apply response should be non-zero (writes advanced epoch)
+    assert!(apply_body["server_epoch"].as_u64().is_some());
 }

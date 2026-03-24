@@ -13,6 +13,7 @@ grafeo-common = { workspace = true }
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query", "ws"] }
+async-stream = "0.3"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
 
@@ -49,6 +50,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = 
 default = []
 auth = ["grafeo-service/auth"]
 sync = ["grafeo-service/sync"]
+push-changefeed = ["grafeo-service/push-changefeed", "sync"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:hyper", "dep:hyper-util"]
 
 [lints]

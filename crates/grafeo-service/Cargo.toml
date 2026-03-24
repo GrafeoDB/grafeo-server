@@ -84,6 +84,8 @@ json-schema = ["dep:jsonschema"]
 
 # Sync: pull-based changefeed for offline-first applications
 sync = ["cdc"]
+# Push-based SSE/WebSocket changefeed (requires sync)
+push-changefeed = ["sync"]
 
 # Auth provider
 auth = ["dep:subtle"]

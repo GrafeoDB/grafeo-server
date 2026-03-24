@@ -190,6 +190,13 @@ pub fn router(state: AppState) -> Router {
         .route("/db/{name}/changes", get(routes::sync::db_changes))
         .route("/db/{name}/sync", post(routes::sync::db_apply));
 
+    // Sync: SSE push stream (requires `push-changefeed` feature)
+    #[cfg(feature = "push-changefeed")]
+    let api = api.route(
+        "/db/{name}/changes/stream",
+        get(routes::sync::db_changes_stream),
+    );
+
     let api = api
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());

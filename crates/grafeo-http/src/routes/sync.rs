@@ -4,6 +4,7 @@
 //!
 //! - `GET /db/{name}/changes?since=<epoch>&limit=<n>` — pull changefeed
 //! - `POST /db/{name}/sync` — push client changes with LWW conflict resolution
+//! - `GET /db/{name}/changes/stream` — SSE push stream (requires `push-changefeed`)
 //!
 //! Requires the `sync` feature (implies `cdc`).
 
@@ -76,3 +77,89 @@ pub async fn db_apply(
 
     Ok(Json(result))
 }
+
+// ---------------------------------------------------------------------------
+// SSE push stream (requires `push-changefeed` feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "push-changefeed")]
+mod sse {
+    use std::convert::Infallible;
+
+    use axum::extract::{Path, Query, State};
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::RecvError;
+
+    use grafeo_service::sync::SyncService;
+
+    use crate::error::ApiError;
+    use crate::routes::sync::ChangesQuery;
+    use crate::state::AppState;
+
+    /// Server-Sent Events stream of change events for the named database.
+    ///
+    /// The client receives all historical events since `since` first, then
+    /// live events as they are committed. The stream stays open until the
+    /// client disconnects.
+    ///
+    /// Events are newline-delimited JSON objects in the `data:` field of each
+    /// SSE event, matching the `ChangeEventDto` schema.
+    ///
+    /// The `limit` query parameter is ignored for the streaming endpoint.
+    pub async fn db_changes_stream(
+        State(state): State<AppState>,
+        Path(name): Path<String>,
+        Query(params): Query<ChangesQuery>,
+    ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+        let since = params.since;
+
+        // Pull historical events up to the current epoch.
+        let historical = {
+            let name_clone = name.clone();
+            let state_clone = state.clone();
+            tokio::task::spawn_blocking(move || {
+                SyncService::pull(state_clone.databases(), &name_clone, since, 10_000)
+            })
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))??
+        };
+
+        let live_since = historical.server_epoch;
+
+        // Subscribe to live events from the hub.
+        let receiver = state
+            .change_hub()
+            .subscribe(&name, live_since, state.service().clone());
+
+        let stream = async_stream::stream! {
+            // Yield historical events first.
+            for event in historical.changes {
+                let json = serde_json::to_string(&event)
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Ok(Event::default().data(json));
+            }
+
+            // Then stream live events.
+            let mut receiver = receiver;
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        yield Ok(Event::default().data(json));
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::debug!("SSE receiver lagged by {n} events");
+                        // Continue — the client will see the next available event.
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        };
+
+        Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    }
+}
+
+#[cfg(feature = "push-changefeed")]
+pub use sse::db_changes_stream;

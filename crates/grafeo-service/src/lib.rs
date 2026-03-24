@@ -12,6 +12,8 @@
 pub mod admin;
 #[cfg(feature = "auth")]
 pub mod auth;
+#[cfg(feature = "push-changefeed")]
+pub mod changefeed;
 pub mod database;
 pub mod error;
 pub mod metrics;
@@ -73,6 +75,8 @@ struct Inner {
     read_only: bool,
     #[cfg(feature = "auth")]
     auth: Option<auth::AuthProvider>,
+    #[cfg(feature = "push-changefeed")]
+    change_hub: changefeed::ChangeHub,
 }
 
 impl ServiceState {
@@ -97,6 +101,8 @@ impl ServiceState {
                     config.auth_user.clone(),
                     config.auth_password.clone(),
                 ),
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -115,6 +121,8 @@ impl ServiceState {
                 read_only: false,
                 #[cfg(feature = "auth")]
                 auth: None,
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -133,6 +141,8 @@ impl ServiceState {
                 start_time: Instant::now(),
                 read_only: false,
                 auth: auth::AuthProvider::new(Some(auth_token), None, None),
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -151,6 +161,8 @@ impl ServiceState {
                 start_time: Instant::now(),
                 read_only: false,
                 auth: auth::AuthProvider::new(None, Some(user), Some(password)),
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -169,6 +181,8 @@ impl ServiceState {
                 read_only: true,
                 #[cfg(feature = "auth")]
                 auth: None,
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -191,6 +205,8 @@ impl ServiceState {
                 read_only: false,
                 #[cfg(feature = "auth")]
                 auth: None,
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
             }),
         }
     }
@@ -227,6 +243,11 @@ impl ServiceState {
 
     pub fn uptime_secs(&self) -> u64 {
         self.inner.start_time.elapsed().as_secs()
+    }
+
+    #[cfg(feature = "push-changefeed")]
+    pub fn change_hub(&self) -> &changefeed::ChangeHub {
+        &self.inner.change_hub
     }
 
     #[cfg(feature = "auth")]

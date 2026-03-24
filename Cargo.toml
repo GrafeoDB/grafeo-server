@@ -5,6 +5,7 @@ members = [
     "crates/grafeo-gwp",
     "crates/grafeo-studio",
     "crates/grafeo-boltr",
+    "crates/grafeo-sync",
 ]
 resolver = "2"
 
@@ -26,6 +27,7 @@ grafeo-http = { path = "crates/grafeo-http" }
 grafeo-gwp = { path = "crates/grafeo-gwp" }
 grafeo-studio = { path = "crates/grafeo-studio" }
 grafeo-boltr = { path = "crates/grafeo-boltr" }
+grafeo-sync = { path = "crates/grafeo-sync" }
 
 # External protocol crates
 boltr = "0.1.2"
@@ -42,6 +44,7 @@ parking_lot = "0.12"
 uuid = { version = "1.11", features = ["v4"] }
 tracing = "0.1"
 base64 = "0.22"
+url = "2"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -126,6 +129,8 @@ vector-index = ["grafeo-service/vector-index"]
 text-index = ["grafeo-service/text-index"]
 hybrid-search = ["grafeo-service/hybrid-search"]
 cdc = ["grafeo-service/cdc"]
+sync = ["grafeo-http?/sync"]
+push-changefeed = ["grafeo-http?/push-changefeed"]
 embed = ["grafeo-service/embed"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 
@@ -147,7 +152,7 @@ rdf = ["grafeo-service/rdf"]
 full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
-    "temporal", "import", "metrics",
+    "temporal", "import", "metrics", "sync",
 ]
 
 [dependencies]
