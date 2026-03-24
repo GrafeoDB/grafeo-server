@@ -24,6 +24,8 @@ pub mod search;
 pub mod session;
 pub mod stream;
 #[cfg(feature = "sync")]
+pub mod crdt;
+#[cfg(feature = "sync")]
 pub mod sync;
 pub mod types;
 

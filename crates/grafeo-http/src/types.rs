@@ -244,6 +244,28 @@ pub enum WsClientMessage {
     /// Application-level keepalive.
     #[serde(rename = "ping")]
     Ping,
+    /// Subscribe to live change events for a database.
+    ///
+    /// Requires the `push-changefeed` server feature. Historical events since
+    /// `since` are delivered first, then live events as they are committed.
+    #[cfg(feature = "push-changefeed")]
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        /// Client-assigned subscription ID, echoed in all events for this sub.
+        sub_id: String,
+        /// Database name to subscribe to.
+        db: String,
+        /// Return events with epoch >= this value. Use 0 for full history.
+        #[serde(default)]
+        since: u64,
+    },
+    /// Cancel an active subscription.
+    #[cfg(feature = "push-changefeed")]
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe {
+        /// The subscription ID to cancel.
+        sub_id: String,
+    },
 }
 
 /// Server-to-client WebSocket message.
@@ -275,6 +297,29 @@ pub enum WsServerMessage {
     /// Pong response to a client ping.
     #[serde(rename = "pong")]
     Pong,
+    /// Subscription confirmed.
+    #[cfg(feature = "push-changefeed")]
+    #[serde(rename = "subscribed")]
+    Subscribed {
+        /// Echoed from the `subscribe` message.
+        sub_id: String,
+    },
+    /// Subscription cancelled.
+    #[cfg(feature = "push-changefeed")]
+    #[serde(rename = "unsubscribed")]
+    Unsubscribed {
+        /// Echoed from the `unsubscribe` message.
+        sub_id: String,
+    },
+    /// A live change event from an active subscription.
+    #[cfg(feature = "push-changefeed")]
+    #[serde(rename = "change")]
+    Change {
+        /// Identifies the subscription that produced this event.
+        sub_id: String,
+        /// The change event payload.
+        event: Box<grafeo_service::sync::ChangeEventDto>,
+    },
 }
 
 #[derive(Serialize, ToSchema)]
