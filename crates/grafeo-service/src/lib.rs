@@ -153,6 +153,24 @@ impl ServiceState {
         }
     }
 
+    /// Creates an in-memory state with read-only mode enabled (for tests).
+    pub fn new_in_memory_read_only(session_ttl: u64) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                databases: DatabaseManager::new(None, true),
+                sessions: SessionRegistry::new(),
+                metrics: Metrics::new(),
+                rate_limiter: RateLimiter::new(0, Duration::from_secs(60)),
+                session_ttl,
+                query_timeout: Duration::from_secs(30),
+                start_time: Instant::now(),
+                read_only: true,
+                #[cfg(feature = "auth")]
+                auth: None,
+            }),
+        }
+    }
+
     /// Creates an in-memory state with rate limiting enabled (for tests).
     pub fn new_in_memory_with_rate_limit(
         session_ttl: u64,

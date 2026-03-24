@@ -85,6 +85,17 @@ impl AppState {
         }
     }
 
+    /// Creates an in-memory state with read-only mode enabled (for tests).
+    pub fn new_in_memory_read_only(session_ttl: u64) -> Self {
+        Self {
+            inner: Arc::new(AppInner {
+                service: ServiceState::new_in_memory_read_only(session_ttl),
+                cors_origins: vec![],
+                enabled_features: EnabledFeatures::default(),
+            }),
+        }
+    }
+
     /// Creates an in-memory state with rate limiting enabled (for tests).
     pub fn new_in_memory_with_rate_limit(
         session_ttl: u64,

@@ -3278,3 +3278,874 @@ async fn named_graphs_database_not_found() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+// ---------------------------------------------------------------------------
+// Read-Only Mode
+// ---------------------------------------------------------------------------
+
+async fn spawn_read_only_server() -> String {
+    let state = grafeo_server::AppState::new_in_memory_read_only(300);
+    let mut app = grafeo_server::router(state);
+
+    #[cfg(feature = "studio")]
+    {
+        app = grafeo_studio::router().merge(app);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn read_only_health_reports_status() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["read_only"], true);
+}
+
+#[tokio::test]
+async fn read_only_queries_still_work() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    // Read queries should succeed
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["columns"], json!(["cnt"]));
+}
+
+#[tokio::test]
+async fn read_only_create_database_rejected() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({"name": "mydb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "read_only");
+}
+
+#[tokio::test]
+async fn read_only_delete_database_rejected() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .delete(format!("{base}/db/default"))
+        .send()
+        .await
+        .unwrap();
+    // Default DB deletion is rejected (either 403 for read-only or 400 for protected)
+    let status = resp.status().as_u16();
+    assert!(status == 403 || status == 400);
+}
+
+#[tokio::test]
+async fn read_only_admin_create_index_rejected() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({"type": "property", "property": "name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "read_only");
+}
+
+#[tokio::test]
+async fn read_only_admin_read_operations_allowed() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    // Stats should work
+    let resp = client
+        .get(format!("{base}/admin/default/stats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // WAL status should work
+    let resp = client
+        .get(format!("{base}/admin/default/wal"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Memory usage should work
+    let resp = client
+        .get(format!("{base}/admin/default/memory"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Validate should work
+    let resp = client
+        .get(format!("{base}/admin/default/validate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn read_only_system_resources_reports_status() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/system/resources"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["read_only"], true);
+}
+
+#[tokio::test]
+async fn read_only_list_databases_works() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{base}/db")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let dbs = body["databases"].as_array().unwrap();
+    assert!(!dbs.is_empty());
+    assert!(dbs.iter().any(|d| d["name"] == "default"));
+}
+
+#[tokio::test]
+async fn read_only_wal_checkpoint_rejected() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/wal/checkpoint"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn read_only_named_graph_mutations_rejected() {
+    let base = spawn_read_only_server().await;
+    let client = Client::new();
+
+    // Create graph should be rejected
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "mygraph"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // List graphs should work
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Multi-Database Workflow
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_multi_database_workflow() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // 1. Start with only default database
+    let resp = client.get(format!("{base}/db")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let dbs = body["databases"].as_array().unwrap();
+    assert_eq!(dbs.len(), 1);
+    assert_eq!(dbs[0]["name"], "default");
+
+    // 2. Create a secondary database
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({"name": "analytics"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 3. Insert data into both databases
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "INSERT (:User {name: 'Alice'})",
+            "database": "default"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "INSERT (:Event {type: 'click', ts: 1234})",
+            "database": "analytics"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 4. Verify data isolation: default has User, analytics has Event
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "MATCH (n:User) RETURN n.name AS name",
+            "database": "default"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(body["rows"][0][0], "Alice");
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "MATCH (n:User) RETURN count(n) AS cnt",
+            "database": "analytics"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0);
+
+    // 5. Check stats reflect inserted data
+    let resp = client
+        .get(format!("{base}/admin/default/stats"))
+        .send()
+        .await
+        .unwrap();
+    let stats: Value = resp.json().await.unwrap();
+    assert!(stats["node_count"].as_u64().unwrap() >= 1);
+
+    // 6. Delete analytics database
+    let resp = client
+        .delete(format!("{base}/db/analytics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 7. Verify only default remains
+    let resp = client.get(format!("{base}/db")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["databases"].as_array().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Transaction Lifecycle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_transaction_with_rollback_and_retry() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // 1. Begin transaction
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let session_id = body["session_id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"], "open");
+
+    // 2. Insert data within transaction
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("X-Session-Id", &session_id)
+        .json(&json!({"query": "CREATE (:TxNode {val: 1})", "language": "cypher"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 3. Rollback
+    let resp = client
+        .post(format!("{base}/tx/rollback"))
+        .header("X-Session-Id", &session_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "rolled_back");
+
+    // 4. Verify data was not persisted
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:TxNode) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0);
+
+    // 5. Begin new transaction, insert, and commit
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let session_id = body["session_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("X-Session-Id", &session_id)
+        .json(&json!({"query": "CREATE (:TxNode {val: 42})", "language": "cypher"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/tx/commit"))
+        .header("X-Session-Id", &session_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 6. Verify committed data
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:TxNode) RETURN n.val AS val"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 42);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Multi-Language Dispatch
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_multi_language_queries() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Setup: Insert data via GQL
+    client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Person {name: 'Bob', age: 30})-[:KNOWS]->(:Person {name: 'Carol', age: 25})"}))
+        .send()
+        .await
+        .unwrap();
+
+    // GQL via /query
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (p:Person) RETURN p.name AS name ORDER BY p.name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["columns"], json!(["name"]));
+    let names: Vec<&str> = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Bob", "Carol"]);
+
+    // Cypher via /cypher endpoint
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "MATCH (p:Person) RETURN count(p) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 2);
+
+    // Language override via /query with language field
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "MATCH (p:Person) RETURN count(p) AS cnt",
+            "language": "cypher"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 2);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Named Graphs Lifecycle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_named_graphs_full_lifecycle() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // 1. Initially no named graphs
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["graphs"].as_array().unwrap().is_empty());
+
+    // 2. Create two named graphs
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "social"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], true);
+
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "payments"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 3. List graphs
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let graphs = body["graphs"].as_array().unwrap();
+    assert_eq!(graphs.len(), 2);
+
+    // 4. Duplicate creation returns false
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({"name": "social"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], false);
+
+    // 5. Drop one graph
+    let resp = client
+        .delete(format!("{base}/db/default/graphs/payments"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], true);
+
+    // 6. Verify only one remains
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["graphs"].as_array().unwrap().len(), 1);
+    assert_eq!(body["graphs"][0], "social");
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Batch Query Processing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_batch_query_workflow() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // 1. Batch insert multiple nodes
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({
+            "queries": [
+                {"query": "INSERT (:Item {name: 'A', price: 10})"},
+                {"query": "INSERT (:Item {name: 'B', price: 20})"},
+                {"query": "INSERT (:Item {name: 'C', price: 30})"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+
+    // 2. Batch query: all results succeed
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({
+            "queries": [
+                {"query": "MATCH (i:Item) RETURN count(i) AS cnt"},
+                {"query": "MATCH (i:Item) RETURN sum(i.price) AS total"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results[0]["rows"][0][0], 3);
+    assert_eq!(results[1]["rows"][0][0], 60);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: WebSocket Streaming
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_websocket_multiple_queries() {
+    let base = spawn_server().await;
+    let ws_url = base.replace("http://", "ws://");
+
+    // Setup data first
+    let client = Client::new();
+    client
+        .post(format!("{base}/query"))
+        .json(
+            &json!({"query": "INSERT (:WsNode {val: 1}), (:WsNode {val: 2}), (:WsNode {val: 3})"}),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Connect via WebSocket
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{ws_url}/ws"))
+        .await
+        .unwrap();
+
+    // Send query with ID
+    let msg = json!({
+        "type": "query",
+        "id": "q1",
+        "query": "MATCH (n:WsNode) RETURN count(n) AS cnt"
+    });
+    ws.send(tungstenite::Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Receive result
+    let response = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "result");
+    assert_eq!(body["id"], "q1");
+    assert_eq!(body["rows"][0][0], 3);
+
+    // Send another query with different ID
+    let msg = json!({
+        "type": "query",
+        "id": "q2",
+        "query": "MATCH (n:WsNode) RETURN sum(n.val) AS total"
+    });
+    ws.send(tungstenite::Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    let response = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "result");
+    assert_eq!(body["id"], "q2");
+    assert_eq!(body["rows"][0][0], 6);
+
+    // Ping/Pong
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    let response = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Graph Algorithms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_graph_algorithms() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Build a small graph
+    client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:City {name: 'NYC'})-[:ROAD {dist: 200}]->(:City {name: 'DC'})-[:ROAD {dist: 100}]->(:City {name: 'Philly'})"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Run WCC (weakly connected components) via Cypher
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CALL grafeo.connected_components() YIELD node_id, component_id RETURN count(*) AS total"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["rows"][0][0].as_u64().unwrap() >= 3);
+
+    // Run PageRank via Cypher
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "CALL grafeo.pagerank() YIELD node_id, score RETURN count(*) AS nodes"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["rows"][0][0].as_u64().unwrap() >= 3);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Database Creation with Options
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_database_with_full_options() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create database with custom options
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "custom",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "memory_limit_bytes": 268435456,
+                "backward_edges": false,
+                "threads": 2
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify database info reflects options
+    let resp = client
+        .get(format!("{base}/db/custom"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "custom");
+    assert_eq!(body["backward_edges"], false);
+    assert_eq!(body["threads"], 2);
+
+    // Insert and query on the custom database
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "INSERT (:Node {id: 1})-[:LINK]->(:Node {id: 2})",
+            "database": "custom"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "query": "MATCH (a)-[:LINK]->(b) RETURN a.id AS src, b.id AS dst",
+            "database": "custom"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 1);
+    assert_eq!(body["rows"][0][1], 2);
+
+    // Cleanup
+    client
+        .delete(format!("{base}/db/custom"))
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Cache Management
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_cache_stats_and_clear() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Run a few queries to populate the cache
+    for _ in 0..3 {
+        client
+            .post(format!("{base}/query"))
+            .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Check cache stats
+    let resp = client
+        .get(format!("{base}/admin/default/cache"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    // Verify the response structure contains expected fields
+    assert!(body["parsed_size"].is_u64());
+    assert!(body["optimized_size"].is_u64());
+    assert!(body["parsed_hits"].is_u64());
+    assert!(body["parsed_misses"].is_u64());
+
+    // Clear cache
+    let resp = client
+        .post(format!("{base}/admin/default/cache/clear"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify cache was cleared (size drops to 0)
+    let resp = client
+        .get(format!("{base}/admin/default/cache"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["parsed_size"], 0);
+    assert_eq!(body["optimized_size"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Scenario: Metrics Tracking
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_metrics_reflect_activity() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Run queries in different languages
+    client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .post(format!("{base}/cypher"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Trigger an error
+    client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "THIS IS INVALID SYNTAX"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Check metrics
+    let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // Server-level metrics
+    assert!(body.contains("grafeo_databases_total 1"));
+    assert!(body.contains("grafeo_active_sessions_total 0"));
+    assert!(body.contains("grafeo_uptime_seconds"));
+
+    // Per-language query counters
+    assert!(body.contains("grafeo_queries_total{language=\"gql\"}"));
+    assert!(body.contains("grafeo_queries_total{language=\"cypher\"}"));
+
+    // Error counter
+    assert!(body.contains("grafeo_query_errors_total{language=\"gql\"}"));
+}
