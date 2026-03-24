@@ -283,6 +283,18 @@ fn detect_features() -> EnabledFeatures {
     if cfg!(feature = "embed") {
         engine.push("embed".to_string());
     }
+    if cfg!(feature = "temporal") {
+        engine.push("temporal".to_string());
+    }
+    if cfg!(feature = "metrics") {
+        engine.push("metrics".to_string());
+    }
+    if cfg!(feature = "jsonl-import") {
+        engine.push("jsonl-import".to_string());
+    }
+    if cfg!(feature = "parquet-import") {
+        engine.push("parquet-import".to_string());
+    }
 
     let mut server = Vec::new();
     if cfg!(feature = "auth") {
