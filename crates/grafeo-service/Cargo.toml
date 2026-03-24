@@ -64,6 +64,16 @@ cdc = ["grafeo-engine/cdc"]
 embed = ["grafeo-engine/embed"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 
+# Engine: data import formats
+jsonl-import = ["grafeo-engine/jsonl-import"]
+parquet-import = ["grafeo-engine/parquet-import"]
+
+# Engine: temporal versioning
+temporal = ["grafeo-engine/temporal"]
+
+# Engine: metrics
+metrics = ["grafeo-engine/metrics"]
+
 # Engine: data models
 rdf = ["grafeo-engine/rdf"]
 

@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -17,8 +17,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.21", default-features = false }
-grafeo-common = "0.5.21"
+grafeo-engine = { version = "0.5.24", default-features = false }
+grafeo-common = "0.5.24"
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -129,6 +129,17 @@ cdc = ["grafeo-service/cdc"]
 embed = ["grafeo-service/embed"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 
+# Engine: data import formats (forwarded)
+jsonl-import = ["grafeo-service/jsonl-import"]
+parquet-import = ["grafeo-service/parquet-import"]
+import = ["jsonl-import", "parquet-import"]
+
+# Engine: temporal versioning (forwarded)
+temporal = ["grafeo-service/temporal"]
+
+# Engine: metrics (forwarded)
+metrics = ["grafeo-service/metrics"]
+
 # Engine: data models (forwarded)
 rdf = ["grafeo-service/rdf"]
 
@@ -136,6 +147,7 @@ rdf = ["grafeo-service/rdf"]
 full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
+    "temporal", "import", "metrics",
 ]
 
 [dependencies]
