@@ -54,7 +54,7 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
             let total: u64 = counts.values().sum();
             serde_json::json!({ "$gcounter": replicas, "$value": total })
         }
-        Value::PnCounter { pos, neg } => {
+        Value::OnCounter { pos, neg } => {
             let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             serde_json::json!({ "$pncounter": true, "$value": pos_sum - neg_sum })
