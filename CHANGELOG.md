@@ -7,11 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.30] - 2026-03-30
+
 ### Added
 
 - **W3C SPARQL 1.1 Protocol**: `GET/POST /db/{name}/sparql` with `application/sparql-query`, `application/sparql-update`, form-encoded, and JSON content types, plus Accept-based response negotiation (SPARQL Results JSON)
 - **W3C Graph Store HTTP Protocol**: `GET/PUT/POST/DELETE/HEAD /db/{name}/graph-store` with `?default` and `?graph=<iri>` for RESTful named graph CRUD
 - **SPARQL Results JSON**: W3C-compliant response format with typed term bindings for SELECT and boolean for ASK
+- **Snapshot endpoint**: `POST /admin/{db}/snapshot` writes a point-in-time `.grafeo` snapshot (requires `async-storage` + `grafeo-file` features)
+- **`async-storage` feature flag**: forwards engine's async WAL and storage operations, included in `full` tier
+
+### Changed
+
+- **grafeo-engine 0.5.30**: async storage foundation (`async_wal_checkpoint()`, `async_write_snapshot()`), Turtle/N-Quads parser and serializer, declarative `.gtest` spec test framework (2500+ tests), EXISTS in RETURN, GQL aggregate detection in WITH, adjacency list memory optimization (SmallVec to Vec), Gremlin rewrites (`coalesce`, `optional`, `group().by()`, `addE`, `or()`), SQL/PGQ HAVING inline aggregates and zero-length paths, SPARQL dateTime/LANGMATCHES functions, 86 stale spec test skips removed
+- **`DatabaseEntry.db` is now `Arc<GrafeoDB>`**: internal refactor enabling direct use of engine async methods; all existing access auto-derefs transparently
+- **WAL checkpoint uses native async**: `wal_checkpoint` service method calls `async_wal_checkpoint()` when `async-storage` is enabled, removing manual `spawn_blocking` wrapper
+
+### Fixed (via engine 0.5.28, 0.5.29, 0.5.30)
+
+- Single-file `.grafeo` storage broken in bindings: `grafeo-file` feature was missing from engine defaults (0.5.28)
+- Integer arithmetic overflow panic: checked arithmetic now returns NULL on overflow (0.5.29)
+- Label intersection across MATCH clauses: `MATCH (n:A) MATCH (n:B)` now filters to both labels (0.5.29)
+- CASE WHEN with NULL aggregate returned NULL when WHEN branch was true (0.5.29)
+- EXISTS with property filters silently dropped WHERE clause (0.5.29)
+- Keywords as property names (`order`, etc.) rejected in property contexts (0.5.29)
+- Gremlin `hasLabel` on edges, `coalesce()` semantics, `group().by()` two-pass, `optional()` per-row semantics, `values()` null filtering, `addE` with `as()` labels, `or()` three-valued logic (0.5.29)
+- SPARQL functions in SELECT projections, IN/NOT IN operators, BOUND() with OPTIONAL (0.5.29)
+- SQL/PGQ unbounded variable-length paths, COUNT(column) NULL skipping, CASE expressions, outer SELECT projection, ORDER BY on aggregate aliases (0.5.29)
+- SPARQL dateTime extraction functions (YEAR, MONTH, DAY, etc.) with timezone offsets (0.5.30)
+- SPARQL LANGMATCHES() RFC 4647 basic filtering with wildcard support (0.5.30)
+- SPARQL LANG() companion columns tracked through triple scans (0.5.30)
+- SQL/PGQ parameter references (`$name`, `$min_age`) in WHERE clauses (0.5.30)
+- SQL/PGQ HAVING inline aggregates (`HAVING COUNT(*) > 0`) now extracted correctly (0.5.30)
+- SQL/PGQ zero-length paths (`*0..N`) now emit source node as 0-hop match (0.5.30)
+- Cypher `collect(DISTINCT ...)` through non-aggregate function calls (0.5.30)
 
 ## [0.5.27] - 2026-03-27
 
@@ -457,7 +486,10 @@ Initial release.
 - **Pre-commit hooks** (prek): fmt, clippy, deny, typos
 - **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.5.30...HEAD
+[0.5.30]: https://github.com/GrafeoDB/grafeo-server/compare/v0.5.27...v0.5.30
+[0.5.27]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.9...v0.5.27
+[0.4.9]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...v0.4.6
