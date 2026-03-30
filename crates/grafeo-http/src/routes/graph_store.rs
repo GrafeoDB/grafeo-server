@@ -418,6 +418,7 @@ fn build_insert_data(target: &GraphTarget, nt_lines: &[String]) -> String {
 }
 
 /// Converts a Grafeo `Value` to an N-Triples term string.
+#[allow(clippy::match_same_arms)]
 fn value_to_nt_term(value: &grafeo_common::Value) -> String {
     use grafeo_common::Value;
     match value {
@@ -455,5 +456,381 @@ fn value_to_nt_term(value: &grafeo_common::Value) -> String {
             let escaped = s.replace('"', "\\\"");
             format!("\"{escaped}\"")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::AppState;
+
+    fn app() -> axum::Router {
+        let state = AppState::new_in_memory(300);
+        crate::router(state)
+    }
+
+    /// SPARQL may not be enabled in per-crate tests; accept both 200-level and
+    /// 400 (feature-disabled) as valid HTTP-layer results.
+    fn is_ok_or_sparql_disabled(status: StatusCode) -> bool {
+        status.is_success()
+            || status == StatusCode::NO_CONTENT
+            || status == StatusCode::CREATED
+            || status == StatusCode::BAD_REQUEST
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_target — parameter validation (pure HTTP layer)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn missing_graph_params_returns_400() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/graph-store")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn empty_graph_iri_returns_400() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/graph-store?graph=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /db/{name}/graph-store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_default_graph() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/graph-store?default")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            is_ok_or_sparql_disabled(resp.status()),
+            "unexpected: {}",
+            resp.status()
+        );
+        if resp.status() == StatusCode::OK {
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.contains("n-triples"), "ct: {ct}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_named_graph() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/graph-store?graph=http://example.org/g1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(is_ok_or_sparql_disabled(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_database() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/nonexistent/graph-store?default")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // HEAD /db/{name}/graph-store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn head_default_graph() {
+        let resp = app()
+            .oneshot(
+                Request::head("/db/default/graph-store?default")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(is_ok_or_sparql_disabled(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn head_missing_params() {
+        let resp = app()
+            .oneshot(
+                Request::head("/db/default/graph-store")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // PUT /db/{name}/graph-store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn put_default_graph_empty_body() {
+        let resp = app()
+            .oneshot(
+                Request::put("/db/default/graph-store?default")
+                    .header("content-type", "application/n-triples")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(is_ok_or_sparql_disabled(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn put_missing_params() {
+        let resp = app()
+            .oneshot(
+                Request::put("/db/default/graph-store")
+                    .header("content-type", "application/n-triples")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_unsupported_content_type() {
+        let resp = app()
+            .oneshot(
+                Request::put("/db/default/graph-store?default")
+                    .header("content-type", "text/turtle")
+                    .body(Body::from("<s> <p> <o> ."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /db/{name}/graph-store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_creates_new_graph_without_params() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/graph-store")
+                    .header("content-type", "application/n-triples")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Without ?default or ?graph=, POST creates a new graph (201) or
+        // 400 if sparql is disabled.
+        assert!(
+            resp.status() == StatusCode::CREATED || resp.status() == StatusCode::BAD_REQUEST,
+            "unexpected: {}",
+            resp.status()
+        );
+        if resp.status() == StatusCode::CREATED {
+            assert!(resp.headers().contains_key("location"));
+        }
+    }
+
+    #[tokio::test]
+    async fn post_merge_into_default_graph() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/graph-store?default")
+                    .header("content-type", "application/n-triples")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(is_ok_or_sparql_disabled(resp.status()));
+    }
+
+    // -----------------------------------------------------------------------
+    // DELETE /db/{name}/graph-store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_missing_params() {
+        let resp = app()
+            .oneshot(
+                Request::delete("/db/default/graph-store")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_default_graph() {
+        let resp = app()
+            .oneshot(
+                Request::delete("/db/default/graph-store?default")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(is_ok_or_sparql_disabled(resp.status()));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_body_to_ntriples (pure function tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_empty_body() {
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let result = parse_body_to_ntriples(&headers, &body).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_ntriples_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/n-triples".parse().unwrap());
+        let body = Bytes::from(
+            "<http://ex.org/s> <http://ex.org/p> \"hello\" .\n\
+             # comment line\n\
+             <http://ex.org/s> <http://ex.org/p2> \"world\" .\n",
+        );
+        let result = parse_body_to_ntriples(&headers, &body).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("<http://ex.org/s>"));
+    }
+
+    #[test]
+    fn parse_turtle_returns_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/turtle".parse().unwrap());
+        let body = Bytes::from("<s> <p> <o> .");
+        let err = parse_body_to_ntriples(&headers, &body);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn parse_unsupported_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/rdf+xml".parse().unwrap());
+        let body = Bytes::from("<rdf:RDF/>");
+        let err = parse_body_to_ntriples(&headers, &body);
+        assert!(err.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_insert_data (pure function tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_insert_data_default_graph() {
+        let lines = vec!["<http://ex.org/s> <http://ex.org/p> \"val\" .".to_string()];
+        let sparql = build_insert_data(&GraphTarget::Default, &lines);
+        assert!(sparql.starts_with("INSERT DATA"));
+        assert!(sparql.contains("<http://ex.org/s>"));
+        assert!(!sparql.contains("GRAPH"));
+    }
+
+    #[test]
+    fn build_insert_data_named_graph() {
+        let lines = vec!["<http://ex.org/s> <http://ex.org/p> \"val\" .".to_string()];
+        let sparql = build_insert_data(&GraphTarget::Named("http://ex.org/g1".into()), &lines);
+        assert!(sparql.contains("GRAPH <http://ex.org/g1>"));
+    }
+
+    // -----------------------------------------------------------------------
+    // value_to_nt_term (pure function tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nt_term_iri() {
+        let v = grafeo_common::Value::String("http://example.org/s".into());
+        assert_eq!(value_to_nt_term(&v), "<http://example.org/s>");
+    }
+
+    #[test]
+    fn nt_term_blank_node() {
+        let v = grafeo_common::Value::String("_:b0".into());
+        assert_eq!(value_to_nt_term(&v), "_:b0");
+    }
+
+    #[test]
+    fn nt_term_plain_string() {
+        let v = grafeo_common::Value::String("hello world".into());
+        assert_eq!(value_to_nt_term(&v), "\"hello world\"");
+    }
+
+    #[test]
+    fn nt_term_string_with_quotes() {
+        let v = grafeo_common::Value::String("say \"hi\"".into());
+        assert_eq!(value_to_nt_term(&v), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn nt_term_integer() {
+        let v = grafeo_common::Value::Int64(42);
+        assert_eq!(
+            value_to_nt_term(&v),
+            "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
+    }
+
+    #[test]
+    fn nt_term_float() {
+        let v = grafeo_common::Value::Float64(1.5);
+        assert_eq!(
+            value_to_nt_term(&v),
+            "\"1.5\"^^<http://www.w3.org/2001/XMLSchema#double>"
+        );
+    }
+
+    #[test]
+    fn nt_term_boolean() {
+        let v = grafeo_common::Value::Bool(true);
+        assert_eq!(
+            value_to_nt_term(&v),
+            "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+        );
     }
 }

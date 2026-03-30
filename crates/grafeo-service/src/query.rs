@@ -369,3 +369,522 @@ where
             .map_err(|e| ServiceError::Internal(e.to_string()))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ServiceState;
+
+    fn state() -> ServiceState {
+        ServiceState::new_in_memory(300)
+    }
+
+    // -----------------------------------------------------------------------
+    // execute — auto-commit queries
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn execute_simple_query() {
+        let s = state();
+        let qr = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "MATCH (n) RETURN n LIMIT 1",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(qr.columns.len() >= 1);
+    }
+
+    #[tokio::test]
+    async fn execute_not_found_database() {
+        let s = state();
+        let err = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "nonexistent",
+            "MATCH (n) RETURN n",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_syntax_error() {
+        let s = state();
+        let err = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "THIS IS NOT VALID GQL",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_with_params() {
+        let s = state();
+        let mut params = HashMap::new();
+        params.insert("x".to_string(), grafeo_common::Value::Int64(42));
+        let qr = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "RETURN $x AS val",
+            None,
+            Some(params),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(qr.columns, vec!["val"]);
+        assert_eq!(qr.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_with_language_dispatch() {
+        let s = state();
+        // GQL is always available
+        let qr = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "MATCH (n) RETURN n LIMIT 0",
+            Some("gql"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(qr.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_records_success_metrics() {
+        let s = state();
+        QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "MATCH (n) RETURN n LIMIT 0",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let rendered = s.metrics().render(0, 0, 0, 0, 0, None);
+        assert!(rendered.contains("grafeo_queries_total{language=\"gql\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn execute_records_error_metrics() {
+        let s = state();
+        let _ = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "THIS IS NOT VALID",
+            None,
+            None,
+            None,
+        )
+        .await;
+        let rendered = s.metrics().render(0, 0, 0, 0, 0, None);
+        assert!(rendered.contains("grafeo_query_errors_total{language=\"gql\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_timeout() {
+        let s = state();
+        // A query that completes instantly should succeed even with a short timeout.
+        let qr = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "MATCH (n) RETURN n LIMIT 0",
+            None,
+            None,
+            Some(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+        assert!(qr.rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // begin_tx / tx_execute / commit / rollback
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn begin_tx_returns_session_id() {
+        let s = state();
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+            .await
+            .unwrap();
+        assert!(!id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn begin_tx_not_found_database() {
+        let s = state();
+        let err = QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn tx_execute_then_commit() {
+        let s = state();
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+            .await
+            .unwrap();
+
+        let qr = QueryService::tx_execute(
+            s.sessions(),
+            s.metrics(),
+            &id,
+            300,
+            "CREATE (n:Person {name: 'Alice'}) RETURN n.name AS name",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(qr.rows.len(), 1);
+
+        QueryService::commit(s.sessions(), &id, 300).await.unwrap();
+
+        // Session should be removed after commit.
+        let err = QueryService::commit(s.sessions(), &id, 300)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn tx_execute_then_rollback() {
+        let s = state();
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+            .await
+            .unwrap();
+
+        QueryService::tx_execute(
+            s.sessions(),
+            s.metrics(),
+            &id,
+            300,
+            "CREATE (n:Temp {val: 1})",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        QueryService::rollback(s.sessions(), &id, 300)
+            .await
+            .unwrap();
+
+        // Session should be removed after rollback.
+        let err = QueryService::rollback(s.sessions(), &id, 300)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn tx_execute_session_not_found() {
+        let s = state();
+        let err = QueryService::tx_execute(
+            s.sessions(),
+            s.metrics(),
+            "nonexistent-session",
+            300,
+            "MATCH (n) RETURN n",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn commit_session_not_found() {
+        let s = state();
+        let err = QueryService::commit(s.sessions(), "bad-id", 300)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn rollback_session_not_found() {
+        let s = state();
+        let err = QueryService::rollback(s.sessions(), "bad-id", 300)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::SessionNotFound));
+    }
+
+    // -----------------------------------------------------------------------
+    // batch_execute
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn batch_empty_returns_empty() {
+        let s = state();
+        let results =
+            QueryService::batch_execute(s.databases(), s.metrics(), "default", vec![], None)
+                .await
+                .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_single_query() {
+        let s = state();
+        let results = QueryService::batch_execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            vec![BatchQuery {
+                statement: "MATCH (n) RETURN n LIMIT 0".to_string(),
+                language: None,
+                params: None,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_multiple_queries() {
+        let s = state();
+        let results = QueryService::batch_execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            vec![
+                BatchQuery {
+                    statement: "CREATE (a:A {val: 1})".to_string(),
+                    language: None,
+                    params: None,
+                },
+                BatchQuery {
+                    statement: "CREATE (b:B {val: 2})".to_string(),
+                    language: None,
+                    params: None,
+                },
+                BatchQuery {
+                    statement: "MATCH (n) RETURN n.val AS v".to_string(),
+                    language: None,
+                    params: None,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 3);
+        // The third query should see both nodes created in the same transaction.
+        assert_eq!(results[2].rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_partial_failure_reports_index() {
+        let s = state();
+        let err = QueryService::batch_execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            vec![
+                BatchQuery {
+                    statement: "CREATE (a:A {val: 1})".to_string(),
+                    language: None,
+                    params: None,
+                },
+                BatchQuery {
+                    statement: "NOT VALID GQL AT ALL".to_string(),
+                    language: None,
+                    params: None,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap_err();
+        // Error message should reference the failing index.
+        let msg = err.to_string();
+        assert!(msg.contains("index 1"), "expected index in error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn batch_failure_rolls_back() {
+        let s = state();
+        // First, create a node so we have a known starting point.
+        QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "CREATE (n:Counter {val: 0})",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Batch: mutate then fail. The mutation should be rolled back.
+        let _ = QueryService::batch_execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            vec![
+                BatchQuery {
+                    statement: "CREATE (n:Counter {val: 99})".to_string(),
+                    language: None,
+                    params: None,
+                },
+                BatchQuery {
+                    statement: "INVALID SYNTAX".to_string(),
+                    language: None,
+                    params: None,
+                },
+            ],
+            None,
+        )
+        .await;
+
+        // Only the original node should exist (the batch was rolled back).
+        let qr = QueryService::execute(
+            s.databases(),
+            s.metrics(),
+            "default",
+            "MATCH (n:Counter) RETURN n.val AS v",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(qr.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_not_found_database() {
+        let s = state();
+        let err = QueryService::batch_execute(
+            s.databases(),
+            s.metrics(),
+            "nope",
+            vec![BatchQuery {
+                statement: "MATCH (n) RETURN n".to_string(),
+                language: None,
+                params: None,
+            }],
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // dispatch (sync, for transport crates)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatch_gql() {
+        let s = state();
+        let entry = s.databases().get("default").unwrap();
+        let session = entry.db.session();
+        let qr =
+            QueryService::dispatch(&session, "MATCH (n) RETURN n LIMIT 0", None, None).unwrap();
+        assert!(qr.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_syntax_error() {
+        let s = state();
+        let entry = s.databases().get("default").unwrap();
+        let session = entry.db.session();
+        let err = QueryService::dispatch(&session, "TOTALLY BROKEN", None, None).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // get_session
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_session_not_found() {
+        let s = state();
+        let result = QueryService::get_session(s.sessions(), "no-such-id", 300);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_session_after_begin() {
+        let s = state();
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+            .await
+            .unwrap();
+        let session = QueryService::get_session(s.sessions(), &id, 300);
+        assert!(session.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // run_with_timeout
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_with_timeout_no_timeout() {
+        let result = run_with_timeout(None, || Ok::<_, ServiceError>(42)).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_zero_duration() {
+        // Zero duration should behave like no timeout.
+        let result = run_with_timeout(Some(Duration::ZERO), || Ok::<_, ServiceError>(42)).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_generous_deadline() {
+        let result = run_with_timeout(Some(Duration::from_secs(10)), || {
+            Ok::<_, ServiceError>("fast")
+        })
+        .await;
+        assert_eq!(result.unwrap(), "fast");
+    }
+
+    #[tokio::test]
+    async fn run_with_timeout_propagates_error() {
+        let result = run_with_timeout(None, || {
+            Err::<(), _>(ServiceError::BadRequest("boom".to_string()))
+        })
+        .await;
+        assert!(matches!(result.unwrap_err(), ServiceError::BadRequest(_)));
+    }
+}

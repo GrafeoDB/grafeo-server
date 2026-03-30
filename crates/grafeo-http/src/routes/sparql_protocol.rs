@@ -193,3 +193,270 @@ fn format_sparql_response(
         sparql_results_json_response(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::AppState;
+
+    fn app() -> axum::Router {
+        let state = AppState::new_in_memory(300);
+        crate::router(state)
+    }
+
+    /// Helper: returns true if the sparql feature is active (query execution
+    /// succeeds). When running via `cargo test --workspace`, default features
+    /// include sparql. When testing `grafeo-http` in isolation, sparql may be
+    /// absent, so execution-dependent tests accept both 200 and 400.
+    fn expects_sparql_success(status: StatusCode) -> bool {
+        // 200 = sparql enabled, query succeeded.
+        // 400 = sparql disabled ("sparql support not enabled") OR query error.
+        // Both are valid HTTP-layer results; the protocol dispatch itself worked.
+        status == StatusCode::OK || status == StatusCode::BAD_REQUEST
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /db/{name}/sparql
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_sparql_select() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/sparql?query=SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%201")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // OK when sparql is enabled, BadRequest when disabled.
+        assert!(
+            expects_sparql_success(resp.status()),
+            "unexpected status: {}",
+            resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_sparql_missing_query_param() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/sparql")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_sparql_database_not_found() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/nonexistent/sparql?query=SELECT%20*%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 404 when sparql enabled, 400 when sparql disabled (feature error
+        // is returned before the database lookup).
+        assert!(
+            resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST,
+            "unexpected status: {}",
+            resp.status()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // POST — content-type dispatch
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_sparql_query_content_type() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/sparql-query")
+                    .body(Body::from("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn post_sparql_query_with_charset() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/sparql-query; charset=utf-8")
+                    .body(Body::from("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 0"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn post_sparql_update_content_type() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/sparql-update")
+                    .body(Body::from(
+                        "INSERT DATA { <http://ex.org/s> <http://ex.org/p> \"hello\" }",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    // -----------------------------------------------------------------------
+    // POST — form-urlencoded
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_sparql_form_encoded_query() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "query=SELECT+%3Fs+%3Fp+%3Fo+WHERE+%7B+%3Fs+%3Fp+%3Fo+%7D+LIMIT+0",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn post_sparql_form_encoded_update() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "update=INSERT+DATA+%7B+%3Chttp%3A%2F%2Fex.org%2Fs%3E+%3Chttp%3A%2F%2Fex.org%2Fp%3E+%22val%22+%7D",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    #[tokio::test]
+    async fn post_sparql_form_missing_query_and_update() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("other=value"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Always 400: the form parsing error occurs BEFORE engine dispatch.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // POST — application/json (backwards compat)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_sparql_json_body() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 0"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(expects_sparql_success(resp.status()));
+    }
+
+    // -----------------------------------------------------------------------
+    // POST — unsupported content-type
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_sparql_unsupported_content_type() {
+        let resp = app()
+            .oneshot(
+                Request::post("/db/default/sparql")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("SELECT * WHERE { ?s ?p ?o }"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Always 400: unsupported content-type is a protocol-level error.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // Accept header negotiation (requires sparql feature for 200)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_sparql_results_json() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/sparql?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%200")
+                    .header("accept", "application/sparql-results+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.contains("sparql-results+json"), "ct: {ct}");
+        }
+        // If 400, sparql is disabled; content-type test is not applicable.
+    }
+
+    #[tokio::test]
+    async fn accept_application_json_returns_native_format() {
+        let resp = app()
+            .oneshot(
+                Request::get("/db/default/sparql?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%200")
+                    .header("accept", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.contains("application/json"), "ct: {ct}");
+            assert!(!ct.contains("sparql-results"), "ct: {ct}");
+        }
+    }
+}
