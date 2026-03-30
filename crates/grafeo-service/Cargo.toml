@@ -71,6 +71,9 @@ parquet-import = ["grafeo-engine/parquet-import"]
 # Engine: temporal versioning
 temporal = ["grafeo-engine/temporal"]
 
+# Engine: async storage (async WAL and storage backend)
+async-storage = ["grafeo-engine/async-storage"]
+
 # Engine: metrics
 metrics = ["grafeo-engine/metrics"]
 

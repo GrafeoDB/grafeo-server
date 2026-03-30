@@ -71,7 +71,7 @@ impl Default for DatabaseMetadata {
 
 /// A single database instance with its metadata.
 pub struct DatabaseEntry {
-    pub db: GrafeoDB,
+    pub db: Arc<GrafeoDB>,
     pub metadata: DatabaseMetadata,
 }
 
@@ -143,8 +143,13 @@ impl DatabaseManager {
                                             .map(|n| n.get())
                                             .unwrap_or(1),
                                     };
-                                    mgr.databases
-                                        .insert(name, Arc::new(DatabaseEntry { db, metadata }));
+                                    mgr.databases.insert(
+                                        name,
+                                        Arc::new(DatabaseEntry {
+                                            db: Arc::new(db),
+                                            metadata,
+                                        }),
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::error!(name = %name, error = %e, "Failed to open database, skipping");
@@ -172,7 +177,7 @@ impl DatabaseManager {
                 mgr.databases.insert(
                     "default".to_string(),
                     Arc::new(DatabaseEntry {
-                        db,
+                        db: Arc::new(db),
                         metadata: DatabaseMetadata {
                             storage_mode: "persistent".to_string(),
                             ..Default::default()
@@ -186,7 +191,7 @@ impl DatabaseManager {
             mgr.databases.insert(
                 "default".to_string(),
                 Arc::new(DatabaseEntry {
-                    db: GrafeoDB::new_in_memory(),
+                    db: Arc::new(GrafeoDB::new_in_memory()),
                     metadata: DatabaseMetadata::default(),
                 }),
             );
@@ -364,7 +369,7 @@ impl DatabaseManager {
         };
 
         self.databases
-            .insert(name.clone(), Arc::new(DatabaseEntry { db, metadata }));
+            .insert(name.clone(), Arc::new(DatabaseEntry { db: Arc::new(db), metadata }));
 
         Ok(())
     }

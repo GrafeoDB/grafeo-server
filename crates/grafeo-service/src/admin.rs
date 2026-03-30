@@ -72,10 +72,21 @@ impl AdminService {
             .get(db_name)
             .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
 
-        tokio::task::spawn_blocking(move || entry.db.wal_checkpoint())
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?
-            .map_err(|e| ServiceError::Internal(e.to_string()))
+        #[cfg(feature = "async-storage")]
+        {
+            entry
+                .db
+                .async_wal_checkpoint()
+                .await
+                .map_err(|e| ServiceError::Internal(e.to_string()))
+        }
+        #[cfg(not(feature = "async-storage"))]
+        {
+            tokio::task::spawn_blocking(move || entry.db.wal_checkpoint())
+                .await
+                .map_err(|e| ServiceError::Internal(e.to_string()))?
+                .map_err(|e| ServiceError::Internal(e.to_string()))
+        }
     }
 
     /// Validate database integrity.

@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.27"
+version = "0.5.30"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -18,8 +18,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine (path deps for local development; switch to version = "..." for releases)
-grafeo-engine = { version = "0.5.27", default-features = false }
-grafeo-common = { version = "0.5.27" }
+grafeo-engine = { version = "0.5.30", default-features = false }
+grafeo-common = { version = "0.5.30" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -143,6 +143,9 @@ import = ["jsonl-import", "parquet-import"]
 # Engine: temporal versioning (forwarded)
 temporal = ["grafeo-service/temporal"]
 
+# Engine: async storage (forwarded)
+async-storage = ["grafeo-service/async-storage"]
+
 # Engine: metrics (forwarded)
 metrics = ["grafeo-service/metrics"]
 
@@ -157,6 +160,7 @@ full = [
     "http", "studio", "all-languages", "algos", "ai", "rdf", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
     "temporal", "import", "metrics", "tracing", "sync", "push-changefeed", "replication",
+    "async-storage",
 ]
 
 [dependencies]
