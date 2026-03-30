@@ -345,6 +345,10 @@ impl AdminService {
     ///
     /// Requires the `async-storage` and `grafeo-file` features. Returns an
     /// error explaining the missing features when they are not enabled.
+    // The await lives inside the cfg(async-storage, grafeo-file) branch;
+    // without those features the function body is sync, but the signature
+    // must remain async for the HTTP handler.
+    #[allow(clippy::unused_async)]
     pub async fn write_snapshot(
         databases: &DatabaseManager,
         db_name: &str,

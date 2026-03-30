@@ -368,8 +368,13 @@ impl DatabaseManager {
             threads,
         };
 
-        self.databases
-            .insert(name.clone(), Arc::new(DatabaseEntry { db: Arc::new(db), metadata }));
+        self.databases.insert(
+            name.clone(),
+            Arc::new(DatabaseEntry {
+                db: Arc::new(db),
+                metadata,
+            }),
+        );
 
         Ok(())
     }
