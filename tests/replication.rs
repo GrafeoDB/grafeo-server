@@ -20,7 +20,28 @@ use tokio::net::TcpListener;
 
 /// Boots a primary in-memory server on an ephemeral port.
 async fn spawn_primary() -> String {
-    let state = grafeo_server::AppState::new_in_memory(300);
+    let config = grafeo_service::ServiceConfig {
+        data_dir: None,
+        read_only: false,
+        session_ttl: 300,
+        query_timeout: 30,
+        rate_limit: 0,
+        rate_limit_window: 60,
+        #[cfg(feature = "auth")]
+        auth_token: None,
+        #[cfg(feature = "auth")]
+        auth_user: None,
+        #[cfg(feature = "auth")]
+        auth_password: None,
+        #[cfg(feature = "replication")]
+        replication_mode: grafeo_service::replication::ReplicationMode::Primary,
+    };
+    let service = grafeo_service::ServiceState::new(&config);
+    let state = grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
     spawn_server(state).await
 }
 
