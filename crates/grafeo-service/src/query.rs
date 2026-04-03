@@ -27,6 +27,7 @@ impl QueryService {
     /// Creates a fresh session, dispatches by language, runs with timeout,
     /// records metrics, and returns raw `QueryResult`. Transport crates
     /// handle value encoding (JSON, GWP, PackStream).
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute(
         databases: &DatabaseManager,
         metrics: &Metrics,
@@ -35,6 +36,7 @@ impl QueryService {
         language: Option<&str>,
         params: Option<HashMap<String, grafeo_common::Value>>,
         timeout: Option<Duration>,
+        read_only: bool,
     ) -> Result<QueryResult, ServiceError> {
         let entry = databases
             .get(db_name)
@@ -44,7 +46,11 @@ impl QueryService {
         let stmt = statement.to_owned();
 
         let result = run_with_timeout(timeout, move || {
-            let session = entry.db.session();
+            let session = if read_only {
+                entry.db.session_read_only()
+            } else {
+                entry.db.session()
+            };
             dispatch_query(&session, &stmt, lang, params.as_ref())
         })
         .await;
@@ -105,6 +111,7 @@ impl QueryService {
         databases: &DatabaseManager,
         sessions: &SessionRegistry,
         db_name: &str,
+        read_only: bool,
     ) -> Result<String, ServiceError> {
         let entry = databases
             .get(db_name)
@@ -112,7 +119,11 @@ impl QueryService {
 
         let db_name = db_name.to_owned();
         let session_id = tokio::task::spawn_blocking(move || {
-            let mut engine_session = entry.db.session();
+            let mut engine_session = if read_only {
+                entry.db.session_read_only()
+            } else {
+                entry.db.session()
+            };
             engine_session
                 .begin_transaction()
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;
@@ -181,6 +192,7 @@ impl QueryService {
         db_name: &str,
         queries: Vec<BatchQuery>,
         timeout: Option<Duration>,
+        read_only: bool,
     ) -> Result<Vec<QueryResult>, ServiceError> {
         if queries.is_empty() {
             return Ok(vec![]);
@@ -198,7 +210,11 @@ impl QueryService {
             .collect();
 
         let results = run_with_timeout(timeout, move || {
-            let mut session = entry.db.session();
+            let mut session = if read_only {
+                entry.db.session_read_only()
+            } else {
+                entry.db.session()
+            };
             session
                 .begin_transaction()
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;
@@ -394,6 +410,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -411,6 +428,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -428,6 +446,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -447,6 +466,7 @@ mod tests {
             None,
             Some(params),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -466,6 +486,7 @@ mod tests {
             Some("gql"),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -483,6 +504,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -501,6 +523,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
         let rendered = s.metrics().render(0, 0, 0, 0, 0, None);
@@ -519,6 +542,7 @@ mod tests {
             None,
             None,
             Some(Duration::from_secs(10)),
+            false,
         )
         .await
         .unwrap();
@@ -532,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn begin_tx_returns_session_id() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false)
             .await
             .unwrap();
         assert!(!id.is_empty());
@@ -541,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn begin_tx_not_found_database() {
         let s = state();
-        let err = QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db")
+        let err = QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db", false)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));
@@ -550,7 +574,7 @@ mod tests {
     #[tokio::test]
     async fn tx_execute_then_commit() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false)
             .await
             .unwrap();
 
@@ -580,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn tx_execute_then_rollback() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false)
             .await
             .unwrap();
 
@@ -652,7 +676,7 @@ mod tests {
     async fn batch_empty_returns_empty() {
         let s = state();
         let results =
-            QueryService::batch_execute(s.databases(), s.metrics(), "default", vec![], None)
+            QueryService::batch_execute(s.databases(), s.metrics(), "default", vec![], None, false)
                 .await
                 .unwrap();
         assert!(results.is_empty());
@@ -671,6 +695,7 @@ mod tests {
                 params: None,
             }],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -702,6 +727,7 @@ mod tests {
                 },
             ],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -730,6 +756,7 @@ mod tests {
                 },
             ],
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -750,6 +777,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -772,6 +800,7 @@ mod tests {
                 },
             ],
             None,
+            false,
         )
         .await;
 
@@ -784,6 +813,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -803,6 +833,7 @@ mod tests {
                 params: None,
             }],
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -846,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn get_session_after_begin() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default")
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false)
             .await
             .unwrap();
         let session = QueryService::get_session(s.sessions(), &id, 300);

@@ -101,5 +101,8 @@ auth = ["dep:subtle"]
 # OpenAPI schema derives (utoipa::ToSchema)
 openapi = ["dep:utoipa"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

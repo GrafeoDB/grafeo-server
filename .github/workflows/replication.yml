@@ -1,0 +1,112 @@
+name: Replication Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast in-process replication tests: run on every push
+  in-process:
+    name: In-Process Replication
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # grafeo-server depends on local grafeo crates via path
+      - name: Checkout grafeo engine
+        uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: ../grafeo
+
+      - name: Create empty client dist
+        run: mkdir -p client/dist
+
+      - name: Run in-process replication tests
+        run: cargo test --features "full" --test replication -- --nocapture
+
+  # Maelstrom consistency model test: run on every push (fast, ~30s)
+  maelstrom:
+    name: Maelstrom Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Maelstrom
+        run: |
+          curl -fsSL https://github.com/jepsen-io/maelstrom/releases/download/v0.2.4/maelstrom.tar.bz2 \
+            | tar -xj
+          echo "$PWD/maelstrom" >> "$GITHUB_PATH"
+
+      - name: Build Maelstrom node
+        run: cargo build --release -p grafeo-maelstrom
+
+      - name: Run Maelstrom lin-kv (read-uncommitted)
+        run: |
+          maelstrom test -w lin-kv \
+            --bin target/release/grafeo-maelstrom \
+            --node-count 3 \
+            --time-limit 10 \
+            --rate 50 \
+            --consistency-models read-uncommitted
+
+      - name: Upload Maelstrom results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maelstrom-results
+          path: store/latest/
+          retention-days: 7
+
+  # Docker-based replication tests: run on PRs only (slower)
+  docker:
+    name: Docker Replication
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Checkout grafeo engine
+        uses: actions/checkout@v4
+        with:
+          repository: GrafeoDB/grafeo
+          path: ../grafeo
+
+      - name: Create empty client dist
+        run: mkdir -p client/dist
+
+      - name: Build Docker image
+        run: docker build -t grafeo-server:test .
+
+      - name: Start replication cluster
+        run: docker compose -f tests/docker-compose.replication.yml up -d --wait
+
+      - name: Run Docker replication tests
+        run: cargo test --features "full" --test replication_docker -- --ignored --test-threads=1 --nocapture
+
+      - name: Teardown cluster
+        if: always()
+        run: docker compose -f tests/docker-compose.replication.yml down -v

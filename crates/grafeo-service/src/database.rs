@@ -82,6 +82,9 @@ pub struct DatabaseManager {
     data_dir: Option<PathBuf>,
     /// When `true`, reject all write operations.
     read_only: bool,
+    /// When `true`, enable CDC on every database (needed for replication).
+    #[cfg(feature = "cdc")]
+    cdc_enabled: bool,
 }
 
 impl DatabaseManager {
@@ -93,6 +96,8 @@ impl DatabaseManager {
             databases: DashMap::new(),
             data_dir: data_dir.map(PathBuf::from),
             read_only,
+            #[cfg(feature = "cdc")]
+            cdc_enabled: false,
         };
 
         if let Some(ref dir) = mgr.data_dir {
@@ -198,6 +203,18 @@ impl DatabaseManager {
         }
 
         mgr
+    }
+
+    /// Enables or disables CDC on all current databases and future ones.
+    ///
+    /// Called by `ServiceState` when the server is configured as a replication
+    /// primary, so that all mutations generate CDC events for replicas to consume.
+    #[cfg(feature = "cdc")]
+    pub fn set_cdc_enabled(&mut self, enabled: bool) {
+        self.cdc_enabled = enabled;
+        for entry in &self.databases {
+            entry.value().db.set_cdc_enabled(enabled);
+        }
     }
 
     /// Returns a clone of the `Arc<DatabaseEntry>` for the given database name.
@@ -359,6 +376,13 @@ impl DatabaseManager {
                 }
                 return Err(e);
             }
+        }
+
+        // If CDC is enabled (replication primary), activate it on this database
+        // so mutations produce change events for replicas.
+        #[cfg(feature = "cdc")]
+        if self.cdc_enabled {
+            db.set_cdc_enabled(true);
         }
 
         let metadata = DatabaseMetadata {

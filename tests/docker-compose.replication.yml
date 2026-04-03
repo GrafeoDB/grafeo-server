@@ -1,0 +1,100 @@
+# 3-node replication cluster for correctness testing.
+#
+# Primary accepts writes on port 7474.
+# Two replicas poll the primary for CDC changes.
+# Toxiproxy sits between primary and replicas for fault injection.
+#
+# Usage:
+#   docker compose -f tests/docker-compose.replication.yml build
+#   docker compose -f tests/docker-compose.replication.yml up -d
+#   cargo test --features "full" --test replication_docker -- --test-threads=1
+#   docker compose -f tests/docker-compose.replication.yml down
+
+services:
+  primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - "--replication-mode"
+      - "primary"
+      - "--port"
+      - "7474"
+      - "--data-dir"
+      - "/data"
+    ports:
+      - "17474:7474"
+    volumes:
+      - primary-data:/data
+    networks:
+      - repl
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7474/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  replica-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - "--replication-mode"
+      - "replica"
+      - "--primary-url"
+      - "http://primary:7474"
+      - "--port"
+      - "7474"
+      - "--data-dir"
+      - "/data"
+    ports:
+      - "17475:7474"
+    volumes:
+      - replica1-data:/data
+    depends_on:
+      primary:
+        condition: service_healthy
+    networks:
+      - repl
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7474/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  replica-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - "--replication-mode"
+      - "replica"
+      - "--primary-url"
+      - "http://primary:7474"
+      - "--port"
+      - "7474"
+      - "--data-dir"
+      - "/data"
+    ports:
+      - "17476:7474"
+    volumes:
+      - replica2-data:/data
+    depends_on:
+      primary:
+        condition: service_healthy
+    networks:
+      - repl
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7474/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+networks:
+  repl:
+    driver: bridge
+
+volumes:
+  primary-data:
+  replica1-data:
+  replica2-data:

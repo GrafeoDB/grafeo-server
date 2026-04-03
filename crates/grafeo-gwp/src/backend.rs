@@ -58,6 +58,11 @@ impl GrafeoBackend {
         }
     }
 
+    /// Returns `true` if client-facing queries should be read-only.
+    fn query_read_only(&self) -> bool {
+        self.state.is_query_read_only()
+    }
+
     /// Looks up an internal session by handle.
     #[allow(clippy::result_large_err)]
     fn get_session(&self, handle: &SessionHandle) -> Result<Arc<Mutex<GrafeoSession>>, GqlError> {
@@ -99,9 +104,16 @@ impl GqlBackend for GrafeoBackend {
             .get("default")
             .ok_or_else(|| GqlError::Session("default database not found".to_owned()))?;
 
-        let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
-            .await
-            .map_err(GqlError::backend)?;
+        let ro = self.query_read_only();
+        let engine_session = tokio::task::spawn_blocking(move || {
+            if ro {
+                entry.db.session_read_only()
+            } else {
+                entry.db.session()
+            }
+        })
+        .await
+        .map_err(GqlError::backend)?;
 
         let id = Uuid::new_v4().to_string();
         self.sessions.insert(
@@ -136,9 +148,16 @@ impl GqlBackend for GrafeoBackend {
                     .get(&db_name)
                     .ok_or_else(|| GqlError::Session(format!("graph '{db_name}' not found")))?;
 
-                let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
-                    .await
-                    .map_err(GqlError::backend)?;
+                let ro = self.query_read_only();
+                let engine_session = tokio::task::spawn_blocking(move || {
+                    if ro {
+                        entry.db.session_read_only()
+                    } else {
+                        entry.db.session()
+                    }
+                })
+                .await
+                .map_err(GqlError::backend)?;
 
                 let session_arc = self.get_session(session)?;
                 let mut s = session_arc.lock();
@@ -173,9 +192,16 @@ impl GqlBackend for GrafeoBackend {
             .get("default")
             .ok_or_else(|| GqlError::Session("default database not found".to_owned()))?;
 
-        let engine_session = tokio::task::spawn_blocking(move || entry.db.session())
-            .await
-            .map_err(GqlError::backend)?;
+        let ro = self.query_read_only();
+        let engine_session = tokio::task::spawn_blocking(move || {
+            if ro {
+                entry.db.session_read_only()
+            } else {
+                entry.db.session()
+            }
+        })
+        .await
+        .map_err(GqlError::backend)?;
 
         let session_arc = self.get_session(session)?;
         let mut s = session_arc.lock();

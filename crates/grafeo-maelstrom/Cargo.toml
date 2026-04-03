@@ -1,0 +1,17 @@
+[package]
+name = "grafeo-maelstrom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Maelstrom node testing grafeo-server's replication consistency model"
+
+[[bin]]
+name = "grafeo-maelstrom"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"
+
+[lints]
+workspace = true

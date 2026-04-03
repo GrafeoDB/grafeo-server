@@ -246,6 +246,7 @@ async fn process_query(state: &AppState, id: Option<String>, req: QueryRequest) 
         req.language.as_deref(),
         params,
         timeout,
+        state.service().is_query_read_only(),
     )
     .await;
 

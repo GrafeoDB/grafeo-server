@@ -5,7 +5,26 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.32] - 2026-04-03
+
+Replication correctness: atomic batch replay, read-only replica enforcement, HLC timestamps, Maelstrom and Jepsen testing.
+
+### Changed
+
+- **Atomic sync apply**: `SyncService::apply()` now wraps all mutations in a session transaction for all-or-nothing visibility. Readers on replicas never see partial batch state. Uses new session CRUD methods (`set_node_property`, `delete_node`, etc.) for transactional property updates and deletions
+- **Persistent replica epoch**: `ReplicationState::with_persistence(data_dir)` saves per-database epoch to `{data_dir}/.replica-epochs` on each advance. Replicas resume from their last position after restart instead of re-fetching from epoch 0
+- **HLC timestamp comparison**: `server_is_newer()` now explicitly converts `u64` client timestamps to `HlcTimestamp` for type-safe comparison, compatible with grafeo-engine 0.5.32's HLC-based CDC timestamps
+- **grafeo-engine 0.5.32**: CDC opt-in per session (`set_cdc_enabled`, `session_with_cdc`), Hybrid Logical Clock for causal consistency, `GrafeoDB::compact()` columnar read-only store, session CRUD methods, Gremlin `valueMap()`/`elementMap()`, sibling CALL block scope fix, push-based aggregator hash collision fix, Cypher ORDER BY zero fix
+- **CDC auto-activation**: server automatically enables CDC on all databases when running as a replication primary, ensuring all mutations (both direct API and session-driven) produce change events
+
+### Added
+
+- **Replication integration tests**: end-to-end primary-to-replica data flow tests via `SyncService::pull()` + `apply()`, including session-driven mutations (INSERT/SET/DELETE via GQL), epoch persistence roundtrip
+- **`ReplicationMode::is_primary()` accessor**: complements `is_replica()` for symmetric replication mode checks
+- **Engine-level read-only on replicas**: `QueryService` creates read-only sessions on replicas via `session_read_only()`, preventing mutations through `POST /query` across all transports (HTTP, GWP, BoltR). Previously only PUT/PATCH/DELETE were blocked by middleware
+- **`ServiceState::is_query_read_only()`**: combines global read-only flag with replica detection for all transports
+- **Maelstrom consistency test node** (`crates/grafeo-maelstrom`): standalone Rust binary implementing Maelstrom's `lin-kv` protocol with primary-replica replication model, write/CAS forwarding, LWW conflict resolution, and HLC timestamps. Run with `maelstrom test -w lin-kv --consistency-models read-uncommitted`
+- **Jepsen test harness** (`jepsen/`): Clojure project for Docker-based chaos testing with network partition (docker pause) and crash (docker kill) nemeses, eventual consistency checker
 
 ## [0.5.30] - 2026-03-30
 

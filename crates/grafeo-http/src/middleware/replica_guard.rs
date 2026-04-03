@@ -22,11 +22,15 @@ pub async fn replica_guard_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
+    // On replicas, allow read queries and sync endpoints but reject mutation
+    // endpoints. The engine's read-only session flag provides a second line of
+    // defense for queries that contain mutations.
+    let path = req.uri().path();
+    let is_replication_path = path.ends_with("/sync") || path.ends_with("/changes");
+
     if state.service().is_replica()
-        && matches!(
-            *req.method(),
-            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-        )
+        && !is_replication_path
+        && matches!(*req.method(), Method::PUT | Method::PATCH | Method::DELETE)
     {
         let body = json!({
             "error": "replica_mode",

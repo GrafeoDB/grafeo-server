@@ -47,6 +47,12 @@ pub enum ReplicationMode {
 }
 
 impl ReplicationMode {
+    /// Returns `true` when this instance is the replication primary.
+    #[must_use]
+    pub fn is_primary(&self) -> bool {
+        matches!(self, Self::Primary)
+    }
+
     /// Returns `true` when this instance should reject write operations.
     #[must_use]
     pub fn is_replica(&self) -> bool {
@@ -86,19 +92,48 @@ pub struct ReplicationStatus {
 /// Shared replication state updated by the background poll task.
 ///
 /// Holds per-database last-applied epoch counters and the most recent error.
-#[derive(Debug, Default)]
+/// Optionally persists epoch state to disk so replicas don't re-fetch from
+/// epoch 0 after a restart.
+#[derive(Debug)]
 pub struct ReplicationState {
     /// Per-database last-applied epoch.
     pub epochs: DashMap<String, Arc<AtomicU64>>,
     /// Per-database last error.
     pub errors: DashMap<String, String>,
+    /// Data directory for epoch persistence. None = in-memory only.
+    data_dir: Option<std::path::PathBuf>,
+}
+
+impl Default for ReplicationState {
+    fn default() -> Self {
+        Self {
+            epochs: DashMap::new(),
+            errors: DashMap::new(),
+            data_dir: None,
+        }
+    }
 }
 
 impl ReplicationState {
-    /// Creates a new empty state.
+    /// Creates a new empty state (in-memory only, no persistence).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new state with disk persistence.
+    ///
+    /// Loads previously saved epoch state from `{data_dir}/.replica-epochs`
+    /// if the file exists, so replicas resume from where they left off.
+    #[must_use]
+    pub fn with_persistence(data_dir: std::path::PathBuf) -> Self {
+        let state = Self {
+            epochs: DashMap::new(),
+            errors: DashMap::new(),
+            data_dir: Some(data_dir),
+        };
+        state.load_epochs();
+        state
     }
 
     /// Returns the last applied epoch for `db`, creating an entry if absent.
@@ -110,12 +145,46 @@ impl ReplicationState {
     }
 
     /// Advances the stored epoch for `db` to `epoch` (if larger).
+    ///
+    /// If persistence is enabled, writes the updated state to disk.
     pub fn advance_epoch(&self, db: &str, epoch: u64) {
         let entry = self
             .epochs
             .entry(db.to_string())
             .or_insert_with(|| Arc::new(AtomicU64::new(0)));
         entry.fetch_max(epoch, Ordering::Relaxed);
+        self.save_epochs();
+    }
+
+    /// Persists current epoch state to disk.
+    fn save_epochs(&self) {
+        let Some(ref dir) = self.data_dir else {
+            return;
+        };
+        let path = dir.join(".replica-epochs");
+        let map: HashMap<String, u64> = self
+            .epochs
+            .iter()
+            .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
+            .collect();
+        if let Ok(json) = serde_json::to_string(&map) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Loads epoch state from disk.
+    fn load_epochs(&self) {
+        let Some(ref dir) = self.data_dir else {
+            return;
+        };
+        let path = dir.join(".replica-epochs");
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&data) {
+                for (db, epoch) in map {
+                    self.epochs.insert(db, Arc::new(AtomicU64::new(epoch)));
+                }
+            }
+        }
     }
 
     /// Records an error for `db`.

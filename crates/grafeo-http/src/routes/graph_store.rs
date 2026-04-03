@@ -95,6 +95,7 @@ pub async fn graph_store_get(
         Some("sparql"),
         None,
         timeout,
+        state.service().is_query_read_only(),
     )
     .await?;
 
@@ -149,6 +150,7 @@ pub async fn graph_store_head(
         Some("sparql"),
         None,
         timeout,
+        state.service().is_query_read_only(),
     )
     .await?;
 
@@ -212,6 +214,7 @@ pub async fn graph_store_put(
         Some("sparql"),
         None,
         timeout,
+        state.service().is_query_read_only(),
     )
     .await?;
 
@@ -226,6 +229,7 @@ pub async fn graph_store_put(
             Some("sparql"),
             None,
             timeout,
+            state.service().is_query_read_only(),
         )
         .await?;
     }
@@ -264,6 +268,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
+            state.service().is_query_read_only(),
         )
         .await?;
 
@@ -278,6 +283,7 @@ pub async fn graph_store_post(
                 Some("sparql"),
                 None,
                 timeout,
+                state.service().is_query_read_only(),
             )
             .await?;
         }
@@ -305,6 +311,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
+            state.service().is_query_read_only(),
         )
         .await?;
     }
@@ -339,6 +346,7 @@ pub async fn graph_store_delete(
         Some("sparql"),
         None,
         timeout,
+        state.service().is_query_read_only(),
     )
     .await;
 

@@ -92,9 +92,19 @@ struct Inner {
 impl ServiceState {
     /// Creates a new service state from config.
     pub fn new(config: &ServiceConfig) -> Self {
+        #[allow(unused_mut)]
+        let mut databases = DatabaseManager::new(config.data_dir.as_deref(), config.read_only);
+
+        // Enable CDC on all databases when running as a replication primary,
+        // so that mutations produce change events for replicas to consume.
+        #[cfg(feature = "replication")]
+        if config.replication_mode.is_primary() {
+            databases.set_cdc_enabled(true);
+        }
+
         Self {
             inner: Arc::new(Inner {
-                databases: DatabaseManager::new(config.data_dir.as_deref(), config.read_only),
+                databases,
                 sessions: SessionRegistry::new(),
                 metrics: Metrics::new(),
                 rate_limiter: RateLimiter::new(
@@ -116,7 +126,11 @@ impl ServiceState {
                 #[cfg(feature = "replication")]
                 replication_mode: config.replication_mode.clone(),
                 #[cfg(feature = "replication")]
-                replication_state: Arc::new(replication::ReplicationState::new()),
+                replication_state: Arc::new(if let Some(ref dir) = config.data_dir {
+                    replication::ReplicationState::with_persistence(std::path::PathBuf::from(dir))
+                } else {
+                    replication::ReplicationState::new()
+                }),
             }),
         }
     }
@@ -293,6 +307,19 @@ impl ServiceState {
     #[cfg(feature = "replication")]
     pub fn is_replica(&self) -> bool {
         self.inner.replication_mode.is_replica()
+    }
+
+    /// Returns `true` if this instance is a read-only replica.
+    #[cfg(not(feature = "replication"))]
+    pub fn is_replica(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` if client-facing queries should be read-only.
+    ///
+    /// True when the server is in replica mode or global read-only mode.
+    pub fn is_query_read_only(&self) -> bool {
+        self.inner.read_only || self.is_replica()
     }
 
     /// Returns the replication mode for this instance.

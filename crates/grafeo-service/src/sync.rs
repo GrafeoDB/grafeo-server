@@ -249,13 +249,13 @@ impl SyncService {
     /// Results are ordered by epoch ascending and capped at `limit` (caller
     /// should clamp to <= 10 000).
     ///
-    /// # Note on CDC scope
+    /// # CDC activation
     ///
-    /// CDC events are recorded by the direct CRUD API (`create_node`,
-    /// `set_node_property`, etc.). Mutations executed via GQL sessions are not
-    /// yet tracked in the CDC log — that integration is planned for a future
-    /// phase. This endpoint is most useful for applications using grafeo as an
-    /// embedded database via the Python, Node.js, or Dart bindings.
+    /// CDC must be enabled on the database for events to be recorded (it is
+    /// opt-in since grafeo-engine 0.5.32). The server enables CDC automatically
+    /// on all databases when running as a replication primary. Both direct CRUD
+    /// API calls and session-driven mutations (INSERT/SET/DELETE via GQL/Cypher)
+    /// produce CDC events.
     pub fn pull(
         databases: &DatabaseManager,
         db_name: &str,
@@ -317,6 +317,14 @@ impl SyncService {
         let mut conflicts: Vec<ConflictRecord> = Vec::new();
         let mut id_mappings: Vec<IdMapping> = Vec::new();
 
+        // Wrap all mutations in a session transaction for atomic visibility.
+        // Readers will not see partial batches: either all changes are visible
+        // (on commit) or none (on rollback/crash).
+        let mut session = db.session();
+        session.begin_transaction().map_err(|e| {
+            ServiceError::Internal(format!("Failed to begin sync transaction: {e}"))
+        })?;
+
         for (idx, change) in request.changes.iter().enumerate() {
             match change.kind.as_str() {
                 "create" => match change.entity_type.as_str() {
@@ -329,10 +337,13 @@ impl SyncService {
                             .map(String::as_str)
                             .collect();
                         let new_id = if let Some(after) = &change.after {
-                            let props = json_to_props(after);
-                            db.create_node_with_props(&labels, props)
+                            let props: Vec<(String, grafeo_common::types::Value)> =
+                                json_to_props(after).collect();
+                            let props_refs: Vec<(&str, grafeo_common::types::Value)> =
+                                props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                            session.create_node_with_props(&labels, props_refs)
                         } else {
-                            db.create_node(&labels)
+                            session.create_node(&labels)
                         };
                         id_mappings.push(IdMapping {
                             request_index: idx,
@@ -343,15 +354,18 @@ impl SyncService {
                     "edge" => match (change.src_id, change.dst_id, &change.edge_type) {
                         (Some(src), Some(dst), Some(et)) => {
                             let new_id = if let Some(after) = &change.after {
-                                let props = json_to_props(after);
-                                db.create_edge_with_props(
+                                let props: Vec<(String, grafeo_common::types::Value)> =
+                                    json_to_props(after).collect();
+                                let props_refs: Vec<(&str, grafeo_common::types::Value)> =
+                                    props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                                session.create_edge_with_props(
                                     NodeId::new(src),
                                     NodeId::new(dst),
                                     et,
-                                    props,
+                                    props_refs,
                                 )
                             } else {
-                                db.create_edge(NodeId::new(src), NodeId::new(dst), et)
+                                session.create_edge(NodeId::new(src), NodeId::new(dst), et)
                             };
                             id_mappings.push(IdMapping {
                                 request_index: idx,
@@ -396,7 +410,7 @@ impl SyncService {
                                     .and_then(|n| n.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                db.set_node_property(node_id, prop_key, merged);
+                                session.set_node_property(node_id, prop_key, merged);
                                 applied += 1;
                             }
                             "edge" => {
@@ -406,7 +420,7 @@ impl SyncService {
                                     .and_then(|e| e.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                db.set_edge_property(edge_id, prop_key, merged);
+                                session.set_edge_property(edge_id, prop_key, merged);
                                 applied += 1;
                             }
                             _ => {
@@ -446,7 +460,7 @@ impl SyncService {
                                 skipped += 1;
                             } else {
                                 for (key, val) in json_to_props(after) {
-                                    db.set_node_property(node_id, &key, val);
+                                    session.set_node_property(node_id, &key, val);
                                 }
                                 applied += 1;
                             }
@@ -465,7 +479,7 @@ impl SyncService {
                                 skipped += 1;
                             } else {
                                 for (key, val) in json_to_props(after) {
-                                    db.set_edge_property(edge_id, &key, val);
+                                    session.set_edge_property(edge_id, &key, val);
                                 }
                                 applied += 1;
                             }
@@ -505,7 +519,7 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                db.delete_node(node_id);
+                                session.delete_node(node_id);
                                 applied += 1;
                             }
                         }
@@ -522,7 +536,7 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                db.delete_edge(edge_id);
+                                session.delete_edge(edge_id);
                                 applied += 1;
                             }
                         }
@@ -543,6 +557,12 @@ impl SyncService {
                 }
             }
         }
+
+        // Commit all mutations atomically. If this fails, all changes are
+        // rolled back and readers never see partial state.
+        session.commit().map_err(|e| {
+            ServiceError::Internal(format!("Failed to commit sync transaction: {e}"))
+        })?;
 
         let server_schema = compute_schema_version(db);
         let schema_mismatch = request
@@ -578,7 +598,10 @@ fn server_is_newer(
     client_timestamp: u64,
 ) -> bool {
     db.history(entity_id)
-        .map(|events| events.iter().any(|e| e.timestamp > client_timestamp))
+        .map(|events| {
+            let client_ts = grafeo_common::types::HlcTimestamp::from_u64(client_timestamp);
+            events.iter().any(|e| e.timestamp > client_ts)
+        })
         .unwrap_or(false)
 }
 
@@ -634,7 +657,7 @@ fn to_dto(event: grafeo_engine::cdc::ChangeEvent) -> ChangeEventDto {
         entity_type,
         kind,
         epoch: event.epoch.0,
-        timestamp: event.timestamp,
+        timestamp: event.timestamp.as_u64(),
         before: event.before.map(props_to_json),
         after: event.after.map(props_to_json),
         labels: event.labels,
@@ -674,13 +697,10 @@ mod tests {
     use crate::database::DatabaseManager;
 
     fn make_manager() -> DatabaseManager {
-        DatabaseManager::new(None, false)
+        let mut mgr = DatabaseManager::new(None, false);
+        mgr.set_cdc_enabled(true);
+        mgr
     }
-
-    // CDC is populated by the direct CRUD API (create_node, set_node_property,
-    // etc.), not by GQL session-based mutations. All direct API calls record
-    // at the current epoch (typically 0 for a fresh in-memory DB since no
-    // transaction commits advance the epoch counter).
 
     #[test]
     fn pull_empty_database_returns_no_changes() {
@@ -1011,5 +1031,171 @@ mod tests {
         assert_eq!(edge_event.edge_type.as_deref(), Some("KNOWS"));
         assert_eq!(edge_event.src_id, Some(alix.as_u64()));
         assert_eq!(edge_event.dst_id, Some(gus.as_u64()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Replication end-to-end: primary → pull → apply → replica
+    // -----------------------------------------------------------------------
+
+    /// Simulates primary-to-replica replication in-process:
+    /// writes to primary via direct CRUD, pulls changes, applies to replica,
+    /// then verifies all data arrived.
+    #[test]
+    fn replication_end_to_end_nodes_and_edges() {
+        // Primary: write data
+        let primary = make_manager();
+        let primary_db = primary.get("default").unwrap();
+        let alix = primary_db.db.create_node(&["Person"]);
+        primary_db
+            .db
+            .set_node_property(alix, "name", grafeo_common::types::Value::from("Alix"));
+        let gus = primary_db.db.create_node(&["Person"]);
+        primary_db
+            .db
+            .set_node_property(gus, "name", grafeo_common::types::Value::from("Gus"));
+        let _edge = primary_db.db.create_edge(alix, gus, "KNOWS");
+
+        // Pull changes from primary
+        let changes_resp = SyncService::pull(&primary, "default", 0, 1000).unwrap();
+        assert!(
+            !changes_resp.changes.is_empty(),
+            "Primary should have CDC events"
+        );
+
+        // Convert to SyncChangeRequest (simulates what the replica task does)
+        let sync_changes: Vec<SyncChangeRequest> = changes_resp
+            .changes
+            .into_iter()
+            .map(|dto| SyncChangeRequest {
+                kind: dto.kind,
+                entity_type: dto.entity_type,
+                id: Some(dto.id),
+                labels: dto.labels,
+                edge_type: dto.edge_type,
+                src_id: dto.src_id,
+                dst_id: dto.dst_id,
+                after: dto.after,
+                timestamp: dto.timestamp,
+                crdt_op: None,
+                crdt_property: None,
+            })
+            .collect();
+
+        // Replica: apply changes
+        let replica = make_manager();
+        let request = SyncRequest {
+            client_id: "replica-1".to_string(),
+            last_seen_epoch: 0,
+            changes: sync_changes,
+            schema_version: None,
+        };
+        let apply_resp = SyncService::apply(&replica, "default", request).unwrap();
+        assert!(
+            apply_resp.applied > 0,
+            "Should have applied changes on replica"
+        );
+        assert!(
+            apply_resp.conflicts.is_empty(),
+            "No conflicts expected: {:?}",
+            apply_resp.conflicts
+        );
+
+        // Verify replica has the data
+        let replica_db = replica.get("default").unwrap();
+        assert!(
+            replica_db.db.node_count() >= 2,
+            "Replica should have at least 2 nodes, got {}",
+            replica_db.db.node_count()
+        );
+        assert!(
+            replica_db.db.edge_count() >= 1,
+            "Replica should have at least 1 edge, got {}",
+            replica_db.db.edge_count()
+        );
+    }
+
+    /// Verifies that session-driven mutations on the primary (via execute())
+    /// now generate CDC events that can be replicated to a replica.
+    #[test]
+    fn replication_session_mutations_flow_to_replica() {
+        let primary = make_manager();
+        let primary_db = primary.get("default").unwrap();
+
+        // Write via session (previously bypassed CDC)
+        let session = primary_db.db.session();
+        session
+            .execute("INSERT (:Person {name: 'Vincent', city: 'Paris'})")
+            .unwrap();
+        session
+            .execute("INSERT (:Person {name: 'Jules'})-[:KNOWS]->(:Person {name: 'Mia'})")
+            .unwrap();
+
+        // Pull changes
+        let changes_resp = SyncService::pull(&primary, "default", 0, 1000).unwrap();
+        let node_creates = changes_resp
+            .changes
+            .iter()
+            .filter(|e| e.kind == "create" && e.entity_type == "node")
+            .count();
+        assert!(
+            node_creates >= 3,
+            "Session mutations should produce at least 3 node CDC events, got {node_creates}"
+        );
+
+        // Apply to replica
+        let sync_changes: Vec<SyncChangeRequest> = changes_resp
+            .changes
+            .into_iter()
+            .map(|dto| SyncChangeRequest {
+                kind: dto.kind,
+                entity_type: dto.entity_type,
+                id: Some(dto.id),
+                labels: dto.labels,
+                edge_type: dto.edge_type,
+                src_id: dto.src_id,
+                dst_id: dto.dst_id,
+                after: dto.after,
+                timestamp: dto.timestamp,
+                crdt_op: None,
+                crdt_property: None,
+            })
+            .collect();
+
+        let replica = make_manager();
+        let request = SyncRequest {
+            client_id: "replica-1".to_string(),
+            last_seen_epoch: 0,
+            changes: sync_changes,
+            schema_version: None,
+        };
+        let apply_resp = SyncService::apply(&replica, "default", request).unwrap();
+        assert!(
+            apply_resp.applied >= 3,
+            "Replica should have applied session-created nodes"
+        );
+
+        let replica_db = replica.get("default").unwrap();
+        assert!(
+            replica_db.db.node_count() >= 3,
+            "Replica should have at least 3 nodes from session mutations"
+        );
+    }
+
+    /// Verifies that the epoch persistence round-trips correctly.
+    #[test]
+    #[cfg(feature = "replication")]
+    fn replication_epoch_persistence_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state =
+            crate::replication::ReplicationState::with_persistence(dir.path().to_path_buf());
+
+        state.advance_epoch("default", 42);
+        state.advance_epoch("other_db", 100);
+
+        // Load into a fresh state from the same directory
+        let state2 =
+            crate::replication::ReplicationState::with_persistence(dir.path().to_path_buf());
+        assert_eq!(state2.last_epoch("default"), 42);
+        assert_eq!(state2.last_epoch("other_db"), 100);
     }
 }
