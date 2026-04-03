@@ -25,13 +25,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # grafeo-server depends on local grafeo crates via path
-      - name: Checkout grafeo engine
-        uses: actions/checkout@v4
-        with:
-          repository: GrafeoDB/grafeo
-          path: ../grafeo
-
       - name: Create empty client dist
         run: mkdir -p client/dist
 
@@ -88,12 +81,6 @@ jobs:
           version: "25.x"
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Checkout grafeo engine
-        uses: actions/checkout@v4
-        with:
-          repository: GrafeoDB/grafeo
-          path: ../grafeo
 
       - name: Create empty client dist
         run: mkdir -p client/dist
