@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use grafeo_service::ServiceState;
-use grafeo_service::replication::ReplicationState;
 use grafeo_service::error::ServiceError;
+use grafeo_service::replication::ReplicationState;
 use grafeo_service::sync::{SyncChangeRequest, SyncRequest, SyncService};
 use tracing::{debug, error, info, warn};
 
