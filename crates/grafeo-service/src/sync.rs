@@ -1071,8 +1071,8 @@ mod tests {
             })
             .collect();
 
-        // Replica: apply changes
-        let replica = make_manager();
+        // Replica: apply changes (CDC disabled, replicas don't need it)
+        let replica = DatabaseManager::new(None, false);
         let request = SyncRequest {
             client_id: "replica-1".to_string(),
             last_seen_epoch: 0,
@@ -1151,7 +1151,7 @@ mod tests {
             })
             .collect();
 
-        let replica = make_manager();
+        let replica = DatabaseManager::new(None, false);
         let request = SyncRequest {
             client_id: "replica-1".to_string(),
             last_seen_epoch: 0,
