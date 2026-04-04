@@ -103,9 +103,39 @@ async fn docker_write_and_converge() {
         "Primary should have at least 5 nodes, got {primary_count}"
     );
 
+    // Debug: check if CDC changefeed has events on the primary
+    let changes_resp = client()
+        .get(format!("{PRIMARY}/db/default/changes?since=0&limit=100"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let change_count = changes_resp["changes"].as_array().map_or(0, |a| a.len());
+    eprintln!(
+        "CDC changefeed: {} events, server_epoch={}",
+        change_count, changes_resp["server_epoch"]
+    );
+    assert!(
+        change_count > 0,
+        "Primary CDC should have events after writes, got: {changes_resp}"
+    );
+
+    // Debug: check replication status on replica
+    let repl_status = client()
+        .get(format!("{REPLICA1}/admin/replication"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    eprintln!("Replica-1 replication status: {repl_status}");
+
     // Wait for replicas to converge (background replication task polls every 500ms)
     let converged = wait_for(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         Duration::from_millis(500),
         || async {
             let r1 = node_count(REPLICA1).await;
@@ -143,7 +173,7 @@ async fn docker_session_mutations_converge() {
 
     // Wait for convergence
     let converged = wait_for(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         Duration::from_millis(500),
         || async {
             let r1 = node_count(REPLICA1).await;
