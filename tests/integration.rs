@@ -2372,7 +2372,7 @@ async fn gwp_list_schemas() {
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
-async fn gwp_schema_operations_return_errors() {
+async fn gwp_schema_operations() {
     let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
 
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
@@ -2380,24 +2380,35 @@ async fn gwp_schema_operations_return_errors() {
         .unwrap();
     let mut catalog_client = conn.create_catalog_client();
 
-    // Creating default schema with if_not_exists should succeed (no-op)
-    catalog_client.create_schema("default", true).await.unwrap();
+    // Creating a new schema should succeed.
+    catalog_client
+        .create_schema("analytics", false)
+        .await
+        .unwrap();
 
-    // Creating default schema without if_not_exists should fail
-    let result = catalog_client.create_schema("default", false).await;
-    assert!(result.is_err());
+    // Creating it again with if_not_exists should succeed (no-op).
+    catalog_client
+        .create_schema("analytics", true)
+        .await
+        .unwrap();
 
-    // Creating a non-default schema should fail (not supported)
-    let result = catalog_client.create_schema("other", false).await;
-    assert!(result.is_err());
+    // Dropping it should succeed.
+    let dropped = catalog_client
+        .drop_schema("analytics", false)
+        .await
+        .unwrap();
+    assert!(dropped);
 
-    // Dropping default schema should fail
-    let result = catalog_client.drop_schema("default", false).await;
-    assert!(result.is_err());
-
-    // Dropping nonexistent schema should fail
+    // Dropping nonexistent schema without if_exists should fail.
     let result = catalog_client.drop_schema("nonexistent", false).await;
     assert!(result.is_err());
+
+    // Dropping nonexistent schema with if_exists should succeed (no-op).
+    let dropped = catalog_client
+        .drop_schema("nonexistent", true)
+        .await
+        .unwrap();
+    assert!(!dropped);
 }
 
 #[cfg(feature = "gwp")]

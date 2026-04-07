@@ -440,3 +440,64 @@ pub struct GraphListResponse {
     /// Named graphs within the database.
     pub graphs: Vec<String>,
 }
+
+// ============================================================================
+// Schema management types (ISO/IEC 39075 Section 4.2.5)
+// ============================================================================
+
+/// Response for listing schema namespaces.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SchemaListResponse {
+    /// Schema namespace names.
+    pub schemas: Vec<String>,
+}
+
+/// Request to create a schema namespace.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateSchemaRequest {
+    /// Name for the new schema namespace.
+    pub name: String,
+}
+
+// ============================================================================
+// Bulk import types
+// ============================================================================
+
+/// Request to bulk-import a TSV edge list into a database.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ImportTsvRequest {
+    /// Database to import into.
+    #[serde(default = "default_db_name")]
+    pub database: String,
+    /// Edge type label for all imported edges.
+    #[serde(default = "default_edge_type")]
+    pub edge_type: String,
+    /// If true, create one directed edge per line. If false, create edges
+    /// in both directions.
+    #[serde(default = "default_true")]
+    pub directed: bool,
+    /// Tab or space-separated edge list data. Each line: `src_id dst_id`.
+    /// Lines starting with `#` or `%` are comments.
+    pub data: String,
+}
+
+fn default_edge_type() -> String {
+    "EDGE".to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Response from a bulk import operation.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ImportResponse {
+    /// Number of nodes created.
+    pub nodes_created: usize,
+    /// Number of edges created.
+    pub edges_created: usize,
+}

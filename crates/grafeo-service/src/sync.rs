@@ -612,7 +612,7 @@ fn compute_schema_version(db: &grafeo_engine::GrafeoDB) -> String {
             .map(|l| l.name)
             .chain(lpg.property_keys)
             .collect(),
-        grafeo_engine::admin::SchemaInfo::Rdf(_) => Vec::new(),
+        grafeo_engine::admin::SchemaInfo::Rdf(_) | _ => Vec::new(),
     };
     keys.sort();
 
@@ -641,6 +641,7 @@ fn to_dto(event: grafeo_engine::cdc::ChangeEvent) -> ChangeEventDto {
         grafeo_engine::cdc::ChangeKind::Create => "create".to_string(),
         grafeo_engine::cdc::ChangeKind::Update => "update".to_string(),
         grafeo_engine::cdc::ChangeKind::Delete => "delete".to_string(),
+        _ => "unknown".to_string(),
     };
     ChangeEventDto {
         id,

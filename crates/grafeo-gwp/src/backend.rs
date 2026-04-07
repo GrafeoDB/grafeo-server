@@ -174,9 +174,13 @@ impl GqlBackend for GrafeoBackend {
                     tracing::warn!(?value, "language parameter is not a string");
                 }
             }
-            SessionProperty::Schema(_)
-            | SessionProperty::TimeZone(_)
-            | SessionProperty::Parameter { .. } => {}
+            SessionProperty::Schema(schema_name) => {
+                let session_arc = self.get_session(session)?;
+                let s = session_arc.lock();
+                s.engine_session.set_schema(&schema_name);
+                tracing::debug!(schema = %schema_name, "GWP session schema set");
+            }
+            SessionProperty::TimeZone(_) | SessionProperty::Parameter { .. } => {}
         }
         Ok(())
     }
@@ -184,8 +188,18 @@ impl GqlBackend for GrafeoBackend {
     async fn reset_session(
         &self,
         session: &SessionHandle,
-        _target: ResetTarget,
+        target: ResetTarget,
     ) -> Result<(), GqlError> {
+        let session_arc = self.get_session(session)?;
+
+        if target == ResetTarget::Schema {
+            // Reset only schema context, keep the session alive.
+            let s = session_arc.lock();
+            s.engine_session.reset_schema();
+            return Ok(());
+        }
+
+        // Full reset: create a fresh session on the default database.
         let entry = self
             .state
             .databases()
@@ -203,7 +217,6 @@ impl GqlBackend for GrafeoBackend {
         .await
         .map_err(GqlError::backend)?;
 
-        let session_arc = self.get_session(session)?;
         let mut s = session_arc.lock();
         s.engine_session = engine_session;
         "default".clone_into(&mut s.database);
@@ -312,38 +325,68 @@ impl GqlBackend for GrafeoBackend {
     // -----------------------------------------------------------------
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, GqlError> {
-        let databases = self.state.databases().list();
-        Ok(vec![SchemaInfo {
-            name: DEFAULT_SCHEMA.to_owned(),
-            graph_count: databases.len() as u32,
-            graph_type_count: 0,
-        }])
+        // Query actual engine schemas via SHOW SCHEMAS on the default database.
+        let schemas =
+            AdminService::list_schemas(self.state.databases(), self.state.metrics(), "default")
+                .await
+                .map_err(|e| GqlError::Session(e.to_string()))?;
+
+        if schemas.is_empty() {
+            // No schemas defined: report the implicit default schema.
+            let databases = self.state.databases().list();
+            return Ok(vec![SchemaInfo {
+                name: DEFAULT_SCHEMA.to_owned(),
+                graph_count: databases.len() as u32,
+                graph_type_count: 0,
+            }]);
+        }
+
+        Ok(schemas
+            .into_iter()
+            .map(|name| SchemaInfo {
+                name,
+                graph_count: 0,
+                graph_type_count: 0,
+            })
+            .collect())
     }
 
     async fn create_schema(&self, name: &str, if_not_exists: bool) -> Result<(), GqlError> {
-        if name == DEFAULT_SCHEMA {
-            if if_not_exists {
-                return Ok(());
+        let result = AdminService::create_schema(
+            self.state.databases(),
+            self.state.metrics(),
+            "default",
+            name,
+        )
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) if if_not_exists => {
+                tracing::debug!(schema = %name, error = %e, "CREATE SCHEMA IF NOT EXISTS: ignoring error");
+                Ok(())
             }
-            return Err(GqlError::Session(
-                "schema 'default' already exists".to_owned(),
-            ));
+            Err(e) => Err(GqlError::Session(e.to_string())),
         }
-        Err(GqlError::Session(
-            "multiple schemas not supported".to_owned(),
-        ))
     }
 
     async fn drop_schema(&self, name: &str, if_exists: bool) -> Result<bool, GqlError> {
-        if name == DEFAULT_SCHEMA {
-            return Err(GqlError::Session(
-                "cannot drop the default schema".to_owned(),
-            ));
+        let result = AdminService::drop_schema(
+            self.state.databases(),
+            self.state.metrics(),
+            "default",
+            name,
+        )
+        .await;
+
+        match result {
+            Ok(dropped) => Ok(dropped),
+            Err(e) if if_exists => {
+                tracing::debug!(schema = %name, error = %e, "DROP SCHEMA IF EXISTS: ignoring error");
+                Ok(false)
+            }
+            Err(e) => Err(GqlError::Session(e.to_string())),
         }
-        if if_exists {
-            return Ok(false);
-        }
-        Err(GqlError::Session(format!("schema '{name}' not found")))
     }
 
     // -----------------------------------------------------------------

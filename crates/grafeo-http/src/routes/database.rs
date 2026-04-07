@@ -217,7 +217,7 @@ pub async fn database_schema(
                 .collect(),
             property_keys: lpg.property_keys,
         })),
-        grafeo_engine::admin::SchemaInfo::Rdf(_) => Err(ApiError::bad_request(
+        grafeo_engine::admin::SchemaInfo::Rdf(_) | _ => Err(ApiError::bad_request(
             "RDF schema not supported via this endpoint",
         )),
     }
@@ -300,5 +300,127 @@ pub async fn drop_graph(
     Path((name, graph)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let dropped = AdminService::drop_graph(state.databases(), &name, graph).await?;
+    Ok(Json(serde_json::json!({ "dropped": dropped })))
+}
+
+// ---------------------------------------------------------------------------
+// Bulk import endpoints
+// ---------------------------------------------------------------------------
+
+/// Bulk-import a TSV edge list into a database.
+///
+/// Imports a tab or space-separated edge list. Each line should contain
+/// `src_id dst_id`, with optional comment lines starting with `#` or `%`.
+///
+/// This bypasses per-edge transaction overhead, achieving 10-100x
+/// throughput over individual inserts for large graphs.
+#[utoipa::path(
+    post,
+    path = "/db/{name}/import/tsv",
+    params(
+        ("name" = String, Path, description = "Database name"),
+    ),
+    request_body = grafeo_service::types::ImportTsvRequest,
+    responses(
+        (status = 200, description = "Import result", body = grafeo_service::types::ImportResponse),
+        (status = 400, description = "Malformed data", body = ErrorBody),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn import_tsv(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<grafeo_service::types::ImportTsvRequest>,
+) -> Result<Json<grafeo_service::types::ImportResponse>, ApiError> {
+    let result = AdminService::import_tsv(
+        state.databases(),
+        &name,
+        req.data,
+        req.edge_type,
+        req.directed,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// Schema namespace endpoints (ISO/IEC 39075 Section 4.2.5)
+// ---------------------------------------------------------------------------
+
+/// List schema namespaces within a database.
+///
+/// Returns all GQL schema namespaces. Schemas provide data isolation
+/// within a single database instance.
+#[utoipa::path(
+    get,
+    path = "/db/{name}/schemas",
+    params(
+        ("name" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Schema list", body = grafeo_service::types::SchemaListResponse),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn list_schemas(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<grafeo_service::types::SchemaListResponse>, ApiError> {
+    let schemas = AdminService::list_schemas(state.databases(), state.metrics(), &name).await?;
+    Ok(Json(grafeo_service::types::SchemaListResponse { schemas }))
+}
+
+/// Create a schema namespace within a database.
+///
+/// Creates a new GQL schema namespace with its own default graph.
+/// Data within a schema is fully isolated from other schemas.
+#[utoipa::path(
+    post,
+    path = "/db/{name}/schemas",
+    params(
+        ("name" = String, Path, description = "Database name"),
+    ),
+    request_body = grafeo_service::types::CreateSchemaRequest,
+    responses(
+        (status = 200, description = "Schema created", body = inline(serde_json::Value)),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn create_schema(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<grafeo_service::types::CreateSchemaRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let created =
+        AdminService::create_schema(state.databases(), state.metrics(), &name, &req.name).await?;
+    Ok(Json(serde_json::json!({ "created": created })))
+}
+
+/// Drop a schema namespace from a database.
+///
+/// Removes a GQL schema namespace and all data within it.
+/// Returns whether the schema existed and was removed.
+#[utoipa::path(
+    delete,
+    path = "/db/{name}/schemas/{schema}",
+    params(
+        ("name" = String, Path, description = "Database name"),
+        ("schema" = String, Path, description = "Schema namespace to drop"),
+    ),
+    responses(
+        (status = 200, description = "Schema drop result", body = inline(serde_json::Value)),
+        (status = 404, description = "Database not found", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn drop_schema(
+    State(state): State<AppState>,
+    Path((name, schema)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let dropped =
+        AdminService::drop_schema(state.databases(), state.metrics(), &name, &schema).await?;
     Ok(Json(serde_json::json!({ "dropped": dropped })))
 }

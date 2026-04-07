@@ -45,7 +45,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.5.32",
+        version = "0.5.34",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -71,6 +71,10 @@ pub use state::AppState;
         routes::database::list_graphs,
         routes::database::create_graph,
         routes::database::drop_graph,
+        routes::database::list_schemas,
+        routes::database::create_schema,
+        routes::database::drop_schema,
+        routes::database::import_tsv,
         routes::admin::admin_stats,
         routes::admin::admin_wal_status,
         routes::admin::admin_wal_checkpoint,
@@ -81,6 +85,7 @@ pub use state::AppState;
         routes::admin::admin_clear_cache,
         routes::admin::admin_memory_usage,
         routes::admin::admin_write_snapshot,
+        routes::admin::admin_compact,
         routes::search::vector_search,
         routes::search::text_search,
         routes::search::hybrid_search,
@@ -103,6 +108,10 @@ pub use state::AppState;
             grafeo_service::types::HybridSearchReq, grafeo_service::types::SearchHit,
             grafeo_service::types::CreateGraphRequest,
             grafeo_service::types::GraphListResponse,
+            grafeo_service::types::SchemaListResponse,
+            grafeo_service::types::CreateSchemaRequest,
+            grafeo_service::types::ImportTsvRequest,
+            grafeo_service::types::ImportResponse,
             SearchResponse,
         )
     ),
@@ -161,6 +170,15 @@ pub fn router(state: AppState) -> Router {
             "/db/{name}/graphs/{graph}",
             delete(routes::database::drop_graph),
         )
+        .route(
+            "/db/{name}/schemas",
+            get(routes::database::list_schemas).post(routes::database::create_schema),
+        )
+        .route(
+            "/db/{name}/schemas/{schema}",
+            delete(routes::database::drop_schema),
+        )
+        .route("/db/{name}/import/tsv", post(routes::database::import_tsv))
         // SPARQL Protocol (W3C compliant)
         .route(
             "/db/{name}/sparql",
@@ -197,6 +215,7 @@ pub fn router(state: AppState) -> Router {
             "/admin/{db}/snapshot",
             post(routes::admin::admin_write_snapshot),
         )
+        .route("/admin/{db}/compact", post(routes::admin::admin_compact))
         // Search
         .route("/search/vector", post(routes::search::vector_search))
         .route("/search/text", post(routes::search::text_search))

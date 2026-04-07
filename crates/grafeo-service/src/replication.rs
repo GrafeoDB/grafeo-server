@@ -178,11 +178,11 @@ impl ReplicationState {
             return;
         };
         let path = dir.join(".replica-epochs");
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&data) {
-                for (db, epoch) in map {
-                    self.epochs.insert(db, Arc::new(AtomicU64::new(epoch)));
-                }
+        if let Ok(data) = std::fs::read_to_string(&path)
+            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&data)
+        {
+            for (db, epoch) in map {
+                self.epochs.insert(db, Arc::new(AtomicU64::new(epoch)));
             }
         }
     }

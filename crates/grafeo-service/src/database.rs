@@ -476,6 +476,60 @@ impl DatabaseManager {
         result
     }
 
+    /// Compacts a database into a read-only columnar store.
+    ///
+    /// Temporarily removes the entry from the registry to obtain exclusive
+    /// ownership. If other references exist (active sessions, in-flight
+    /// requests), the entry is re-inserted and an error is returned.
+    #[cfg(feature = "compact-store")]
+    pub fn compact(&self, name: &str) -> Result<(), ServiceError> {
+        if self.read_only {
+            return Err(ServiceError::ReadOnly);
+        }
+
+        let (_, entry) = self
+            .databases
+            .remove(name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{name}' not found")))?;
+
+        // We need exclusive ownership of the GrafeoDB to call compact(&mut self).
+        // Try to unwrap the outer Arc<DatabaseEntry>, then get_mut on the inner Arc<GrafeoDB>.
+        let mut db_entry = match Arc::try_unwrap(entry) {
+            Ok(entry) => entry,
+            Err(still_shared) => {
+                // Someone else holds a reference: re-insert and fail.
+                self.databases.insert(name.to_string(), still_shared);
+                return Err(ServiceError::Conflict(
+                    "database is in use by active sessions, cannot compact".to_string(),
+                ));
+            }
+        };
+
+        let db = match Arc::get_mut(&mut db_entry.db) {
+            Some(db) => db,
+            None => {
+                // Inner Arc still shared: re-insert and fail.
+                self.databases.insert(name.to_string(), Arc::new(db_entry));
+                return Err(ServiceError::Conflict(
+                    "database is in use by active sessions, cannot compact".to_string(),
+                ));
+            }
+        };
+
+        if let Err(e) = db.compact() {
+            // Compaction failed: re-insert the original database.
+            self.databases.insert(name.to_string(), Arc::new(db_entry));
+            return Err(ServiceError::Internal(format!("compaction failed: {e}")));
+        }
+
+        // Re-insert the now-compacted (read-only) database.
+        db_entry.metadata.storage_mode = "compact".to_string();
+        self.databases.insert(name.to_string(), Arc::new(db_entry));
+
+        tracing::info!(name = %name, "Database compacted to columnar read-only store");
+        Ok(())
+    }
+
     /// Returns the data directory, if configured.
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()

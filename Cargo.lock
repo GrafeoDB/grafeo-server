@@ -1243,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.32"
+version = "0.5.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c9cf6dd5b86afdd78bea811707fe79e5fa7b046e06fd6ebbdeedbd97f63a96"
+checksum = "d12b6826694a5958fcb9ab2d9476572256e6bf104aaac29d7d07a10b5ca93ec8"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1284,9 +1284,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.32"
+version = "0.5.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16fbb80f830a41572dfaf10a9529560cc0d875d8559e8a02a7f61e0d4c75852e"
+checksum = "e3d72c28b9cdc257893dc0401133c43fbf5a6caf68fcb831fb7f0242ea2f338d"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1306,9 +1306,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.32"
+version = "0.5.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f632621e0208c04f8586bcd6e5a28a0c317fc4e63dfbd556cc0d692c02158f87"
+checksum = "fe93e99617110ce5eb6ea3fc5f14e411ad891594b0fe86cd903162f9fe33d04b"
 dependencies = [
  "arcstr",
  "byteorder",
@@ -1335,9 +1335,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.32"
+version = "0.5.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "257cdb293aa4be6f8f1a5982c363b3595b576ab51b598addf046ef8cb105dc58"
+checksum = "d1d05949d0097555241c49aa250889d11ca4443c8a828bb435fa7a0c7ab88850"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "async-stream",
  "axum",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "serde",
  "serde_json",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.5.32"
+version = "0.5.34"
 dependencies = [
  "axum",
  "grafeo-service",

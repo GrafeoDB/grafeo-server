@@ -222,6 +222,36 @@ pub async fn admin_drop_index(
     Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
 
+/// Compact a database into a columnar read-only store.
+///
+/// Converts the live LPG store into a memory-efficient columnar format
+/// optimized for analytical reads. This is a **one-way operation**: the
+/// database becomes permanently read-only after compaction.
+///
+/// Requires the `compact-store` feature and exclusive access (no active
+/// sessions).
+#[utoipa::path(
+    post,
+    path = "/admin/{db}/compact",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Database compacted"),
+        (status = 400, description = "Feature not enabled", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+        (status = 409, description = "Database in use", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_compact(
+    State(state): State<AppState>,
+    Path(db): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    AdminService::compact(state.databases(), &db).await?;
+    Ok(Json(serde_json::json!({ "compacted": true })))
+}
+
 /// Write a point-in-time snapshot.
 ///
 /// Creates a `.grafeo` single-file snapshot of the database. Requires the

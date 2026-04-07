@@ -5,6 +5,53 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.34] - 2026-04-07
+
+Schema hierarchy, compact endpoint, bulk import, and two engine releases worth of query correctness fixes.
+
+### Added
+
+- **GQL schema namespace endpoints**: `GET /db/{name}/schemas`, `POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}` for listing, creating, and dropping ISO/IEC 39075 schema namespaces with full data isolation
+- **Compact endpoint**: `POST /admin/{db}/compact` converts a live database to a memory-efficient columnar read-only store (`compact-store` feature). One-way operation, requires exclusive access
+- **Bulk TSV import**: `POST /db/{name}/import/tsv` for fast edge list ingestion bypassing per-edge transaction overhead (10-100x throughput)
+- **`compact-store` feature flag**: forwarded through `grafeo-service` to `grafeo-engine`, included in `full` tier
+- **GWP session schema context**: `SessionProperty::Schema` now calls `session.set_schema()`, `ResetTarget::Schema` calls `session.reset_schema()`. GWP catalog operations (`list_schemas`, `create_schema`, `drop_schema`) now delegate to the engine instead of returning a hardcoded single schema
+
+### Changed
+
+- **grafeo-engine 0.5.33**: GraphChallenge algorithms (k-truss, triangle counting, subgraph isomorphism, stochastic block partition), TSV/MMIO bulk import, `RdfGraphStoreAdapter` bridging RDF to LPG algorithms, Kahan compensated summation, WAL `sync_all()` outside lock
+- **grafeo-engine 0.5.34**: GQL schema hierarchy (`CREATE SCHEMA`/`DROP SCHEMA`, `SESSION SET SCHEMA`), streaming RDF triple sink (`TripleSink`, `BatchInsertSink`, `CountSink`), deterministic snapshot export, `#[non_exhaustive]` on 13 public enums, `LabelRegistry` combined lock
+- **Non-exhaustive enum handling**: all `match` on engine enums (`SchemaInfo`, `ChangeKind`) now include wildcard arms for forward compatibility
+
+### Fixed (via engine 0.5.33, 0.5.34)
+
+- WAL deadlock on property mutations: store mutation applied before WAL logging
+- Multi-aggregate extraction: `sum(a) + count(b)` correctly extracts all aggregates
+- Mixed `WITH ... WHERE`/HAVING: non-aggregate conjuncts stay as WHERE
+- Null property pattern matching: `MATCH (n {key: null})` matches absent and explicitly null
+- MERGE null key matching: `MERGE (n:T {a: null, b: 'x'})` correctly finds existing nodes
+- `SET += {key: null}` removes property instead of keeping null
+- Negative LIMIT clamped to 0 instead of syntax error
+- `i64::MIN` literal parsing: `-9223372036854775808` folds at parse time
+- NaN/Inf float literals recognized in GQL and Cypher
+- `nodes(path)` returns property maps instead of raw IDs
+- Cyclic VLP pattern matching: `MATCH p=(s)-[:R*]->(s)` filters via `id()` equality
+- VLP default depth raised: unbounded `[*]` expands up to `min_hops + 100`
+- WAL sync counter race: `fetch_sub` preserves concurrent increments
+- `delete_node_edges` self-loop deduplication via HashSet
+- CompactStore multi-table edge types across label pairs
+- `round()`/`floor()`/`ceil()` return Float64 instead of truncating to Int64
+- `CALL ... YIELD` with aggregation now works over procedure results
+- Cypher keyword-as-label: `Order`, `By`, `Skip`, `Limit` usable as node labels
+- `CAST(bool AS INT)`: `true` casts to `1`
+- List `+` concatenation: `[1, 2] + [3, 4]` returns `[1, 2, 3, 4]`
+- Parameter substitution in multi-statement queries
+- ORDER BY + LIMIT/SKIP: SKIP and LIMIT apply after ORDER BY
+- SET self-reference: `SET n.value = n.value + 1` pre-computes before write
+- `size(collect())` nested aggregate no longer panics
+- `SUM()` on empty result set returns null per ISO GQL
+- `cypher` feature now correctly depends on `gql`
+
 ## [0.5.32] - 2026-04-04
 
 Replication correctness: atomic batch replay, read-only replica enforcement, HLC timestamps, Maelstrom and Jepsen testing.
