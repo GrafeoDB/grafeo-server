@@ -3459,8 +3459,6 @@ async fn import_tsv_database_not_found() {
 
 #[tokio::test]
 async fn compact_feature_not_enabled_returns_400() {
-    // Without the compact-store feature, this should return 400.
-    // If the feature IS enabled, compaction should succeed on an empty DB.
     let base = spawn_server().await;
     let client = Client::new();
 
@@ -3470,12 +3468,9 @@ async fn compact_feature_not_enabled_returns_400() {
         .await
         .unwrap();
 
-    // Accept either 200 (feature enabled) or 400 (feature not enabled).
     let status = resp.status().as_u16();
-    assert!(
-        status == 200 || status == 400,
-        "unexpected status: {status}"
-    );
+    let expected = if cfg!(feature = "compact-store") { 200 } else { 400 };
+    assert_eq!(status, expected, "unexpected status: {status}");
 }
 
 #[tokio::test]
