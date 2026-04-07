@@ -361,11 +361,9 @@ impl GqlBackend for GrafeoBackend {
         .await;
 
         match result {
-            Ok(_) => Ok(()),
-            Err(e) if if_not_exists => {
-                tracing::debug!(schema = %name, error = %e, "CREATE SCHEMA IF NOT EXISTS: ignoring error");
-                Ok(())
-            }
+            Ok(true) => Ok(()),
+            Ok(false) if if_not_exists => Ok(()),
+            Ok(false) => Err(GqlError::Session(format!("schema '{name}' already exists"))),
             Err(e) => Err(GqlError::Session(e.to_string())),
         }
     }
@@ -377,15 +375,13 @@ impl GqlBackend for GrafeoBackend {
             "default",
             name,
         )
-        .await;
+        .await
+        .map_err(|e| GqlError::Session(e.to_string()))?;
 
-        match result {
-            Ok(dropped) => Ok(dropped),
-            Err(e) if if_exists => {
-                tracing::debug!(schema = %name, error = %e, "DROP SCHEMA IF EXISTS: ignoring error");
-                Ok(false)
-            }
-            Err(e) => Err(GqlError::Session(e.to_string())),
+        match (result, if_exists) {
+            (true, _) => Ok(true),
+            (false, true) => Ok(false),
+            (false, false) => Err(GqlError::Session(format!("schema '{name}' not found"))),
         }
     }
 

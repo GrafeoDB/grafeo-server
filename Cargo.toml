@@ -35,14 +35,14 @@ boltr = "0.1.2"
 gwp = "0.1.6"
 
 # Async
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 
 # Shared
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 dashmap = "6.1"
 parking_lot = "0.12"
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 tracing = "0.1"
 base64 = "0.22"
 url = "2"
@@ -181,7 +181,7 @@ grafeo-studio = { workspace = true, optional = true }
 tokio = { workspace = true }
 
 # Configuration
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 
 # Observability
 tracing = { workspace = true }
@@ -194,9 +194,9 @@ grafeo-boltr = { workspace = true }
 grafeo-studio = { workspace = true }
 boltr = { workspace = true, features = ["client"] }
 reqwest = { version = "0.13.2", features = ["gzip", "json"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
-tempfile = "3.25"
+tempfile = "3.27"
 gwp = "0.1.6"
 tonic = "0.14.5"
 base64 = { workspace = true }

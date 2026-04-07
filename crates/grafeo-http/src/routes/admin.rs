@@ -239,6 +239,7 @@ pub async fn admin_drop_index(
     responses(
         (status = 200, description = "Database compacted"),
         (status = 400, description = "Feature not enabled", body = crate::error::ErrorBody),
+        (status = 403, description = "Server is read-only", body = crate::error::ErrorBody),
         (status = 404, description = "Database not found", body = crate::error::ErrorBody),
         (status = 409, description = "Database in use", body = crate::error::ErrorBody),
     ),

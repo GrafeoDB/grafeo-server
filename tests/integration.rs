@@ -3325,6 +3325,179 @@ async fn named_graphs_database_not_found() {
 }
 
 // ---------------------------------------------------------------------------
+// Schema namespace endpoints
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn schema_namespace_crud() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // List schemas on a fresh database (may be empty).
+    let resp = client
+        .get(format!("{base}/db/default/schemas"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["schemas"].is_array());
+
+    // Create a schema.
+    let resp = client
+        .post(format!("{base}/db/default/schemas"))
+        .json(&json!({ "name": "analytics" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], true);
+
+    // List schemas should include the new schema.
+    let resp = client
+        .get(format!("{base}/db/default/schemas"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let schemas = body["schemas"].as_array().unwrap();
+    assert!(schemas.iter().any(|s| s.as_str() == Some("analytics")));
+
+    // Drop the schema.
+    let resp = client
+        .delete(format!("{base}/db/default/schemas/analytics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["dropped"], true);
+}
+
+#[tokio::test]
+async fn schema_namespace_database_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/db/nonexistent/schemas"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Bulk import endpoints
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn import_tsv_creates_nodes_and_edges() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/import/tsv"))
+        .json(&json!({
+            "data": "1\t2\n2\t3\n3\t1",
+            "edge_type": "CONNECTS",
+            "directed": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["nodes_created"], 3);
+    assert_eq!(body["edges_created"], 3);
+}
+
+#[tokio::test]
+async fn import_tsv_undirected_doubles_edges() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/import/tsv"))
+        .json(&json!({
+            "data": "1\t2\n2\t3",
+            "edge_type": "LINK",
+            "directed": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["nodes_created"], 3);
+    assert_eq!(body["edges_created"], 4); // 2 edges x 2 directions
+}
+
+#[tokio::test]
+async fn import_tsv_database_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/nonexistent/import/tsv"))
+        .json(&json!({
+            "data": "1\t2",
+            "edge_type": "E",
+            "directed": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Compact endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn compact_feature_not_enabled_returns_400() {
+    // Without the compact-store feature, this should return 400.
+    // If the feature IS enabled, compaction should succeed on an empty DB.
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/compact"))
+        .send()
+        .await
+        .unwrap();
+
+    // Accept either 200 (feature enabled) or 400 (feature not enabled).
+    let status = resp.status().as_u16();
+    assert!(
+        status == 200 || status == 400,
+        "unexpected status: {status}"
+    );
+}
+
+#[tokio::test]
+async fn compact_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/nonexistent/compact"))
+        .send()
+        .await
+        .unwrap();
+
+    // 404 (database not found) or 400 (feature not enabled).
+    let status = resp.status().as_u16();
+    assert!(
+        status == 404 || status == 400,
+        "unexpected status: {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Read-Only Mode
 // ---------------------------------------------------------------------------
 

@@ -350,7 +350,7 @@ impl AdminService {
     ///
     /// Requires exclusive access to the database (no active sessions or
     /// concurrent requests holding a reference).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async)] // async needed when compact-store is enabled
     pub async fn compact(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
         if databases.is_read_only() {
             return Err(ServiceError::ReadOnly);
@@ -358,7 +358,51 @@ impl AdminService {
 
         #[cfg(feature = "compact-store")]
         {
-            databases.compact(db_name)
+            use std::sync::Arc;
+
+            // Fast: remove from registry and verify exclusive ownership.
+            let mut db_entry = databases.take_exclusive(db_name)?;
+            let name = db_name.to_owned();
+
+            // Slow: the actual columnar conversion runs in a blocking task
+            // so we don't stall the tokio runtime.
+            let result = tokio::task::spawn_blocking(move || {
+                let db = match Arc::get_mut(&mut db_entry.db) {
+                    Some(db) => db,
+                    None => {
+                        return Err((
+                            db_entry,
+                            ServiceError::Conflict(
+                                "database is in use by active sessions, cannot compact".to_string(),
+                            ),
+                        ));
+                    }
+                };
+
+                if let Err(e) = db.compact() {
+                    return Err((
+                        db_entry,
+                        ServiceError::Internal(format!("compaction failed: {e}")),
+                    ));
+                }
+
+                db_entry.metadata.storage_mode = "compact".to_string();
+                Ok(db_entry)
+            })
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+            match result {
+                Ok(compacted) => {
+                    databases.reinsert(name.clone(), compacted);
+                    tracing::info!(name = %name, "Database compacted to columnar read-only store");
+                    Ok(())
+                }
+                Err((original, err)) => {
+                    databases.reinsert(name, original);
+                    Err(err)
+                }
+            }
         }
         #[cfg(not(feature = "compact-store"))]
         {
@@ -438,6 +482,8 @@ impl AdminService {
     /// Create a new schema namespace in a database.
     ///
     /// Returns `true` if the schema was created, `false` if it already existed.
+    /// Only "already exists" errors are converted to `Ok(false)`: real failures
+    /// (database not found, internal errors) propagate as `Err`.
     pub async fn create_schema(
         databases: &DatabaseManager,
         metrics: &Metrics,
@@ -448,7 +494,6 @@ impl AdminService {
             return Err(ServiceError::ReadOnly);
         }
 
-        // CREATE SCHEMA is idempotent in the engine (no error if exists).
         let result = crate::query::QueryService::execute(
             databases,
             metrics,
@@ -459,22 +504,20 @@ impl AdminService {
             None,
             false,
         )
-        .await?;
+        .await;
 
-        // The engine returns a single row with a boolean "created" column.
-        let created = result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        Ok(created)
+        match result {
+            Ok(_) => Ok(true),
+            Err(ref e) if e.to_string().contains("already exists") => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Drop a schema namespace from a database.
     ///
-    /// Returns `true` if the schema existed and was dropped.
+    /// Returns `true` if the schema existed and was dropped, `false` if the
+    /// schema was not found. Only "not found" errors are converted to
+    /// `Ok(false)`: real failures propagate as `Err`.
     pub async fn drop_schema(
         databases: &DatabaseManager,
         metrics: &Metrics,
@@ -495,16 +538,18 @@ impl AdminService {
             None,
             false,
         )
-        .await?;
+        .await;
 
-        let dropped = result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        Ok(dropped)
+        match result {
+            Ok(_) => Ok(true),
+            Err(ref e)
+                if e.to_string().contains("not found")
+                    || e.to_string().contains("does not exist") =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Write a point-in-time snapshot to the `.grafeo` database file.
