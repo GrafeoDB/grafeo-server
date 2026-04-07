@@ -358,14 +358,12 @@ impl AdminService {
 
         #[cfg(feature = "compact-store")]
         {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
             use std::sync::Arc;
 
-            // Fast: remove from registry and verify exclusive ownership.
             let mut db_entry = databases.take_exclusive(db_name)?;
             let name = db_name.to_owned();
 
-            // Slow: the actual columnar conversion runs in a blocking task
-            // so we don't stall the tokio runtime.
             let result = tokio::task::spawn_blocking(move || {
                 let db = match Arc::get_mut(&mut db_entry.db) {
                     Some(db) => db,
@@ -379,18 +377,23 @@ impl AdminService {
                     }
                 };
 
-                if let Err(e) = db.compact() {
-                    return Err((
+                match catch_unwind(AssertUnwindSafe(|| db.compact())) {
+                    Ok(Ok(())) => {
+                        db_entry.metadata.storage_mode = "compact".to_string();
+                        Ok(db_entry)
+                    }
+                    Ok(Err(e)) => Err((
                         db_entry,
                         ServiceError::Internal(format!("compaction failed: {e}")),
-                    ));
+                    )),
+                    Err(_panic) => Err((
+                        db_entry,
+                        ServiceError::Internal("compaction panicked".to_string()),
+                    )),
                 }
-
-                db_entry.metadata.storage_mode = "compact".to_string();
-                Ok(db_entry)
             })
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            .expect("compact: spawn_blocking task should not be cancelled");
 
             match result {
                 Ok(compacted) => {
