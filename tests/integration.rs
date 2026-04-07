@@ -3492,7 +3492,8 @@ async fn compact_not_found() {
     // 404 (database not found) or 400 (feature not enabled).
     let status = resp.status().as_u16();
     assert!(
-        status == 404 || status == 400,
+        (cfg!(feature = "compact-store") && status == 404)
+            || (!cfg!(feature = "compact-store") && status == 400),
         "unexpected status: {status}"
     );
 }
