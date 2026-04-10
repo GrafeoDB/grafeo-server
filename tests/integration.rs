@@ -4394,6 +4394,8 @@ fn sync_state() -> grafeo_server::AppState {
         auth_password: None,
         #[cfg(feature = "replication")]
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
+        backup_dir: None,
+        backup_retention: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     grafeo_server::AppState::new(
@@ -4419,9 +4421,9 @@ async fn sync_round_trip_two_databases() {
     let state_a = sync_state();
     {
         let entry = state_a.databases().get("default").unwrap();
-        entry.db.create_node(&["Person"]);
-        entry.db.create_node(&["Person"]);
-        entry.db.create_node(&["Person"]);
+        entry.db().create_node(&["Person"]);
+        entry.db().create_node(&["Person"]);
+        entry.db().create_node(&["Person"]);
     }
     let base_a = spawn_server_from_state(state_a).await;
 
@@ -4510,9 +4512,9 @@ async fn sync_with_edge_creates() {
     let state_a = sync_state();
     let (alix_raw, gus_raw) = {
         let entry = state_a.databases().get("default").unwrap();
-        let alix = entry.db.create_node(&["Person"]);
-        let gus = entry.db.create_node(&["Person"]);
-        entry.db.create_edge(alix, gus, "KNOWS");
+        let alix = entry.db().create_node(&["Person"]);
+        let gus = entry.db().create_node(&["Person"]);
+        entry.db().create_edge(alix, gus, "KNOWS");
         (alix.as_u64(), gus.as_u64())
     };
     let base_a = spawn_server_from_state(state_a).await;
@@ -4623,8 +4625,8 @@ async fn sync_updates_and_deletes() {
     let state_b = sync_state();
     let (n1, n2) = {
         let entry = state_b.databases().get("default").unwrap();
-        let n1 = entry.db.create_node(&["Device"]).as_u64();
-        let n2 = entry.db.create_node(&["Device"]).as_u64();
+        let n1 = entry.db().create_node(&["Device"]).as_u64();
+        let n2 = entry.db().create_node(&["Device"]).as_u64();
         (n1, n2)
     };
     let base_b = spawn_server_from_state(state_b).await;
@@ -4680,7 +4682,7 @@ async fn sync_lww_conflict_detection() {
     let state = sync_state();
     let node_id = {
         let entry = state.databases().get("default").unwrap();
-        entry.db.create_node(&["Person"]).as_u64()
+        entry.db().create_node(&["Person"]).as_u64()
     };
     let base = spawn_server_from_state(state).await;
 
@@ -4726,7 +4728,7 @@ async fn sync_limit_truncation() {
     {
         let entry = state.databases().get("default").unwrap();
         for _ in 0..7 {
-            entry.db.create_node(&["Item"]);
+            entry.db().create_node(&["Item"]);
         }
     }
     let base = spawn_server_from_state(state).await;
@@ -5241,11 +5243,7 @@ async fn backup_list_all() {
         .await
         .unwrap();
 
-    let resp = client
-        .get(format!("{base}/backups"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(format!("{base}/backups")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
 
     let backups: Vec<Value> = resp.json().await.unwrap();
@@ -5389,4 +5387,436 @@ async fn restore_in_memory_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+/// Boots a server with persistent storage and backup configured.
+/// Returns (base_url, data_tempdir, backup_tempdir).
+async fn spawn_server_persistent_backup() -> (String, TempDir, TempDir) {
+    let data_dir = TempDir::new().unwrap();
+    let backup_dir = TempDir::new().unwrap();
+    let config = grafeo_service::ServiceConfig {
+        data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
+        read_only: false,
+        session_ttl: 300,
+        query_timeout: 30,
+        rate_limit: 0,
+        rate_limit_window: 60,
+        #[cfg(feature = "auth")]
+        auth_token: None,
+        #[cfg(feature = "auth")]
+        auth_user: None,
+        #[cfg(feature = "auth")]
+        auth_password: None,
+        #[cfg(feature = "replication")]
+        replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
+        backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
+        backup_retention: None,
+    };
+    let service = grafeo_service::ServiceState::new(&config);
+    let state = grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
+    let base = spawn_server_from_state(state).await;
+    (base, data_dir, backup_dir)
+}
+
+/// Same as above but with retention configured.
+async fn spawn_server_persistent_backup_with_retention(keep: usize) -> (String, TempDir, TempDir) {
+    let data_dir = TempDir::new().unwrap();
+    let backup_dir = TempDir::new().unwrap();
+    let config = grafeo_service::ServiceConfig {
+        data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
+        read_only: false,
+        session_ttl: 300,
+        query_timeout: 30,
+        rate_limit: 0,
+        rate_limit_window: 60,
+        #[cfg(feature = "auth")]
+        auth_token: None,
+        #[cfg(feature = "auth")]
+        auth_user: None,
+        #[cfg(feature = "auth")]
+        auth_password: None,
+        #[cfg(feature = "replication")]
+        replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
+        backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
+        backup_retention: Some(keep),
+    };
+    let service = grafeo_service::ServiceState::new(&config);
+    let state = grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
+    let base = spawn_server_from_state(state).await;
+    (base, data_dir, backup_dir)
+}
+
+/// Helper: create N nodes on a database via GQL.
+async fn seed_nodes(client: &Client, base: &str, db: &str, count: usize) {
+    for i in 0..count {
+        client
+            .post(format!("{base}/query"))
+            .json(&json!({
+                "query": format!("CREATE (:Item {{idx: {i}}})"),
+                "database": db,
+            }))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
+/// Helper: get node count for a database.
+async fn db_node_count(client: &Client, base: &str, db: &str) -> u64 {
+    let resp: Value = client
+        .get(format!("{base}/db/{db}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    resp["node_count"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn restore_data_rollback() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    // Seed 10 nodes
+    seed_nodes(&client, &base, "default", 10).await;
+    assert_eq!(db_node_count(&client, &base, "default").await, 10);
+
+    // Backup
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+    assert_eq!(resp["node_count"], 10);
+
+    // Add more nodes
+    seed_nodes(&client, &base, "default", 5).await;
+    assert_eq!(db_node_count(&client, &base, "default").await, 15);
+
+    // Restore — should roll back to 10
+    let resp = client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": filename }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(db_node_count(&client, &base, "default").await, 10);
+}
+
+#[tokio::test]
+async fn restore_creates_safety_backup() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    // Backup
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    // Restore
+    client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": filename }))
+        .send()
+        .await
+        .unwrap();
+
+    // Should now have 2 backups: original + safety
+    let backups: Vec<Value> = client
+        .get(format!("{base}/admin/default/backups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(backups.len(), 2);
+}
+
+#[tokio::test]
+async fn backup_retention_enforced() {
+    let (base, _data, _backup) = spawn_server_persistent_backup_with_retention(3).await;
+    let client = Client::new();
+
+    // Create 5 backups
+    for _ in 0..5 {
+        client
+            .post(format!("{base}/admin/default/backup"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let backups: Vec<Value> = client
+        .get(format!("{base}/admin/default/backups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        backups.len() <= 3,
+        "retention should keep at most 3, got {}",
+        backups.len()
+    );
+}
+
+#[tokio::test]
+async fn backup_download_integrity() {
+    let (base, _data, backup_dir) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    seed_nodes(&client, &base, "default", 10).await;
+
+    // Backup and download
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    let bytes = client
+        .get(format!("{base}/backups/download/{filename}"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(!bytes.is_empty());
+
+    // Write downloaded bytes as a new file in the backup dir
+    let copy_path = backup_dir.path().join("downloaded_copy.grafeo");
+    std::fs::write(&copy_path, &bytes).unwrap();
+
+    // Mutate
+    seed_nodes(&client, &base, "default", 5).await;
+    assert_eq!(db_node_count(&client, &base, "default").await, 15);
+
+    // Restore from the downloaded copy
+    let resp = client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": "downloaded_copy.grafeo" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(db_node_count(&client, &base, "default").await, 10);
+}
+
+#[tokio::test]
+async fn restore_corrupt_backup_recovers() {
+    let (base, _data, backup_dir) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    seed_nodes(&client, &base, "default", 10).await;
+
+    // Write a corrupt file
+    std::fs::write(backup_dir.path().join("corrupt.grafeo"), b"garbage").unwrap();
+
+    let resp = client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": "corrupt.grafeo" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+
+    // Database should still be functional with original data
+    assert_eq!(db_node_count(&client, &base, "default").await, 10);
+}
+
+#[tokio::test]
+async fn restore_concurrent_conflict() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    // Fire two restores concurrently
+    let base2 = base.clone();
+    let filename2 = filename.clone();
+    let (r1, r2) = tokio::join!(
+        async {
+            reqwest::Client::new()
+                .post(format!("{base}/admin/default/restore"))
+                .json(&json!({ "backup": filename }))
+                .send()
+                .await
+                .unwrap()
+        },
+        async {
+            reqwest::Client::new()
+                .post(format!("{base2}/admin/default/restore"))
+                .json(&json!({ "backup": filename2 }))
+                .send()
+                .await
+                .unwrap()
+        },
+    );
+
+    let statuses = [r1.status().as_u16(), r2.status().as_u16()];
+    let mut sorted = statuses;
+    sorted.sort_unstable();
+
+    // One should succeed (200), the other should get conflict (409)
+    // or internal error (500) if the safety backup timestamp collided.
+    // At minimum, one must succeed.
+    assert!(
+        sorted[0] == 200 || sorted[1] == 200,
+        "at least one restore should succeed, got {:?}",
+        statuses
+    );
+}
+
+#[tokio::test]
+async fn restore_path_traversal_rejected() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    for payload in ["../../../etc/passwd", "..%2Fetc", "foo/../../bar"] {
+        let resp = client
+            .post(format!("{base}/admin/default/restore"))
+            .json(&json!({ "backup": payload }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "path traversal not blocked for: {payload}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn backup_filenames_unique_rapid() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    let r1: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r2: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_ne!(
+        r1["filename"], r2["filename"],
+        "rapid backups should have unique filenames"
+    );
+}
+
+#[tokio::test]
+async fn backup_multi_database_isolation() {
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    // Create second database
+    client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "second",
+            "storage_mode": "Persistent",
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Backup both
+    client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/admin/second/backup"))
+        .send()
+        .await
+        .unwrap();
+
+    // List-all should have both
+    let all: Vec<Value> = client
+        .get(format!("{base}/backups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    let dbs: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|b| b["database"].as_str().unwrap())
+        .collect();
+    assert!(dbs.contains("default"));
+    assert!(dbs.contains("second"));
+
+    // Per-database listing should be isolated
+    let default_backups: Vec<Value> = client
+        .get(format!("{base}/admin/default/backups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(default_backups.len(), 1);
+    assert_eq!(default_backups[0]["database"], "default");
+
+    let second_backups: Vec<Value> = client
+        .get(format!("{base}/admin/second/backups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second_backups.len(), 1);
+    assert_eq!(second_backups[0]["database"], "second");
 }

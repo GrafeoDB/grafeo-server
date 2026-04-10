@@ -33,8 +33,9 @@ impl BackupService {
         let db_name_owned = db_name.to_owned();
 
         // Ensure backup directory exists
-        std::fs::create_dir_all(backup_dir)
-            .map_err(|e| ServiceError::Internal(format!("failed to create backup directory: {e}")))?;
+        std::fs::create_dir_all(backup_dir).map_err(|e| {
+            ServiceError::Internal(format!("failed to create backup directory: {e}"))
+        })?;
 
         let db = entry.db();
         let node_count = db.node_count() as u64;
@@ -98,9 +99,7 @@ impl BackupService {
 
         // Verify the database exists and is persistent
         let data_dir = databases.data_dir().ok_or_else(|| {
-            ServiceError::BadRequest(
-                "restore requires persistent storage (--data-dir)".to_string(),
-            )
+            ServiceError::BadRequest("restore requires persistent storage (--data-dir)".to_string())
         })?;
 
         let entry = databases
@@ -146,20 +145,30 @@ impl BackupService {
         // 1. Safety backup (hot snapshot, DB still open and serving reads)
         tracing::info!(database = %db_name, "Creating safety backup before restore");
         let safety_timestamp = now_timestamp();
-        let safety_filename = format!("{db_name}_pre_restore_{safety_timestamp}.grafeo");
+        let safety_filename = format!("{db_name}_{safety_timestamp}.grafeo");
         let safety_path = backup_dir.join(&safety_filename);
 
         if let Err(e) = std::fs::create_dir_all(backup_dir) {
-            return (Err(ServiceError::Internal(format!("failed to create backup directory: {e}"))), true);
+            return (
+                Err(ServiceError::Internal(format!(
+                    "failed to create backup directory: {e}"
+                ))),
+                true,
+            );
         }
 
         let safety_db = entry.db();
         let safety_path_clone = safety_path.clone();
-        let save_result = tokio::task::spawn_blocking(move || safety_db.save(&safety_path_clone))
-            .await;
+        let save_result =
+            tokio::task::spawn_blocking(move || safety_db.save(&safety_path_clone)).await;
         match save_result {
             Err(e) => return (Err(ServiceError::Internal(e.to_string())), true),
-            Ok(Err(e)) => return (Err(ServiceError::Internal(format!("safety backup failed: {e}"))), true),
+            Ok(Err(e)) => {
+                return (
+                    Err(ServiceError::Internal(format!("safety backup failed: {e}"))),
+                    true,
+                );
+            }
             Ok(Ok(())) => {}
         }
 
@@ -181,14 +190,24 @@ impl BackupService {
                 std::fs::remove_file(&db_file)
             };
             if let Err(e) = remove_result {
-                return (Err(ServiceError::Internal(format!("failed to remove old database: {e}"))), true);
+                return (
+                    Err(ServiceError::Internal(format!(
+                        "failed to remove old database: {e}"
+                    ))),
+                    true,
+                );
             }
         }
         let wal_dir = db_dir.join("grafeo.db.wal");
-        if wal_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&wal_dir) {
-                return (Err(ServiceError::Internal(format!("failed to remove old WAL: {e}"))), true);
-            }
+        if wal_dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(&wal_dir)
+        {
+            return (
+                Err(ServiceError::Internal(format!(
+                    "failed to remove old WAL: {e}"
+                ))),
+                true,
+            );
         }
 
         // 4. Open backup and save to the persistent path, then open the result
@@ -251,7 +270,11 @@ impl BackupService {
                 (
                     Err(ServiceError::Internal(format!(
                         "restore failed{}: {e}",
-                        if recovered { ", recovered from safety backup" } else { ", recovery also failed" }
+                        if recovered {
+                            ", recovered from safety backup"
+                        } else {
+                            ", recovery also failed"
+                        }
                     ))),
                     recovered,
                 )
@@ -260,7 +283,7 @@ impl BackupService {
     }
 
     /// List available backups, optionally filtered by database name.
-    pub async fn list_backups(
+    pub fn list_backups(
         db_name: Option<&str>,
         backup_dir: &Path,
     ) -> Result<Vec<types::BackupEntry>, ServiceError> {
@@ -286,10 +309,10 @@ impl BackupService {
                 let (db, timestamp) = parse_backup_filename(stem)?;
 
                 // Filter by database name if specified
-                if let Some(filter) = db_name {
-                    if db != filter {
-                        return None;
-                    }
+                if let Some(filter) = db_name
+                    && db != filter
+                {
+                    return None;
                 }
 
                 let meta = std::fs::metadata(&path).ok()?;
@@ -312,10 +335,7 @@ impl BackupService {
     }
 
     /// Delete a specific backup file.
-    pub async fn delete_backup(
-        filename: &str,
-        backup_dir: &Path,
-    ) -> Result<(), ServiceError> {
+    pub fn delete_backup(filename: &str, backup_dir: &Path) -> Result<(), ServiceError> {
         // Prevent path traversal
         if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
             return Err(ServiceError::BadRequest(
@@ -339,12 +359,12 @@ impl BackupService {
 
     /// Enforce retention policy: keep only the N most recent backups per database.
     /// Returns filenames of deleted backups.
-    pub async fn enforce_retention(
+    pub fn enforce_retention(
         db_name: &str,
         backup_dir: &Path,
         keep: usize,
     ) -> Result<Vec<String>, ServiceError> {
-        let backups = Self::list_backups(Some(db_name), backup_dir).await?;
+        let backups = Self::list_backups(Some(db_name), backup_dir)?;
 
         if backups.len() <= keep {
             return Ok(vec![]);
@@ -368,13 +388,18 @@ impl BackupService {
     }
 }
 
-/// Generate a timestamp string: YYYY_MM_DD_HH_MM_SS (UTC).
+/// Generate a timestamp string: YYYY_MM_DD_HH_MM_SS_mmm (UTC).
+///
+/// Includes milliseconds to avoid filename collisions when multiple
+/// backups are created within the same second (e.g. safety backups
+/// during back-to-back restores).
 fn now_timestamp() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs();
+    let millis = now.subsec_millis();
 
     // Manual UTC breakdown (no chrono dependency needed)
     let days = secs / 86400;
@@ -386,16 +411,16 @@ fn now_timestamp() -> String {
     // Days since epoch to Y/M/D
     let (year, month, day) = days_to_ymd(days);
 
-    format!("{year:04}_{month:02}_{day:02}_{hours:02}_{minutes:02}_{seconds:02}")
+    format!("{year:04}_{month:02}_{day:02}_{hours:02}_{minutes:02}_{seconds:02}_{millis:03}")
 }
 
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Civil calendar algorithm from Howard Hinnant
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -407,9 +432,15 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 /// Convert our timestamp format to ISO 8601.
 fn timestamp_to_iso(ts: &str) -> String {
-    // "2024_01_15_02_30_45" -> "2024-01-15T02:30:45Z"
+    // "2024_01_15_02_30_45_123" -> "2024-01-15T02:30:45.123Z"
     let parts: Vec<&str> = ts.split('_').collect();
-    if parts.len() == 6 {
+    if parts.len() == 7 {
+        format!(
+            "{}-{}-{}T{}:{}:{}.{}Z",
+            parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+        )
+    } else if parts.len() == 6 {
+        // Backwards compat with old timestamps without millis
         format!(
             "{}-{}-{}T{}:{}:{}Z",
             parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
@@ -420,25 +451,30 @@ fn timestamp_to_iso(ts: &str) -> String {
 }
 
 /// Parse a backup filename stem into (database_name, timestamp).
-/// Format: `{db_name}_{YYYY}_{MM}_{DD}_{HH}_{MM}_{SS}`
+/// Format: `{db_name}_{YYYY}_{MM}_{DD}_{HH}_{MM}_{SS}_{mmm}`
+/// Also accepts the old 6-part format without milliseconds.
 fn parse_backup_filename(stem: &str) -> Option<(String, String)> {
-    // Find the timestamp portion: last 6 underscore-separated numeric segments
     let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() < 7 {
+
+    // Try 7-part timestamp first (with millis), then 6-part (without)
+    let ts_len = if parts.len() >= 8
+        && parts[parts.len() - 7..]
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    {
+        7
+    } else if parts.len() >= 7
+        && parts[parts.len() - 6..]
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    {
+        6
+    } else {
         return None;
-    }
+    };
 
-    // The timestamp is the last 6 parts
-    let ts_parts = &parts[parts.len() - 6..];
-
-    // Validate they're all numeric
-    for p in ts_parts {
-        if !p.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-    }
-
-    let db_name = parts[..parts.len() - 6].join("_");
+    let ts_parts = &parts[parts.len() - ts_len..];
+    let db_name = parts[..parts.len() - ts_len].join("_");
     let timestamp = ts_parts.join("_");
 
     if db_name.is_empty() {
@@ -453,7 +489,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_backup_filename() {
+    fn test_parse_backup_filename_with_millis() {
+        let (db, ts) = parse_backup_filename("default_2024_01_15_02_30_45_123").unwrap();
+        assert_eq!(db, "default");
+        assert_eq!(ts, "2024_01_15_02_30_45_123");
+    }
+
+    #[test]
+    fn test_parse_backup_filename_without_millis() {
         let (db, ts) = parse_backup_filename("default_2024_01_15_02_30_45").unwrap();
         assert_eq!(db, "default");
         assert_eq!(ts, "2024_01_15_02_30_45");
@@ -461,16 +504,23 @@ mod tests {
 
     #[test]
     fn test_parse_backup_filename_with_underscores() {
+        let (db, ts) = parse_backup_filename("my_cool_db_2024_01_15_02_30_45_123").unwrap();
+        assert_eq!(db, "my_cool_db");
+        assert_eq!(ts, "2024_01_15_02_30_45_123");
+    }
+
+    #[test]
+    fn test_parse_backup_filename_with_underscores_no_millis() {
         let (db, ts) = parse_backup_filename("my_cool_db_2024_01_15_02_30_45").unwrap();
         assert_eq!(db, "my_cool_db");
         assert_eq!(ts, "2024_01_15_02_30_45");
     }
 
     #[test]
-    fn test_parse_backup_filename_pre_restore() {
-        let (db, ts) = parse_backup_filename("default_pre_restore_2024_01_15_02_30_45").unwrap();
-        assert_eq!(db, "default_pre_restore");
-        assert_eq!(ts, "2024_01_15_02_30_45");
+    fn test_parse_backup_filename_multi_underscore_name() {
+        let (db, ts) = parse_backup_filename("my_multi_part_name_2024_01_15_02_30_45_123").unwrap();
+        assert_eq!(db, "my_multi_part_name");
+        assert_eq!(ts, "2024_01_15_02_30_45_123");
     }
 
     #[test]
@@ -479,7 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_to_iso() {
+    fn test_timestamp_to_iso_with_millis() {
+        assert_eq!(
+            timestamp_to_iso("2024_01_15_02_30_45_123"),
+            "2024-01-15T02:30:45.123Z"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_to_iso_without_millis() {
         assert_eq!(
             timestamp_to_iso("2024_01_15_02_30_45"),
             "2024-01-15T02:30:45Z"
@@ -490,7 +548,7 @@ mod tests {
     fn test_now_timestamp_format() {
         let ts = now_timestamp();
         let parts: Vec<&str> = ts.split('_').collect();
-        assert_eq!(parts.len(), 6);
+        assert_eq!(parts.len(), 7);
         for p in &parts {
             assert!(p.chars().all(|c| c.is_ascii_digit()));
         }
@@ -513,9 +571,7 @@ mod tests {
         assert!(backup.size_bytes > 0);
 
         // List backups
-        let list = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let list = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].database, "default");
     }
@@ -533,17 +589,13 @@ mod tests {
     #[tokio::test]
     async fn test_list_backups_empty() {
         let backup_dir = tempfile::tempdir().unwrap();
-        let list = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let list = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert!(list.is_empty());
     }
 
     #[tokio::test]
     async fn test_list_backups_nonexistent_dir() {
-        let list = BackupService::list_backups(None, Path::new("/nonexistent/path"))
-            .await
-            .unwrap();
+        let list = BackupService::list_backups(None, Path::new("/nonexistent/path")).unwrap();
         assert!(list.is_empty());
     }
 
@@ -558,21 +610,17 @@ mod tests {
                 .unwrap();
 
         // Delete it
-        BackupService::delete_backup(&backup.filename, backup_dir.path())
-            .await
-            .unwrap();
+        BackupService::delete_backup(&backup.filename, backup_dir.path()).unwrap();
 
         // Verify gone
-        let list = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let list = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert!(list.is_empty());
     }
 
     #[tokio::test]
     async fn test_delete_backup_path_traversal() {
         let backup_dir = tempfile::tempdir().unwrap();
-        let result = BackupService::delete_backup("../etc/passwd", backup_dir.path()).await;
+        let result = BackupService::delete_backup("../etc/passwd", backup_dir.path());
         assert!(result.is_err());
     }
 
@@ -589,21 +637,14 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         }
 
-        let before = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let before = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert_eq!(before.len(), 3);
 
         // Keep only 1
-        let deleted =
-            BackupService::enforce_retention("default", backup_dir.path(), 1)
-                .await
-                .unwrap();
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 1).unwrap();
         assert_eq!(deleted.len(), 2);
 
-        let after = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let after = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert_eq!(after.len(), 1);
     }
 
@@ -616,10 +657,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deleted =
-            BackupService::enforce_retention("default", backup_dir.path(), 5)
-                .await
-                .unwrap();
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 5).unwrap();
         assert!(deleted.is_empty());
     }
 
@@ -648,22 +686,16 @@ mod tests {
             .unwrap();
 
         // All backups
-        let all = BackupService::list_backups(None, backup_dir.path())
-            .await
-            .unwrap();
+        let all = BackupService::list_backups(None, backup_dir.path()).unwrap();
         assert_eq!(all.len(), 2);
 
         // Filter to default only
-        let default_only = BackupService::list_backups(Some("default"), backup_dir.path())
-            .await
-            .unwrap();
+        let default_only = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
         assert_eq!(default_only.len(), 1);
         assert_eq!(default_only[0].database, "default");
 
         // Filter to other only
-        let other_only = BackupService::list_backups(Some("other"), backup_dir.path())
-            .await
-            .unwrap();
+        let other_only = BackupService::list_backups(Some("other"), backup_dir.path()).unwrap();
         assert_eq!(other_only.len(), 1);
         assert_eq!(other_only[0].database, "other");
     }
@@ -671,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_nonexistent_backup() {
         let backup_dir = tempfile::tempdir().unwrap();
-        let result = BackupService::delete_backup("does_not_exist.grafeo", backup_dir.path()).await;
+        let result = BackupService::delete_backup("does_not_exist.grafeo", backup_dir.path());
         assert!(matches!(result, Err(ServiceError::NotFound(_))));
     }
 
@@ -681,8 +713,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("deeply").join("nested").join("dir");
 
-        let result =
-            BackupService::backup_database(state.databases(), "default", &nested).await;
+        let result = BackupService::backup_database(state.databases(), "default", &nested).await;
         assert!(result.is_ok());
         assert!(nested.exists());
     }
@@ -716,15 +747,17 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
 
-        let mgr = crate::database::DatabaseManager::new(
-            Some(data_dir.path().to_str().unwrap()),
-            false,
-        );
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
         // Insert data into the default database
         {
             let entry = mgr.get("default").unwrap();
-            entry.db().session().execute("INSERT (:Person {name: 'Alice'})").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
             assert_eq!(entry.db().node_count(), 1);
         }
 
@@ -737,7 +770,11 @@ mod tests {
         // Insert more data after backup
         {
             let entry = mgr.get("default").unwrap();
-            entry.db().session().execute("INSERT (:Person {name: 'Bob'})").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Bob'})")
+                .unwrap();
             assert_eq!(entry.db().node_count(), 2);
         }
 
@@ -756,10 +793,8 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
 
-        let mgr = crate::database::DatabaseManager::new(
-            Some(data_dir.path().to_str().unwrap()),
-            false,
-        );
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
         let result = BackupService::restore_database(
             &mgr,
@@ -776,10 +811,8 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
 
-        let mgr = crate::database::DatabaseManager::new(
-            Some(data_dir.path().to_str().unwrap()),
-            false,
-        );
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
         // Create a valid backup file
         let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
@@ -787,13 +820,9 @@ mod tests {
             .unwrap();
         let backup_path = backup_dir.path().join(&backup.filename);
 
-        let result = BackupService::restore_database(
-            &mgr,
-            "nonexistent",
-            &backup_path,
-            backup_dir.path(),
-        )
-        .await;
+        let result =
+            BackupService::restore_database(&mgr, "nonexistent", &backup_path, backup_dir.path())
+                .await;
         assert!(matches!(result, Err(ServiceError::NotFound(_))));
     }
 
@@ -808,13 +837,8 @@ mod tests {
         let dummy_path = backup_dir.path().join("dummy.grafeo");
         std::fs::write(&dummy_path, b"fake").unwrap();
 
-        let result = BackupService::restore_database(
-            &mgr,
-            "default",
-            &dummy_path,
-            backup_dir.path(),
-        )
-        .await;
+        let result =
+            BackupService::restore_database(&mgr, "default", &dummy_path, backup_dir.path()).await;
         assert!(matches!(result, Err(ServiceError::ReadOnly)));
     }
 
