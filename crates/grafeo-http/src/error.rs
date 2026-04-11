@@ -102,6 +102,11 @@ impl IntoResponse for ApiError {
                 "read_only",
                 Some("server is in read-only mode".to_string()),
             ),
+            ServiceError::Unavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                Some(msg.clone()),
+            ),
             ServiceError::Internal(msg) => {
                 tracing::error!(%msg, "internal server error");
                 (
@@ -200,6 +205,18 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], "read_only");
         assert_eq!(body["detail"], "server is in read-only mode");
+    }
+
+    #[tokio::test]
+    async fn unavailable_maps_to_503() {
+        use grafeo_service::error::ServiceError;
+        let (status, body) = parse_response(ApiError::from(ServiceError::Unavailable(
+            "restoring".into(),
+        )))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "unavailable");
+        assert_eq!(body["detail"], "restoring");
     }
 
     #[tokio::test]

@@ -60,6 +60,8 @@ async fn main() {
         auth_password: config.auth_password.clone(),
         #[cfg(feature = "replication")]
         replication_mode,
+        backup_dir: config.backup_dir.clone(),
+        backup_retention: config.backup_retention,
     };
 
     let service = ServiceState::new(&service_config);

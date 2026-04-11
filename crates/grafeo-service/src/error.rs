@@ -38,6 +38,10 @@ pub enum ServiceError {
     #[error("server is in read-only mode")]
     ReadOnly,
 
+    /// Resource temporarily unavailable (e.g. database restoring).
+    #[error("{0}")]
+    Unavailable(String),
+
     /// Internal server error.
     #[error("internal error: {0}")]
     Internal(String),

@@ -81,14 +81,15 @@ impl GrafeoBackend {
             .get(name)
             .ok_or_else(|| GqlError::Session(format!("graph '{name}' not found")))?;
 
+        let db = entry.db();
         Ok(GraphInfo {
             schema: DEFAULT_SCHEMA.to_owned(),
             name: name.to_owned(),
-            node_count: entry.db.node_count() as u64,
-            edge_count: entry.db.edge_count() as u64,
+            node_count: db.node_count() as u64,
+            edge_count: db.edge_count() as u64,
             graph_type: entry.metadata.database_type.clone(),
             storage_mode: entry.metadata.storage_mode.clone(),
-            memory_limit_bytes: entry.db.memory_limit().map(|v| v as u64),
+            memory_limit_bytes: db.memory_limit().map(|v| v as u64),
             backward_edges: Some(entry.metadata.backward_edges),
             threads: Some(entry.metadata.threads as u32),
         })
@@ -106,10 +107,11 @@ impl GqlBackend for GrafeoBackend {
 
         let ro = self.query_read_only();
         let engine_session = tokio::task::spawn_blocking(move || {
+            let db = entry.db();
             if ro {
-                entry.db.session_read_only()
+                db.session_read_only()
             } else {
-                entry.db.session()
+                db.session()
             }
         })
         .await
@@ -145,15 +147,16 @@ impl GqlBackend for GrafeoBackend {
                 let entry = self
                     .state
                     .databases()
-                    .get(&db_name)
-                    .ok_or_else(|| GqlError::Session(format!("graph '{db_name}' not found")))?;
+                    .get_available(&db_name)
+                    .map_err(|e| GqlError::Session(e.to_string()))?;
 
                 let ro = self.query_read_only();
                 let engine_session = tokio::task::spawn_blocking(move || {
+                    let db = entry.db();
                     if ro {
-                        entry.db.session_read_only()
+                        db.session_read_only()
                     } else {
-                        entry.db.session()
+                        db.session()
                     }
                 })
                 .await
@@ -208,10 +211,11 @@ impl GqlBackend for GrafeoBackend {
 
         let ro = self.query_read_only();
         let engine_session = tokio::task::spawn_blocking(move || {
+            let db = entry.db();
             if ro {
-                entry.db.session_read_only()
+                db.session_read_only()
             } else {
-                entry.db.session()
+                db.session()
             }
         })
         .await

@@ -12,6 +12,7 @@
 pub mod admin;
 #[cfg(feature = "auth")]
 pub mod auth;
+pub mod backup;
 #[cfg(feature = "push-changefeed")]
 pub mod changefeed;
 #[cfg(feature = "sync")]
@@ -31,6 +32,7 @@ pub mod stream;
 pub mod sync;
 pub mod types;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +61,10 @@ pub struct ServiceConfig {
     pub auth_password: Option<String>,
     #[cfg(feature = "replication")]
     pub replication_mode: replication::ReplicationMode,
+    /// Directory for storing database backups.
+    pub backup_dir: Option<String>,
+    /// Number of backups to keep per database (retention policy).
+    pub backup_retention: Option<usize>,
 }
 
 /// Shared service state, cloneable across all transport handlers.
@@ -87,6 +93,8 @@ struct Inner {
     replication_mode: replication::ReplicationMode,
     #[cfg(feature = "replication")]
     replication_state: Arc<replication::ReplicationState>,
+    backup_dir: Option<PathBuf>,
+    backup_retention: Option<usize>,
 }
 
 impl ServiceState {
@@ -131,6 +139,8 @@ impl ServiceState {
                 } else {
                     replication::ReplicationState::new()
                 }),
+                backup_dir: config.backup_dir.as_ref().map(PathBuf::from),
+                backup_retention: config.backup_retention,
             }),
         }
     }
@@ -155,6 +165,8 @@ impl ServiceState {
                 replication_mode: replication::ReplicationMode::Standalone,
                 #[cfg(feature = "replication")]
                 replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
             }),
         }
     }
@@ -179,6 +191,8 @@ impl ServiceState {
                 replication_mode: replication::ReplicationMode::Standalone,
                 #[cfg(feature = "replication")]
                 replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
             }),
         }
     }
@@ -203,6 +217,8 @@ impl ServiceState {
                 replication_mode: replication::ReplicationMode::Standalone,
                 #[cfg(feature = "replication")]
                 replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
             }),
         }
     }
@@ -227,6 +243,8 @@ impl ServiceState {
                 replication_mode: replication::ReplicationMode::Standalone,
                 #[cfg(feature = "replication")]
                 replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
             }),
         }
     }
@@ -255,6 +273,8 @@ impl ServiceState {
                 replication_mode: replication::ReplicationMode::Standalone,
                 #[cfg(feature = "replication")]
                 replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
             }),
         }
     }
@@ -337,6 +357,18 @@ impl ServiceState {
     #[cfg(feature = "auth")]
     pub fn has_auth(&self) -> bool {
         self.inner.auth.as_ref().is_some_and(|a| a.is_enabled())
+    }
+
+    // --- Backup ---
+
+    /// Returns the configured backup directory, if any.
+    pub fn backup_dir(&self) -> Option<&Path> {
+        self.inner.backup_dir.as_deref()
+    }
+
+    /// Returns the backup retention count, if configured.
+    pub fn backup_retention(&self) -> Option<usize> {
+        self.inner.backup_retention
     }
 
     // --- Maintenance ---

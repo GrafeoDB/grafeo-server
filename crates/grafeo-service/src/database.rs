@@ -8,7 +8,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use grafeo_engine::{AccessMode, Config, DurabilityMode, GrafeoDB};
 
@@ -69,10 +71,83 @@ impl Default for DatabaseMetadata {
     }
 }
 
+/// Database availability state.
+const STATE_AVAILABLE: u8 = 0;
+const STATE_RESTORING: u8 = 1;
+
 /// A single database instance with its metadata.
+///
+/// The `GrafeoDB` handle is behind an `ArcSwap` so that restore can hot-swap
+/// the handle without removing the entry from the registry. Callers use
+/// `entry.db()` to get a snapshot of the current handle.
 pub struct DatabaseEntry {
-    pub db: Arc<GrafeoDB>,
+    inner: ArcSwap<GrafeoDB>,
+    state: AtomicU8,
     pub metadata: DatabaseMetadata,
+}
+
+impl std::fmt::Debug for DatabaseEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseEntry")
+            .field("inner", &"ArcSwap<GrafeoDB>")
+            .field("state", &self.state.load(Ordering::Relaxed))
+            .field("metadata", &self.metadata.database_type)
+            .finish()
+    }
+}
+
+impl DatabaseEntry {
+    /// Creates a new entry in the `Available` state.
+    pub fn new(db: Arc<GrafeoDB>, metadata: DatabaseMetadata) -> Self {
+        Self {
+            inner: ArcSwap::from(db),
+            state: AtomicU8::new(STATE_AVAILABLE),
+            metadata,
+        }
+    }
+
+    /// Returns a snapshot of the current database handle.
+    ///
+    /// Lock-free on the read path. The returned `Arc` keeps the handle alive
+    /// even if a concurrent restore swaps in a new one.
+    pub fn db(&self) -> Arc<GrafeoDB> {
+        self.inner.load_full()
+    }
+
+    /// Atomically swaps the database handle. Used by restore.
+    pub fn swap_db(&self, new_db: Arc<GrafeoDB>) {
+        self.inner.store(new_db);
+    }
+
+    /// Returns `true` if the database is currently being restored.
+    pub fn is_restoring(&self) -> bool {
+        self.state.load(Ordering::Acquire) == STATE_RESTORING
+    }
+
+    /// Marks the database as restoring. Returns `false` if already restoring.
+    pub fn set_restoring(&self) -> bool {
+        self.state
+            .compare_exchange(
+                STATE_AVAILABLE,
+                STATE_RESTORING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Marks the database as available again.
+    pub fn set_available(&self) {
+        self.state.store(STATE_AVAILABLE, Ordering::Release);
+    }
+
+    /// Consumes the entry and returns the inner `Arc<GrafeoDB>` and metadata.
+    ///
+    /// Used by compact, which needs `Arc::get_mut` for `&mut GrafeoDB` access.
+    /// The entry must not be in the DashMap when calling this.
+    pub fn into_parts(self) -> (Arc<GrafeoDB>, DatabaseMetadata) {
+        (self.inner.into_inner(), self.metadata)
+    }
 }
 
 /// Thread-safe registry of named database instances.
@@ -150,10 +225,7 @@ impl DatabaseManager {
                                     };
                                     mgr.databases.insert(
                                         name,
-                                        Arc::new(DatabaseEntry {
-                                            db: Arc::new(db),
-                                            metadata,
-                                        }),
+                                        Arc::new(DatabaseEntry::new(Arc::new(db), metadata)),
                                     );
                                 }
                                 Err(e) => {
@@ -181,13 +253,13 @@ impl DatabaseManager {
                 };
                 mgr.databases.insert(
                     "default".to_string(),
-                    Arc::new(DatabaseEntry {
-                        db: Arc::new(db),
-                        metadata: DatabaseMetadata {
+                    Arc::new(DatabaseEntry::new(
+                        Arc::new(db),
+                        DatabaseMetadata {
                             storage_mode: "persistent".to_string(),
                             ..Default::default()
                         },
-                    }),
+                    )),
                 );
             }
         } else {
@@ -195,10 +267,10 @@ impl DatabaseManager {
             tracing::info!("Creating default in-memory database");
             mgr.databases.insert(
                 "default".to_string(),
-                Arc::new(DatabaseEntry {
-                    db: Arc::new(GrafeoDB::new_in_memory()),
-                    metadata: DatabaseMetadata::default(),
-                }),
+                Arc::new(DatabaseEntry::new(
+                    Arc::new(GrafeoDB::new_in_memory()),
+                    DatabaseMetadata::default(),
+                )),
             );
         }
 
@@ -213,13 +285,30 @@ impl DatabaseManager {
     pub fn set_cdc_enabled(&mut self, enabled: bool) {
         self.cdc_enabled = enabled;
         for entry in &self.databases {
-            entry.value().db.set_cdc_enabled(enabled);
+            entry.value().db().set_cdc_enabled(enabled);
         }
     }
 
     /// Returns a clone of the `Arc<DatabaseEntry>` for the given database name.
     pub fn get(&self, name: &str) -> Option<Arc<DatabaseEntry>> {
         self.databases.get(name).map(|e| Arc::clone(e.value()))
+    }
+
+    /// Returns a database entry, rejecting if it's currently being restored.
+    ///
+    /// Use this in request paths where a 503 is appropriate during restore.
+    pub fn get_available(&self, name: &str) -> Result<Arc<DatabaseEntry>, ServiceError> {
+        let entry = self
+            .get(name)
+            .ok_or_else(|| ServiceError::NotFound(format!("database '{name}' not found")))?;
+
+        if entry.is_restoring() {
+            return Err(ServiceError::Unavailable(format!(
+                "database '{name}' is currently being restored"
+            )));
+        }
+
+        Ok(entry)
     }
 
     /// Creates a new named database from a full request.
@@ -394,10 +483,7 @@ impl DatabaseManager {
 
         self.databases.insert(
             name.clone(),
-            Arc::new(DatabaseEntry {
-                db: Arc::new(db),
-                metadata,
-            }),
+            Arc::new(DatabaseEntry::new(Arc::new(db), metadata)),
         );
 
         Ok(())
@@ -431,7 +517,7 @@ impl DatabaseManager {
         let (_, entry) = removed.unwrap();
 
         // Close the engine
-        if let Err(e) = entry.db.close() {
+        if let Err(e) = entry.db().close() {
             tracing::warn!(name = %name, error = %e, "Error closing database");
         }
 
@@ -463,11 +549,12 @@ impl DatabaseManager {
             .map(|entry| {
                 let name = entry.key().clone();
                 let e = entry.value();
+                let db = e.db();
                 crate::types::DatabaseSummary {
                     name,
-                    node_count: e.db.node_count(),
-                    edge_count: e.db.edge_count(),
-                    persistent: e.db.path().is_some(),
+                    node_count: db.node_count(),
+                    edge_count: db.edge_count(),
+                    persistent: db.path().is_some(),
                     database_type: e.metadata.database_type.clone(),
                 }
             })
@@ -490,7 +577,21 @@ impl DatabaseManager {
             .ok_or_else(|| ServiceError::NotFound(format!("database '{name}' not found")))?;
 
         match Arc::try_unwrap(entry) {
-            Ok(db_entry) => Ok(db_entry),
+            Ok(db_entry) => {
+                // load_full() bumps the strong count by 1, so the expected
+                // count when nobody else holds a reference is 2: one inside
+                // the ArcSwap and one from this load_full() call.
+                let db_arc = db_entry.db();
+                if Arc::strong_count(&db_arc) > 2 {
+                    drop(db_arc);
+                    self.databases.insert(name.to_string(), Arc::new(db_entry));
+                    return Err(ServiceError::Conflict(
+                        "database is in use by active sessions, cannot compact".to_string(),
+                    ));
+                }
+                drop(db_arc);
+                Ok(db_entry)
+            }
             Err(still_shared) => {
                 self.databases.insert(name.to_string(), still_shared);
                 Err(ServiceError::Conflict(
@@ -520,7 +621,7 @@ impl DatabaseManager {
     pub fn total_allocated_memory(&self) -> usize {
         self.databases
             .iter()
-            .filter_map(|e| e.value().db.memory_limit())
+            .filter_map(|e| e.value().db().memory_limit())
             .sum()
     }
 
@@ -536,7 +637,7 @@ impl DatabaseManager {
             let mut seen_headers = std::collections::HashSet::new();
             for entry in &self.databases {
                 let name = entry.key();
-                let text = entry.value().db.metrics_prometheus();
+                let text = entry.value().db().metrics_prometheus();
                 if text.is_empty() {
                     continue;
                 }
@@ -684,5 +785,94 @@ mod tests {
         };
         let err = mgr.create(&req).unwrap_err();
         assert!(format!("{err:?}").contains("data-dir"));
+    }
+
+    // -----------------------------------------------------------------------
+    // DatabaseEntry state and ArcSwap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entry_starts_available() {
+        let db = Arc::new(GrafeoDB::new_in_memory());
+        let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
+        assert!(!entry.is_restoring());
+    }
+
+    #[test]
+    fn entry_set_restoring_and_available() {
+        let db = Arc::new(GrafeoDB::new_in_memory());
+        let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
+
+        assert!(entry.set_restoring());
+        assert!(entry.is_restoring());
+        // Double set returns false
+        assert!(!entry.set_restoring());
+
+        entry.set_available();
+        assert!(!entry.is_restoring());
+    }
+
+    #[test]
+    fn entry_swap_db() {
+        let db1 = Arc::new(GrafeoDB::new_in_memory());
+        let entry = DatabaseEntry::new(db1, DatabaseMetadata::default());
+        let count_before = entry.db().node_count();
+
+        let db2 = Arc::new(GrafeoDB::new_in_memory());
+        entry.swap_db(db2);
+        let count_after = entry.db().node_count();
+
+        // Both empty, but the handle was swapped (no panic, correct behavior)
+        assert_eq!(count_before, 0);
+        assert_eq!(count_after, 0);
+    }
+
+    #[test]
+    fn entry_into_parts() {
+        let db = Arc::new(GrafeoDB::new_in_memory());
+        let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
+        let (arc, meta) = entry.into_parts();
+        assert_eq!(arc.node_count(), 0);
+        assert_eq!(meta.database_type, "lpg");
+    }
+
+    #[test]
+    fn entry_db_returns_handle() {
+        let db = Arc::new(GrafeoDB::new_in_memory());
+        let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
+        // load_full returns a usable Arc
+        let handle = entry.db();
+        assert_eq!(handle.node_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_available
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_available_returns_entry() {
+        let mgr = DatabaseManager::new(None, false);
+        let entry = mgr.get_available("default").unwrap();
+        assert!(!entry.is_restoring());
+    }
+
+    #[test]
+    fn get_available_not_found() {
+        let mgr = DatabaseManager::new(None, false);
+        let err = mgr.get_available("nonexistent").unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[test]
+    fn get_available_returns_unavailable_when_restoring() {
+        let mgr = DatabaseManager::new(None, false);
+        let entry = mgr.get("default").unwrap();
+        entry.set_restoring();
+
+        let err = mgr.get_available("default").unwrap_err();
+        assert!(matches!(err, ServiceError::Unavailable(_)));
+
+        // Cleanup
+        entry.set_available();
     }
 }

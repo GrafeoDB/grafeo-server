@@ -86,6 +86,12 @@ pub use state::AppState;
         routes::admin::admin_memory_usage,
         routes::admin::admin_write_snapshot,
         routes::admin::admin_compact,
+        routes::backup::create_backup,
+        routes::backup::list_backups,
+        routes::backup::list_all_backups,
+        routes::backup::restore_backup,
+        routes::backup::delete_backup,
+        routes::backup::download_backup,
         routes::search::vector_search,
         routes::search::text_search,
         routes::search::hybrid_search,
@@ -112,6 +118,8 @@ pub use state::AppState;
             grafeo_service::types::CreateSchemaRequest,
             grafeo_service::types::ImportTsvRequest,
             grafeo_service::types::ImportResponse,
+            grafeo_service::types::BackupEntry,
+            grafeo_service::types::RestoreRequest,
             SearchResponse,
         )
     ),
@@ -216,6 +224,16 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::admin_write_snapshot),
         )
         .route("/admin/{db}/compact", post(routes::admin::admin_compact))
+        // Backup & Restore
+        .route("/admin/{db}/backup", post(routes::backup::create_backup))
+        .route("/admin/{db}/backups", get(routes::backup::list_backups))
+        .route("/admin/{db}/restore", post(routes::backup::restore_backup))
+        .route("/backups", get(routes::backup::list_all_backups))
+        .route("/backups/{filename}", delete(routes::backup::delete_backup))
+        .route(
+            "/backups/download/{filename}",
+            get(routes::backup::download_backup),
+        )
         // Search
         .route("/search/vector", post(routes::search::vector_search))
         .route("/search/text", post(routes::search::text_search))
