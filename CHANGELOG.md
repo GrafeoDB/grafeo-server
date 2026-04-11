@@ -35,7 +35,7 @@ Role-based access control, per-database token scoping, and engine 0.5.36 alignme
 - **Permission denied errors**: engine `PermissionDenied` (via `QueryError::Semantic`) now maps to `ServiceError::Forbidden` (HTTP 403) instead of `BadRequest` (400)
 - **`--auth-token` preserved**: legacy single token stays as root/bootstrap credential with implicit `Admin` role and no database restrictions
 - **Token store auto-activation**: only derives `{data_dir}/tokens.json` when at least one credential is configured, preventing spurious auth activation from `--data-dir` alone
-- **gwp dependency updated to 0.2.0**: `AuthValidator` returns `AuthInfo`, `SessionConfig` carries `auth_info`
+- **gwp dependency updated to 0.2.1**: `AuthValidator` returns `AuthInfo`, `SessionConfig` carries `auth_info`
 - **boltr dependency updated to 0.2.0**: `AuthValidator` returns `AuthInfo`, `BoltBackend.set_session_auth()`
 - **GWP/BoltR validators use PendingAuth mechanism** (DashMap) to pass full `TokenInfo` from validator to backend
 - **GWP/BoltR sessions preserve identity** across database switches and session resets

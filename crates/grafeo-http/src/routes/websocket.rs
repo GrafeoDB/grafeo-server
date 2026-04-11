@@ -35,19 +35,30 @@ pub async fn ws_handler(
     auth: AuthContext,
 ) -> impl IntoResponse {
     let identity = auth.identity(state.service().is_query_read_only());
-    ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
+    let db_scope = auth
+        .0
+        .as_ref()
+        .map(|info| info.scope.databases.clone())
+        .unwrap_or_default();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, identity, db_scope))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, identity: Identity) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    identity: Identity,
+    db_scope: Vec<String>,
+) {
     let (mut sender, mut receiver) = socket.split();
 
     #[cfg(feature = "push-changefeed")]
     {
-        handle_with_subscriptions(&mut sender, &mut receiver, state, identity).await;
+        handle_with_subscriptions(&mut sender, &mut receiver, state, identity, db_scope).await;
     }
 
     #[cfg(not(feature = "push-changefeed"))]
     {
+        let _ = &db_scope;
         // Simple sequential version — used when push-changefeed is not enabled.
         while let Some(msg) = receiver.next().await {
             let text = match msg {
@@ -105,6 +116,7 @@ async fn handle_with_subscriptions<S, R>(
     receiver: &mut R,
     state: AppState,
     identity: Identity,
+    db_scope: Vec<String>,
 ) where
     S: SinkExt<Message, Error = axum::Error> + Unpin,
     R: StreamExt<Item = Result<Message, axum::Error>> + Unpin,
@@ -164,30 +176,43 @@ async fn handle_with_subscriptions<S, R>(
                         process_query(&state, id, request, &identity).await
                     }
                     WsClientMessage::Subscribe { sub_id, db, since } => {
-                        let rx = state.change_hub().subscribe(&db, since, state.service().clone());
-                        let tx = event_tx.clone();
-                        let sid = sub_id.clone();
-                        let handle = tokio::spawn(async move {
-                            let mut rx = rx;
-                            loop {
-                                match rx.recv().await {
-                                    Ok(event) => {
-                                        if tx.send((sid.clone(), event)).is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(RecvError::Lagged(n)) => {
-                                        tracing::debug!(
-                                            "WebSocket changefeed sub '{sid}' lagged by {n} events"
-                                        );
-                                        // Continue — client will receive the next available event.
-                                    }
-                                    Err(RecvError::Closed) => break,
-                                }
+                        // Check database scope before subscribing.
+                        if !db_scope.is_empty()
+                            && !db_scope.iter().any(|d| d == &db)
+                        {
+                            WsServerMessage::Error {
+                                id: None,
+                                error: "forbidden".to_string(),
+                                detail: Some(format!(
+                                    "token not authorized for database '{db}'"
+                                )),
                             }
-                        });
-                        sub_tasks.insert(sub_id.clone(), handle);
-                        WsServerMessage::Subscribed { sub_id }
+                        } else {
+                            let rx = state.change_hub().subscribe(&db, since, state.service().clone());
+                            let tx = event_tx.clone();
+                            let sid = sub_id.clone();
+                            let handle = tokio::spawn(async move {
+                                let mut rx = rx;
+                                loop {
+                                    match rx.recv().await {
+                                        Ok(event) => {
+                                            if tx.send((sid.clone(), event)).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(RecvError::Lagged(n)) => {
+                                            tracing::debug!(
+                                                "WebSocket changefeed sub '{sid}' lagged by {n} events"
+                                            );
+                                            // Continue: client will receive the next available event.
+                                        }
+                                        Err(RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                            sub_tasks.insert(sub_id.clone(), handle);
+                            WsServerMessage::Subscribed { sub_id }
+                        }
                     }
                     WsClientMessage::Unsubscribe { sub_id } => {
                         if let Some(handle) = sub_tasks.remove(&sub_id) {

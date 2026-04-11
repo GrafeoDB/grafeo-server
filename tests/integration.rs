@@ -5886,15 +5886,35 @@ async fn gwp_auth_bearer_token_allows_query() {
     assert!(!session_id.is_empty());
 
     // Execute a query (admin token can write)
-    let result = gql_client
+    let stream = gql_client
         .execute(gwp::proto::ExecuteRequest {
             session_id: session_id.clone(),
             statement: "CREATE (:GwpAuthTest {val: 42})".to_string(),
             parameters: std::collections::HashMap::new(),
             transaction_id: None,
         })
-        .await;
-    assert!(result.is_ok(), "admin token should allow writes");
+        .await
+        .expect("gRPC call should succeed, error is in stream")
+        .into_inner();
+
+    use futures_util::StreamExt as _;
+    let mut stream = stream;
+    let mut found_success = false;
+    while let Some(msg) = stream.next().await {
+        if let Ok(resp) = msg {
+            if let Some(gwp::proto::execute_response::Frame::Summary(summary)) = resp.frame {
+                if let Some(status) = summary.status {
+                    if status.code == "00000" {
+                        found_success = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found_success,
+        "admin token should allow writes and return success status"
+    );
 
     // Close session
     session_client

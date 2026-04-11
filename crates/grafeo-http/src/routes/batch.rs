@@ -42,6 +42,7 @@ pub async fn batch_query(
     }
 
     let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
+    auth.check_db_access(db_name)?;
     let timeout = state.effective_timeout(req.timeout_ms);
 
     // Convert HTTP batch items to service BatchQuery (JSON params → engine params)

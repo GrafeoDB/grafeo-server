@@ -48,6 +48,7 @@ pub async fn tx_begin(
         .and_then(|b| b.database.as_deref())
         .unwrap_or("default");
 
+    auth.check_db_access(db_name)?;
     let identity = auth.identity(state.service().is_query_read_only());
 
     let session_id = QueryService::begin_tx(

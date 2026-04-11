@@ -29,6 +29,9 @@ struct GrafeoSession {
     /// Identity from authentication, used when creating new sessions on database switch.
     #[cfg(feature = "auth")]
     identity: Option<grafeo_engine::auth::Identity>,
+    /// Databases this token is authorized to access (empty = all).
+    #[cfg(feature = "auth")]
+    db_scope: Vec<String>,
 }
 
 /// Bolt backend implementation for Grafeo.
@@ -109,6 +112,8 @@ impl BoltBackend for GrafeoBackend {
                 database: "default".to_owned(),
                 #[cfg(feature = "auth")]
                 identity: None,
+                #[cfg(feature = "auth")]
+                db_scope: Vec::new(),
             })),
         );
         tracing::debug!(session_id = %id, "Bolt session created");
@@ -120,8 +125,12 @@ impl BoltBackend for GrafeoBackend {
         session: &SessionHandle,
         auth_info: AuthInfo,
     ) -> Result<(), BoltError> {
-        // "none" scheme returns a default AuthInfo with empty principal.
+        // "none" scheme is now rejected by the validator, so an empty
+        // principal should not occur. Treat it as an error when auth is on.
         if auth_info.principal.is_empty() {
+            #[cfg(feature = "auth")]
+            return Err(BoltError::Authentication("authentication required".into()));
+            #[cfg(not(feature = "auth"))]
             return Ok(());
         }
 
@@ -134,6 +143,7 @@ impl BoltBackend for GrafeoBackend {
 
             if let Some(info) = token_info {
                 let identity = info.identity();
+                let db_scope = info.scope.databases.clone();
                 let session_arc = self.get_session(session)?;
 
                 // Recreate the engine session with the resolved identity.
@@ -145,10 +155,19 @@ impl BoltBackend for GrafeoBackend {
                         .ok_or_else(|| BoltError::Session("database not found".into()))?
                 };
 
+                let ro = self.state.is_query_read_only();
                 let id_clone = identity.clone();
                 let engine_session = tokio::task::spawn_blocking(move || {
                     let db = entry.db();
-                    db.session_with_identity(id_clone)
+                    let effective = if ro {
+                        grafeo_engine::auth::Identity::new(
+                            id_clone.user_id(),
+                            [grafeo_engine::auth::Role::ReadOnly],
+                        )
+                    } else {
+                        id_clone
+                    };
+                    db.session_with_identity(effective)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -156,6 +175,7 @@ impl BoltBackend for GrafeoBackend {
                 let mut s = session_arc.lock();
                 s.engine_session = engine_session;
                 s.identity = Some(identity);
+                s.db_scope = db_scope;
             }
         }
 
@@ -178,6 +198,18 @@ impl BoltBackend for GrafeoBackend {
     ) -> Result<(), BoltError> {
         match property {
             SessionProperty::Database(db_name) => {
+                // Check database scope before allowing the switch.
+                #[cfg(feature = "auth")]
+                {
+                    let session_arc = self.get_session(session)?;
+                    let s = session_arc.lock();
+                    if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == &db_name) {
+                        return Err(BoltError::Session(format!(
+                            "not authorized for database '{db_name}'"
+                        )));
+                    }
+                }
+
                 let entry = self
                     .state
                     .databases()
@@ -198,7 +230,15 @@ impl BoltBackend for GrafeoBackend {
                     let db = entry.db();
                     #[cfg(feature = "auth")]
                     if let Some(id) = identity {
-                        return db.session_with_identity(id);
+                        let effective = if ro {
+                            grafeo_engine::auth::Identity::new(
+                                id.user_id(),
+                                [grafeo_engine::auth::Role::ReadOnly],
+                            )
+                        } else {
+                            id
+                        };
+                        return db.session_with_identity(effective);
                     }
                     if ro {
                         db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
@@ -239,7 +279,15 @@ impl BoltBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity {
-                return db.session_with_identity(id);
+                let effective = if ro {
+                    grafeo_engine::auth::Identity::new(
+                        id.user_id(),
+                        [grafeo_engine::auth::Role::ReadOnly],
+                    )
+                } else {
+                    id
+                };
+                return db.session_with_identity(effective);
             }
             if ro {
                 db.session_with_role(grafeo_engine::auth::Role::ReadOnly)

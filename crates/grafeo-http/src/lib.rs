@@ -313,6 +313,7 @@ pub fn router(state: AppState) -> Router {
         .layer(cors_layer(&state))
         .with_state(state);
 
+    #[allow(unused_mut)]
     let mut openapi = ApiDoc::openapi();
     #[cfg(feature = "auth")]
     {

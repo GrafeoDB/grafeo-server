@@ -68,6 +68,7 @@ pub async fn sparql_get(
     auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    auth.check_db_access(&db_name)?;
     let timeout = state.effective_timeout(None);
     let identity = auth.identity(state.service().is_query_read_only());
 
@@ -105,6 +106,7 @@ pub async fn sparql_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    auth.check_db_access(&db_name)?;
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())

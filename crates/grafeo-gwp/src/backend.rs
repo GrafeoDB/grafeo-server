@@ -39,6 +39,9 @@ struct GrafeoSession {
     /// Identity from authentication, used when creating new sessions on database switch.
     #[cfg(feature = "auth")]
     identity: Option<grafeo_engine::auth::Identity>,
+    /// Databases this token is authorized to access (empty = all).
+    #[cfg(feature = "auth")]
+    db_scope: Vec<String>,
 }
 
 /// Shared map for passing `TokenInfo` from the auth validator to the backend.
@@ -131,11 +134,17 @@ impl GqlBackend for GrafeoBackend {
 
         // Resolve identity from auth_info principal (nonce -> TokenInfo -> Identity).
         #[cfg(feature = "auth")]
-        let identity: Option<grafeo_engine::auth::Identity> = config
+        let (identity, db_scope): (Option<grafeo_engine::auth::Identity>, Vec<String>) = config
             .auth_info
             .as_ref()
             .and_then(|info| self.pending.remove(&info.principal))
-            .map(|(_, token_info)| token_info.identity());
+            .map(|(_, token_info)| {
+                (
+                    Some(token_info.identity()),
+                    token_info.scope.databases.clone(),
+                )
+            })
+            .unwrap_or_default();
 
         #[cfg(not(feature = "auth"))]
         let _ = config;
@@ -149,7 +158,16 @@ impl GqlBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity_clone {
-                return db.session_with_identity(id);
+                // Cap to ReadOnly when the server is in read-only mode.
+                let effective = if ro {
+                    grafeo_engine::auth::Identity::new(
+                        id.user_id(),
+                        [grafeo_engine::auth::Role::ReadOnly],
+                    )
+                } else {
+                    id
+                };
+                return db.session_with_identity(effective);
             }
             if ro {
                 db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
@@ -169,6 +187,8 @@ impl GqlBackend for GrafeoBackend {
                 language: None,
                 #[cfg(feature = "auth")]
                 identity,
+                #[cfg(feature = "auth")]
+                db_scope,
             })),
         );
 
@@ -189,6 +209,18 @@ impl GqlBackend for GrafeoBackend {
     ) -> Result<(), GqlError> {
         match property {
             SessionProperty::Graph(db_name) => {
+                // Check database scope before allowing the switch.
+                #[cfg(feature = "auth")]
+                {
+                    let session_arc = self.get_session(session)?;
+                    let s = session_arc.lock();
+                    if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == &db_name) {
+                        return Err(GqlError::Session(format!(
+                            "not authorized for database '{db_name}'"
+                        )));
+                    }
+                }
+
                 let entry = self
                     .state
                     .databases()
@@ -209,7 +241,15 @@ impl GqlBackend for GrafeoBackend {
                     let db = entry.db();
                     #[cfg(feature = "auth")]
                     if let Some(id) = identity {
-                        return db.session_with_identity(id);
+                        let effective = if ro {
+                            grafeo_engine::auth::Identity::new(
+                                id.user_id(),
+                                [grafeo_engine::auth::Role::ReadOnly],
+                            )
+                        } else {
+                            id
+                        };
+                        return db.session_with_identity(effective);
                     }
                     if ro {
                         db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
@@ -280,7 +320,15 @@ impl GqlBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity {
-                return db.session_with_identity(id);
+                let effective = if ro {
+                    grafeo_engine::auth::Identity::new(
+                        id.user_id(),
+                        [grafeo_engine::auth::Role::ReadOnly],
+                    )
+                } else {
+                    id
+                };
+                return db.session_with_identity(effective);
             }
             if ro {
                 db.session_with_role(grafeo_engine::auth::Role::ReadOnly)

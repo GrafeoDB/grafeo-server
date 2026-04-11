@@ -51,7 +51,9 @@ impl AuthValidator for BoltrAuthValidator {
                     return Err(BoltError::Authentication("invalid credentials".into()));
                 }
             }
-            "none" => return Ok(AuthInfo::default()),
+            "none" => {
+                return Err(BoltError::Authentication("authentication required".into()));
+            }
             other => {
                 return Err(BoltError::Authentication(format!(
                     "unsupported auth scheme: {other}"
