@@ -5898,7 +5898,7 @@ async fn gwp_auth_bearer_token_allows_query() {
 
     // Close session
     session_client
-        .close(gwp::proto::CloseRequest {
+        .close_session(gwp::proto::CloseSessionRequest {
             session_id: session_id.clone(),
         })
         .await

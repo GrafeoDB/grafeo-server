@@ -1,13 +1,9 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client";
-import ServerOverview from "../components/Admin/ServerOverview";
-import DatabaseCards from "../components/Admin/DatabaseCards";
-import BackupPanel from "../components/Admin/BackupPanel";
 import TokenPanel from "../components/Admin/TokenPanel";
 import styles from "./AdminView.module.css";
 
 export default function AdminView() {
-  const [selectedDb, setSelectedDb] = useState<string | null>(null);
   const [hasAuth, setHasAuth] = useState(false);
 
   useEffect(() => {
@@ -22,12 +18,11 @@ export default function AdminView() {
 
   return (
     <div className={styles.container}>
-      <ServerOverview />
-      <DatabaseCards selectedDb={selectedDb} onSelectDb={setSelectedDb} />
-      {selectedDb && (
-        <BackupPanel database={selectedDb} onClose={() => setSelectedDb(null)} />
+      {hasAuth ? (
+        <TokenPanel />
+      ) : (
+        <p>Authentication is not enabled. Start the server with <code>--auth-token</code> to manage tokens.</p>
       )}
-      {hasAuth && <TokenPanel />}
     </div>
   );
 }
