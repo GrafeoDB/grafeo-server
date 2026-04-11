@@ -24,8 +24,15 @@ use grafeo_service::admin::AdminService;
     ),
     tag = "Database"
 )]
-pub async fn list_databases(State(state): State<AppState>) -> impl IntoResponse {
-    let databases = state.databases().list();
+pub async fn list_databases(State(state): State<AppState>, auth: AuthContext) -> impl IntoResponse {
+    let mut databases = state.databases().list();
+    // Filter to only databases the token is authorized for.
+    if let Some(ref info) = auth.0 {
+        let scope = &info.scope.databases;
+        if !scope.is_empty() {
+            databases.retain(|db| scope.iter().any(|d| d == &db.name));
+        }
+    }
     Json(ListDatabasesResponse { databases })
 }
 
@@ -117,8 +124,10 @@ pub async fn delete_database(
 )]
 pub async fn database_info(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseInfoResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let entry = state.databases().get_available(&name)?;
 
     let db = entry.db();
@@ -156,8 +165,10 @@ pub async fn database_info(
 )]
 pub async fn database_stats(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseStatsResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let entry = state.databases().get_available(&name)?;
 
     let stats = entry.db().detailed_stats();
@@ -191,8 +202,10 @@ pub async fn database_stats(
 )]
 pub async fn database_schema(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseSchemaResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let entry = state.databases().get_available(&name)?;
 
     let schema = entry.db().schema();
@@ -246,8 +259,10 @@ pub async fn database_schema(
 )]
 pub async fn list_graphs(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<Json<grafeo_service::types::GraphListResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let graphs = AdminService::list_graphs(state.databases(), &name).await?;
     Ok(Json(grafeo_service::types::GraphListResponse { graphs }))
 }
@@ -271,9 +286,12 @@ pub async fn list_graphs(
 )]
 pub async fn create_graph(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
     Json(req): Json<grafeo_service::types::CreateGraphRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let created = AdminService::create_graph(state.databases(), &name, req.name).await?;
     Ok(Json(serde_json::json!({ "created": created })))
 }
@@ -297,8 +315,11 @@ pub async fn create_graph(
 )]
 pub async fn drop_graph(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((name, graph)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let dropped = AdminService::drop_graph(state.databases(), &name, graph).await?;
     Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
@@ -330,9 +351,12 @@ pub async fn drop_graph(
 )]
 pub async fn import_tsv(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
     Json(req): Json<grafeo_service::types::ImportTsvRequest>,
 ) -> Result<Json<grafeo_service::types::ImportResponse>, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let result = AdminService::import_tsv(
         state.databases(),
         &name,
@@ -366,8 +390,10 @@ pub async fn import_tsv(
 )]
 pub async fn list_schemas(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<Json<grafeo_service::types::SchemaListResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let schemas = AdminService::list_schemas(state.databases(), state.metrics(), &name).await?;
     Ok(Json(grafeo_service::types::SchemaListResponse { schemas }))
 }
@@ -391,9 +417,12 @@ pub async fn list_schemas(
 )]
 pub async fn create_schema(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
     Json(req): Json<grafeo_service::types::CreateSchemaRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let created =
         AdminService::create_schema(state.databases(), state.metrics(), &name, &req.name).await?;
     Ok(Json(serde_json::json!({ "created": created })))
@@ -418,8 +447,11 @@ pub async fn create_schema(
 )]
 pub async fn drop_schema(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path((name, schema)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let dropped =
         AdminService::drop_schema(state.databases(), state.metrics(), &name, &schema).await?;
     Ok(Json(serde_json::json!({ "dropped": dropped })))

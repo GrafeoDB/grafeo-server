@@ -44,9 +44,8 @@ struct GrafeoSession {
     db_scope: Vec<String>,
 }
 
-/// Shared map for passing `TokenInfo` from the auth validator to the backend.
 #[cfg(feature = "auth")]
-pub(crate) type PendingAuth = std::sync::Arc<DashMap<String, grafeo_service::auth::TokenInfo>>;
+use crate::auth::PendingAuth;
 
 /// GQL Wire Protocol backend for Grafeo.
 ///
@@ -134,17 +133,20 @@ impl GqlBackend for GrafeoBackend {
 
         // Resolve identity from auth_info principal (nonce -> TokenInfo -> Identity).
         #[cfg(feature = "auth")]
-        let (identity, db_scope): (Option<grafeo_engine::auth::Identity>, Vec<String>) = config
-            .auth_info
-            .as_ref()
-            .and_then(|info| self.pending.remove(&info.principal))
-            .map(|(_, token_info)| {
-                (
-                    Some(token_info.identity()),
-                    token_info.scope.databases.clone(),
-                )
-            })
-            .unwrap_or_default();
+        let (identity, db_scope): (Option<grafeo_engine::auth::Identity>, Vec<String>) = {
+            let auth_info = config
+                .auth_info
+                .as_ref()
+                .ok_or_else(|| GqlError::Protocol("authentication required".to_owned()))?;
+            let (_, (token_info, _)) = self
+                .pending
+                .remove(&auth_info.principal)
+                .ok_or_else(|| GqlError::Protocol("auth session expired or invalid".to_owned()))?;
+            (
+                Some(token_info.identity()),
+                token_info.scope.databases.clone(),
+            )
+        };
 
         #[cfg(not(feature = "auth"))]
         let _ = config;
@@ -158,15 +160,7 @@ impl GqlBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity_clone {
-                // Cap to ReadOnly when the server is in read-only mode.
-                let effective = if ro {
-                    grafeo_engine::auth::Identity::new(
-                        id.user_id(),
-                        [grafeo_engine::auth::Role::ReadOnly],
-                    )
-                } else {
-                    id
-                };
+                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
                 return db.session_with_identity(effective);
             }
             if ro {
@@ -241,14 +235,7 @@ impl GqlBackend for GrafeoBackend {
                     let db = entry.db();
                     #[cfg(feature = "auth")]
                     if let Some(id) = identity {
-                        let effective = if ro {
-                            grafeo_engine::auth::Identity::new(
-                                id.user_id(),
-                                [grafeo_engine::auth::Role::ReadOnly],
-                            )
-                        } else {
-                            id
-                        };
+                        let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
                         return db.session_with_identity(effective);
                     }
                     if ro {
@@ -320,14 +307,7 @@ impl GqlBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity {
-                let effective = if ro {
-                    grafeo_engine::auth::Identity::new(
-                        id.user_id(),
-                        [grafeo_engine::auth::Role::ReadOnly],
-                    )
-                } else {
-                    id
-                };
+                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
                 return db.session_with_identity(effective);
             }
             if ro {
@@ -360,7 +340,7 @@ impl GqlBackend for GrafeoBackend {
         let result = tokio::task::spawn_blocking(move || {
             let session = session_arc.lock();
             if let Some(ref lang) = session.language {
-                // Language override set via Configure — route through dispatch
+                // Language override set via Configure, route through dispatch
                 let params_opt = if params.is_empty() {
                     None
                 } else {

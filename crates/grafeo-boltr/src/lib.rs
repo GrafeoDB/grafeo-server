@@ -1,4 +1,4 @@
-//! Grafeo BoltR — Bolt v5 wire protocol transport adapter.
+//! Grafeo BoltR: Bolt v5 wire protocol transport adapter.
 //!
 //! Implements the `BoltBackend` trait from the `boltr` crate, bridging
 //! Bolt sessions to grafeo-engine via `grafeo-service::ServiceState`.
@@ -52,6 +52,13 @@ pub async fn serve(
     if let Some(provider) = options.auth_provider {
         let pending = backend_pending.clone();
         builder = builder.auth(auth::BoltrAuthValidator::new(provider, pending));
+
+        // Reap stale auth nonces from clients that never completed session creation.
+        let _reaper = grafeo_service::auth::spawn_pending_auth_reaper(
+            backend_pending,
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        );
     }
 
     #[cfg(feature = "tls")]

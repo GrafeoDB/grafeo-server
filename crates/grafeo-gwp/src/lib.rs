@@ -124,7 +124,15 @@ pub async fn serve(
 
     #[cfg(feature = "auth")]
     if let Some(provider) = options.auth_provider {
-        builder = builder.auth(auth::GwpAuthValidator::new(provider, pending));
+        let pending_clone = pending.clone();
+        builder = builder.auth(auth::GwpAuthValidator::new(provider, pending_clone));
+
+        // Reap stale auth nonces from clients that never completed session creation.
+        let _reaper = grafeo_service::auth::spawn_pending_auth_reaper(
+            pending,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(30),
+        );
     }
 
     if let Some(signal) = options.shutdown {

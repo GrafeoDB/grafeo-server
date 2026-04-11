@@ -18,7 +18,8 @@ use gwp::server::{AuthInfo, AuthValidator};
 use uuid::Uuid;
 
 /// Shared map for passing `TokenInfo` from the validator to the backend.
-pub(crate) type PendingAuth = Arc<DashMap<String, TokenInfo>>;
+/// Each entry includes an [`Instant`](std::time::Instant) for TTL-based cleanup.
+pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant)>>;
 
 /// Validates GWP handshake credentials using the shared [`AuthProvider`].
 pub(crate) struct GwpAuthValidator {
@@ -58,7 +59,8 @@ impl AuthValidator for GwpAuthValidator {
         };
 
         let nonce = Uuid::new_v4().to_string();
-        self.pending.insert(nonce.clone(), token_info);
+        self.pending
+            .insert(nonce.clone(), (token_info, std::time::Instant::now()));
 
         Ok(AuthInfo { principal: nonce })
     }

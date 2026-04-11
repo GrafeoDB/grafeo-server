@@ -18,6 +18,38 @@ pub fn role_to_str(role: Role) -> &'static str {
     }
 }
 
+/// Cap an [`Identity`] to [`Role::ReadOnly`] when the server is in read-only mode.
+///
+/// Returns the identity unchanged when `read_only` is `false`.
+pub fn cap_identity_read_only(identity: Identity, read_only: bool) -> Identity {
+    if read_only {
+        Identity::new(identity.user_id(), [Role::ReadOnly])
+    } else {
+        identity
+    }
+}
+
+/// Spawns a background task that periodically removes stale entries from a
+/// pending-auth map. Returns the join handle so the caller can abort it on
+/// shutdown.
+///
+/// Used by GWP and BoltR transports to clean up nonces from clients that
+/// authenticated but never completed session creation.
+pub fn spawn_pending_auth_reaper<V: Send + Sync + 'static>(
+    map: std::sync::Arc<dashmap::DashMap<String, (V, std::time::Instant)>>,
+    ttl: std::time::Duration,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let now = std::time::Instant::now();
+            map.retain(|_, (_, created)| now.duration_since(*created) < ttl);
+        }
+    })
+}
+
 /// Parse a wire-format string into a [`Role`].
 pub fn str_to_role(s: &str) -> Result<Role, String> {
     match s {
@@ -134,11 +166,6 @@ impl AuthProvider {
     ) -> Option<Self> {
         // If we have a store, we always enable auth (even without a legacy token,
         // managed tokens will authenticate via the store).
-        let has_credentials = token.is_some() || user.is_some();
-        let has_store = true;
-        if !has_credentials && !has_store {
-            return None;
-        }
         Some(Self {
             bearer_token: token,
             basic_user: user,
@@ -205,9 +232,13 @@ impl AuthProvider {
 }
 
 /// Constant-time comparison of two byte slices.
+///
+/// The `subtle` crate's `ct_eq` for `[u8]` returns `false` when lengths
+/// differ, so no explicit length guard is needed. Avoiding a short-circuit
+/// length check prevents leaking the secret's length via timing.
 #[cfg(feature = "auth")]
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.ct_eq(b).into()
+    a.ct_eq(b).into()
 }
 
 #[cfg(all(test, feature = "auth"))]
@@ -265,6 +296,27 @@ mod tests {
         assert_eq!(id.user_id(), "my-service");
         assert!(id.can_read());
         assert!(!id.can_write());
+    }
+
+    // -----------------------------------------------------------------------
+    // cap_identity_read_only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cap_identity_passthrough_when_not_read_only() {
+        let id = Identity::new("alice", [Role::Admin]);
+        let capped = cap_identity_read_only(id, false);
+        assert!(capped.can_admin());
+        assert_eq!(capped.user_id(), "alice");
+    }
+
+    #[test]
+    fn cap_identity_capped_when_read_only() {
+        let id = Identity::new("alice", [Role::Admin]);
+        let capped = cap_identity_read_only(id, true);
+        assert!(capped.can_read());
+        assert!(!capped.can_write());
+        assert_eq!(capped.user_id(), "alice");
     }
 
     // -----------------------------------------------------------------------
@@ -431,7 +483,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // role_serde — deserialization of invalid role
+    // role_serde: deserialization of invalid role
     // -----------------------------------------------------------------------
 
     #[test]
@@ -518,7 +570,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // check_bearer — store lookup
+    // check_bearer: store lookup
     // -----------------------------------------------------------------------
 
     #[test]

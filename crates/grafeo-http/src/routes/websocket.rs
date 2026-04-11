@@ -27,7 +27,7 @@ use crate::types::{QueryRequest, WsClientMessage, WsServerMessage};
 /// WebSocket upgrade handler.
 ///
 /// Authentication is handled by the middleware stack before this handler
-/// runs — the `/ws` route is inside the authenticated router, so the
+/// runs, the `/ws` route is inside the authenticated router, so the
 /// HTTP upgrade request must carry valid credentials.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -58,8 +58,7 @@ async fn handle_socket(
 
     #[cfg(not(feature = "push-changefeed"))]
     {
-        let _ = &db_scope;
-        // Simple sequential version — used when push-changefeed is not enabled.
+        // Simple sequential version, used when push-changefeed is not enabled.
         while let Some(msg) = receiver.next().await {
             let text = match msg {
                 Ok(Message::Text(t)) => t,
@@ -93,7 +92,7 @@ async fn handle_socket(
             let reply = match client_msg {
                 WsClientMessage::Ping => WsServerMessage::Pong,
                 WsClientMessage::Query { id, request } => {
-                    process_query(&state, id, request, &identity).await
+                    process_query(&state, id, request, &identity, &db_scope).await
                 }
             };
 
@@ -173,7 +172,7 @@ async fn handle_with_subscriptions<S, R>(
                 let reply: WsServerMessage = match client_msg {
                     WsClientMessage::Ping => WsServerMessage::Pong,
                     WsClientMessage::Query { id, request } => {
-                        process_query(&state, id, request, &identity).await
+                        process_query(&state, id, request, &identity, &db_scope).await
                     }
                     WsClientMessage::Subscribe { sub_id, db, since } => {
                         // Check database scope before subscribing.
@@ -267,8 +266,18 @@ async fn process_query(
     id: Option<String>,
     req: QueryRequest,
     identity: &Identity,
+    db_scope: &[String],
 ) -> WsServerMessage {
     let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
+
+    // Check database scope before executing.
+    if !db_scope.is_empty() && !db_scope.iter().any(|d| d == db_name) {
+        return WsServerMessage::Error {
+            id,
+            error: "forbidden".to_string(),
+            detail: Some(format!("token not authorized for database '{db_name}'")),
+        };
+    }
     let params = match convert_json_params(req.params.as_ref()) {
         Ok(p) => p,
         Err(e) => {

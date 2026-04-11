@@ -14,7 +14,8 @@ use grafeo_service::auth::{AuthProvider, TokenInfo};
 use uuid::Uuid;
 
 /// Shared map for passing `TokenInfo` from the validator to the backend.
-pub(crate) type PendingAuth = Arc<DashMap<String, TokenInfo>>;
+/// Each entry includes an [`Instant`](std::time::Instant) for TTL-based cleanup.
+pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant)>>;
 
 pub(crate) struct BoltrAuthValidator {
     provider: AuthProvider,
@@ -62,7 +63,8 @@ impl AuthValidator for BoltrAuthValidator {
         };
 
         let nonce = Uuid::new_v4().to_string();
-        self.pending.insert(nonce.clone(), token_info);
+        self.pending
+            .insert(nonce.clone(), (token_info, std::time::Instant::now()));
 
         Ok(AuthInfo {
             principal: nonce,

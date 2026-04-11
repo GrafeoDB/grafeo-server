@@ -1,8 +1,8 @@
-//! AuthContext extractor — pulls token identity from request extensions.
+//! AuthContext extractor: pulls token identity from request extensions.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use grafeo_engine::auth::{Identity, Role};
+use grafeo_engine::auth::Identity;
 
 use crate::error::ApiError;
 
@@ -51,12 +51,11 @@ impl AuthContext {
     /// When `server_read_only` is true, the identity is capped to [`Role::ReadOnly`]
     /// regardless of the token's role.
     pub fn identity(&self, server_read_only: bool) -> Identity {
-        match &self.0 {
-            Some(info) if server_read_only => Identity::new(&info.name, [Role::ReadOnly]),
+        let base = match &self.0 {
             Some(info) => info.identity(),
-            None if server_read_only => Identity::new("anonymous", [Role::ReadOnly]),
             None => Identity::anonymous(),
-        }
+        };
+        grafeo_service::auth::cap_identity_read_only(base, server_read_only)
     }
 }
 
@@ -78,6 +77,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_engine::auth::Role;
     use grafeo_service::auth::{TokenInfo, TokenScope};
 
     fn admin_ctx() -> AuthContext {

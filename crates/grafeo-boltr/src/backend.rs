@@ -1,4 +1,4 @@
-//! `GrafeoBackend` — implements `boltr::server::BoltBackend` for Grafeo.
+//! `GrafeoBackend`: implements `boltr::server::BoltBackend` for Grafeo.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -19,9 +19,8 @@ use grafeo_service::query::QueryService;
 
 use crate::encode::{convert_params, grafeo_to_bolt};
 
-/// Shared map for passing `TokenInfo` from the auth validator to the backend.
 #[cfg(feature = "auth")]
-pub(crate) type PendingAuth = std::sync::Arc<DashMap<String, grafeo_service::auth::TokenInfo>>;
+use crate::auth::PendingAuth;
 
 struct GrafeoSession {
     engine_session: grafeo_engine::Session,
@@ -139,7 +138,7 @@ impl BoltBackend for GrafeoBackend {
             let token_info = self
                 .pending
                 .remove(&auth_info.principal)
-                .map(|(_, info)| info);
+                .map(|(_, (info, _))| info);
 
             if let Some(info) = token_info {
                 let identity = info.identity();
@@ -159,14 +158,7 @@ impl BoltBackend for GrafeoBackend {
                 let id_clone = identity.clone();
                 let engine_session = tokio::task::spawn_blocking(move || {
                     let db = entry.db();
-                    let effective = if ro {
-                        grafeo_engine::auth::Identity::new(
-                            id_clone.user_id(),
-                            [grafeo_engine::auth::Role::ReadOnly],
-                        )
-                    } else {
-                        id_clone
-                    };
+                    let effective = grafeo_service::auth::cap_identity_read_only(id_clone, ro);
                     db.session_with_identity(effective)
                 })
                 .await
@@ -230,14 +222,7 @@ impl BoltBackend for GrafeoBackend {
                     let db = entry.db();
                     #[cfg(feature = "auth")]
                     if let Some(id) = identity {
-                        let effective = if ro {
-                            grafeo_engine::auth::Identity::new(
-                                id.user_id(),
-                                [grafeo_engine::auth::Role::ReadOnly],
-                            )
-                        } else {
-                            id
-                        };
+                        let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
                         return db.session_with_identity(effective);
                     }
                     if ro {
@@ -279,14 +264,7 @@ impl BoltBackend for GrafeoBackend {
             let db = entry.db();
             #[cfg(feature = "auth")]
             if let Some(id) = identity {
-                let effective = if ro {
-                    grafeo_engine::auth::Identity::new(
-                        id.user_id(),
-                        [grafeo_engine::auth::Role::ReadOnly],
-                    )
-                } else {
-                    id
-                };
+                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
                 return db.session_with_identity(effective);
             }
             if ro {

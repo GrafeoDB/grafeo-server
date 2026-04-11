@@ -85,6 +85,7 @@ pub async fn tx_begin(
 )]
 pub async fn tx_query(
     State(state): State<AppState>,
+    _auth: AuthContext,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
@@ -126,6 +127,7 @@ pub async fn tx_query(
 )]
 pub async fn tx_commit(
     State(state): State<AppState>,
+    _auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
@@ -157,6 +159,7 @@ pub async fn tx_commit(
 )]
 pub async fn tx_rollback(
     State(state): State<AppState>,
+    _auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
