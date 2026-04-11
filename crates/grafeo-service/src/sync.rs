@@ -262,22 +262,20 @@ impl SyncService {
         since: u64,
         limit: usize,
     ) -> Result<ChangesResponse, ServiceError> {
-        let entry = databases
-            .get(db_name)
-            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+        let entry = databases.get_available(db_name)?;
 
-        if !entry.db.is_cdc_enabled() {
+        if !entry.db().is_cdc_enabled() {
             return Err(ServiceError::BadRequest(
                 "CDC is not enabled on this database — sync requires replication mode or explicit CDC activation".to_string(),
             ));
         }
 
-        let server_epoch = entry.db.current_epoch().0;
+        let server_epoch = entry.db().current_epoch().0;
         let since_id = grafeo_common::types::EpochId(since);
         let until_id = grafeo_common::types::EpochId(server_epoch);
 
         let raw = entry
-            .db
+            .db()
             .changes_between(since_id, until_id)
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
@@ -313,11 +311,10 @@ impl SyncService {
         db_name: &str,
         request: SyncRequest,
     ) -> Result<SyncResponse, ServiceError> {
-        let entry = databases
-            .get(db_name)
-            .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
+        let entry = databases.get_available(db_name)?;
 
-        let db = &entry.db;
+        let db_handle = entry.db();
+        let db = &*db_handle;
         let mut applied = 0usize;
         let mut skipped = 0usize;
         let mut conflicts: Vec<ConflictRecord> = Vec::new();
@@ -726,9 +723,9 @@ mod tests {
         let entry = mgr.get("default").unwrap();
 
         // Direct API calls record to the shared CDC log.
-        entry.db.create_node(&["Thing"]);
-        entry.db.create_node(&["Thing"]);
-        entry.db.create_node(&["Thing"]);
+        entry.db().create_node(&["Thing"]);
+        entry.db().create_node(&["Thing"]);
+        entry.db().create_node(&["Thing"]);
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(resp.changes.len(), 3);
@@ -741,7 +738,7 @@ mod tests {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
         for _ in 0..5 {
-            entry.db.create_node(&["Thing"]);
+            entry.db().create_node(&["Thing"]);
         }
         let resp = SyncService::pull(&mgr, "default", 0, 3).unwrap();
         assert_eq!(resp.changes.len(), 3);
@@ -753,8 +750,8 @@ mod tests {
         let entry = mgr.get("default").unwrap();
 
         // Record events at epoch 0 (direct API, fresh DB).
-        entry.db.create_node(&["A"]);
-        entry.db.create_node(&["B"]);
+        entry.db().create_node(&["A"]);
+        entry.db().create_node(&["B"]);
 
         let full = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(full.changes.len(), 2);
@@ -771,7 +768,7 @@ mod tests {
     fn change_event_dto_serializes_cleanly() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        entry.db.create_node(&["Person"]);
+        entry.db().create_node(&["Person"]);
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(resp.changes.len(), 1);
@@ -832,7 +829,7 @@ mod tests {
     fn apply_update_node_applies_properties() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db.create_node(&["Person"]);
+        let node = entry.db().create_node(&["Person"]);
 
         let req = SyncRequest {
             client_id: "device-1".to_string(),
@@ -857,7 +854,7 @@ mod tests {
         assert!(resp.conflicts.is_empty());
 
         // Verify property was written.
-        let val = entry.db.get_node(node).unwrap();
+        let val = entry.db().get_node(node).unwrap();
         assert!(
             val.properties
                 .contains_key(&grafeo_common::types::PropertyKey::new("name"))
@@ -868,7 +865,7 @@ mod tests {
     fn apply_delete_node_removes_entity() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db.create_node(&["Thing"]);
+        let node = entry.db().create_node(&["Thing"]);
 
         let req = SyncRequest {
             client_id: "device-1".to_string(),
@@ -891,17 +888,17 @@ mod tests {
         let resp = SyncService::apply(&mgr, "default", req).unwrap();
         assert_eq!(resp.applied, 1);
         assert!(resp.conflicts.is_empty());
-        assert!(entry.db.get_node(node).is_none());
+        assert!(entry.db().get_node(node).is_none());
     }
 
     #[test]
     fn apply_lww_conflict_skips_stale_update() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db.create_node(&["Person"]);
+        let node = entry.db().create_node(&["Person"]);
         // Write a property — this records a CDC event with a recent timestamp.
         entry
-            .db
+            .db()
             .set_node_property(node, "name", grafeo_common::types::Value::from("Gus"));
 
         // Client sends an update with timestamp 0 (very old).
@@ -928,7 +925,7 @@ mod tests {
         assert_eq!(resp.conflicts.len(), 1);
         assert_eq!(resp.conflicts[0].reason, "server_newer");
         // Property should still be the server's value.
-        let node_data = entry.db.get_node(node).unwrap();
+        let node_data = entry.db().get_node(node).unwrap();
         let name_key = grafeo_common::types::PropertyKey::new("name");
         assert_eq!(
             node_data.properties.get(&name_key),
@@ -940,7 +937,7 @@ mod tests {
     fn pull_creates_carry_labels() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        entry.db.create_node(&["Company", "Startup"]);
+        entry.db().create_node(&["Company", "Startup"]);
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         let event = &resp.changes[0];
@@ -1002,7 +999,7 @@ mod tests {
         let version_before = empty_resp.server_schema_version.clone();
 
         // Add a node to introduce a new label.
-        entry.db.create_node(&["NewLabel"]);
+        entry.db().create_node(&["NewLabel"]);
 
         // Send the old (now stale) schema version.
         let stale_req = SyncRequest {
@@ -1022,9 +1019,9 @@ mod tests {
     fn pull_edge_creates_carry_src_dst_type() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let alix = entry.db.create_node(&["Person"]);
-        let gus = entry.db.create_node(&["Person"]);
-        entry.db.create_edge(alix, gus, "KNOWS");
+        let alix = entry.db().create_node(&["Person"]);
+        let gus = entry.db().create_node(&["Person"]);
+        entry.db().create_edge(alix, gus, "KNOWS");
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         let edge_event = resp
@@ -1049,15 +1046,15 @@ mod tests {
         // Primary: write data
         let primary = make_manager();
         let primary_db = primary.get("default").unwrap();
-        let alix = primary_db.db.create_node(&["Person"]);
+        let alix = primary_db.db().create_node(&["Person"]);
         primary_db
-            .db
+            .db()
             .set_node_property(alix, "name", grafeo_common::types::Value::from("Alix"));
-        let gus = primary_db.db.create_node(&["Person"]);
+        let gus = primary_db.db().create_node(&["Person"]);
         primary_db
-            .db
+            .db()
             .set_node_property(gus, "name", grafeo_common::types::Value::from("Gus"));
-        let _edge = primary_db.db.create_edge(alix, gus, "KNOWS");
+        let _edge = primary_db.db().create_edge(alix, gus, "KNOWS");
 
         // Pull changes from primary
         let changes_resp = SyncService::pull(&primary, "default", 0, 1000).unwrap();
@@ -1107,14 +1104,14 @@ mod tests {
         // Verify replica has the data
         let replica_db = replica.get("default").unwrap();
         assert!(
-            replica_db.db.node_count() >= 2,
+            replica_db.db().node_count() >= 2,
             "Replica should have at least 2 nodes, got {}",
-            replica_db.db.node_count()
+            replica_db.db().node_count()
         );
         assert!(
-            replica_db.db.edge_count() >= 1,
+            replica_db.db().edge_count() >= 1,
             "Replica should have at least 1 edge, got {}",
-            replica_db.db.edge_count()
+            replica_db.db().edge_count()
         );
     }
 
@@ -1126,7 +1123,7 @@ mod tests {
         let primary_db = primary.get("default").unwrap();
 
         // Write via session (previously bypassed CDC)
-        let session = primary_db.db.session();
+        let session = primary_db.db().session();
         session
             .execute("INSERT (:Person {name: 'Vincent', city: 'Paris'})")
             .unwrap();
@@ -1180,7 +1177,7 @@ mod tests {
 
         let replica_db = replica.get("default").unwrap();
         assert!(
-            replica_db.db.node_count() >= 3,
+            replica_db.db().node_count() >= 3,
             "Replica should have at least 3 nodes from session mutations"
         );
     }

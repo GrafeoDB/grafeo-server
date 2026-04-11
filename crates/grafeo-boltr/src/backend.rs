@@ -66,10 +66,11 @@ impl BoltBackend for GrafeoBackend {
 
         let ro = self.state.is_query_read_only();
         let engine_session = tokio::task::spawn_blocking(move || {
+            let db = entry.db();
             if ro {
-                entry.db.session_read_only()
+                db.session_read_only()
             } else {
-                entry.db.session()
+                db.session()
             }
         })
         .await
@@ -100,17 +101,19 @@ impl BoltBackend for GrafeoBackend {
     ) -> Result<(), BoltError> {
         match property {
             SessionProperty::Database(db_name) => {
-                let entry =
-                    self.state.databases().get(&db_name).ok_or_else(|| {
-                        BoltError::Session(format!("database '{db_name}' not found"))
-                    })?;
+                let entry = self
+                    .state
+                    .databases()
+                    .get_available(&db_name)
+                    .map_err(|e| BoltError::Session(e.to_string()))?;
 
                 let ro = self.state.is_query_read_only();
                 let engine_session = tokio::task::spawn_blocking(move || {
+                    let db = entry.db();
                     if ro {
-                        entry.db.session_read_only()
+                        db.session_read_only()
                     } else {
-                        entry.db.session()
+                        db.session()
                     }
                 })
                 .await
@@ -134,10 +137,11 @@ impl BoltBackend for GrafeoBackend {
 
         let ro = self.state.is_query_read_only();
         let engine_session = tokio::task::spawn_blocking(move || {
+            let db = entry.db();
             if ro {
-                entry.db.session_read_only()
+                db.session_read_only()
             } else {
-                entry.db.session()
+                db.session()
             }
         })
         .await

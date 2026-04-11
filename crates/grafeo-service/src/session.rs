@@ -136,7 +136,7 @@ mod tests {
     fn make_session(db_name: &str) -> (grafeo_engine::Session, String) {
         let mgr = DatabaseManager::new(None, false);
         let entry = mgr.get(db_name).unwrap();
-        (entry.db.session(), db_name.to_string())
+        (entry.db().session(), db_name.to_string())
     }
 
     #[test]

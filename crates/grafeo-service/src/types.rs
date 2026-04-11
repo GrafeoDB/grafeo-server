@@ -422,6 +422,38 @@ fn default_db_name() -> String {
 }
 
 // ============================================================================
+// Backup types
+// ============================================================================
+
+/// Information about a single backup file.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BackupEntry {
+    /// Backup filename.
+    pub filename: String,
+    /// Database this backup belongs to.
+    pub database: String,
+    /// Backup file size in bytes.
+    pub size_bytes: u64,
+    /// Backup creation timestamp (ISO 8601).
+    pub created_at: String,
+    /// Node count at time of backup.
+    pub node_count: u64,
+    /// Edge count at time of backup.
+    pub edge_count: u64,
+    /// Database epoch at time of backup.
+    pub epoch: u64,
+}
+
+/// Request to restore a database from a backup.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RestoreRequest {
+    /// Backup filename (within the configured backup directory).
+    pub backup: String,
+}
+
+// ============================================================================
 // Named graph types
 // ============================================================================
 

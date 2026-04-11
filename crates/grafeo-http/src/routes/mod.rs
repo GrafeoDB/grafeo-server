@@ -1,6 +1,7 @@
 //! HTTP API route handlers.
 
 pub mod admin;
+pub mod backup;
 pub mod batch;
 pub mod database;
 pub mod graph_store;

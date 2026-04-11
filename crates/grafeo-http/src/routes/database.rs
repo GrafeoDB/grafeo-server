@@ -57,11 +57,12 @@ pub async fn create_database(
         .get(&name)
         .ok_or_else(|| ApiError::internal("database disappeared after creation"))?;
 
+    let db = entry.db();
     Ok(Json(DatabaseSummary {
         name,
-        node_count: entry.db.node_count(),
-        edge_count: entry.db.edge_count(),
-        persistent: entry.db.path().is_some(),
+        node_count: db.node_count(),
+        edge_count: db.edge_count(),
+        persistent: db.path().is_some(),
         database_type: db_type.as_str().to_string(),
     }))
 }
@@ -111,12 +112,10 @@ pub async fn database_info(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseInfoResponse>, ApiError> {
-    let entry = state
-        .databases()
-        .get(&name)
-        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
+    let entry = state.databases().get_available(&name)?;
 
-    let info = entry.db.info();
+    let db = entry.db();
+    let info = db.info();
     let metadata = &entry.metadata;
     Ok(Json(DatabaseInfoResponse {
         name,
@@ -127,7 +126,7 @@ pub async fn database_info(
         wal_enabled: info.wal_enabled,
         database_type: metadata.database_type.clone(),
         storage_mode: metadata.storage_mode.clone(),
-        memory_limit_bytes: entry.db.memory_limit(),
+        memory_limit_bytes: db.memory_limit(),
         backward_edges: metadata.backward_edges,
         threads: metadata.threads,
     }))
@@ -152,12 +151,9 @@ pub async fn database_stats(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseStatsResponse>, ApiError> {
-    let entry = state
-        .databases()
-        .get(&name)
-        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
+    let entry = state.databases().get_available(&name)?;
 
-    let stats = entry.db.detailed_stats();
+    let stats = entry.db().detailed_stats();
     Ok(Json(DatabaseStatsResponse {
         name,
         node_count: stats.node_count,
@@ -190,12 +186,9 @@ pub async fn database_schema(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<DatabaseSchemaResponse>, ApiError> {
-    let entry = state
-        .databases()
-        .get(&name)
-        .ok_or_else(|| ApiError::not_found(format!("database '{name}' not found")))?;
+    let entry = state.databases().get_available(&name)?;
 
-    let schema = entry.db.schema();
+    let schema = entry.db().schema();
     match schema {
         grafeo_engine::admin::SchemaInfo::Lpg(lpg) => Ok(Json(DatabaseSchemaResponse {
             name,

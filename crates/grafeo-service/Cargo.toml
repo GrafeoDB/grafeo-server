@@ -18,8 +18,12 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 
+# Lock-free atomic Arc swap (for hot-swapping database handles during restore)
+arc-swap = "1"
+
 # JSON (always needed for SearchHit properties)
 serde_json = "1"
+
 
 # Schema loading (optional)
 sophia_turtle = { version = "0.9", optional = true }
