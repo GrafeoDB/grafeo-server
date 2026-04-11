@@ -331,4 +331,71 @@ mod tests {
         let reg = SessionRegistry::default();
         assert_eq!(reg.active_count(), 0);
     }
+
+    // --- Session ownership tests ---
+
+    #[test]
+    fn get_with_matching_owner_returns_session() {
+        let reg = SessionRegistry::new();
+        let (sess, db) = make_session("default");
+        let id = reg.create(sess, &db, Some("token-abc".to_string()));
+
+        let result = reg.get(&id, 300, Some("token-abc"));
+        assert!(
+            result.is_some(),
+            "get should return the session when caller token matches owner"
+        );
+    }
+
+    #[test]
+    fn get_with_mismatched_owner_returns_none() {
+        let reg = SessionRegistry::new();
+        let (sess, db) = make_session("default");
+        let id = reg.create(sess, &db, Some("token-abc".to_string()));
+
+        let result = reg.get(&id, 300, Some("token-xyz"));
+        assert!(
+            result.is_none(),
+            "get should return None when caller token does not match owner"
+        );
+        // Session should still exist (not removed, just denied)
+        assert!(
+            reg.exists(&id),
+            "session should not be removed on ownership mismatch"
+        );
+    }
+
+    #[test]
+    fn get_with_no_caller_token_on_owned_session_returns_none() {
+        let reg = SessionRegistry::new();
+        let (sess, db) = make_session("default");
+        let id = reg.create(sess, &db, Some("token-abc".to_string()));
+
+        let result = reg.get(&id, 300, None);
+        assert!(
+            result.is_none(),
+            "get should return None when session has owner but caller has no token"
+        );
+    }
+
+    #[test]
+    fn get_with_no_owner_ignores_caller_token() {
+        let reg = SessionRegistry::new();
+        let (sess, db) = make_session("default");
+        let id = reg.create(sess, &db, None);
+
+        // No caller token: should work
+        let result = reg.get(&id, 300, None);
+        assert!(
+            result.is_some(),
+            "unowned session should be accessible without token"
+        );
+
+        // With caller token: should also work (ownership check is skipped)
+        let result = reg.get(&id, 300, Some("any-token"));
+        assert!(
+            result.is_some(),
+            "unowned session should be accessible even with a caller token"
+        );
+    }
 }

@@ -643,4 +643,87 @@ mod tests {
         let req = TokenScopeRequest::default();
         assert_eq!(req.to_role().unwrap(), grafeo_engine::auth::Role::Admin);
     }
+
+    #[test]
+    fn to_role_empty_string_is_error() {
+        let req = TokenScopeRequest {
+            role: String::new(),
+            databases: vec![],
+        };
+        let err = req.to_role().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown role"),
+            "error message should mention unknown role, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn to_role_case_sensitive() {
+        let req = TokenScopeRequest {
+            role: "Admin".to_string(),
+            databases: vec![],
+        };
+        assert!(
+            req.to_role().is_err(),
+            "role matching should be case-sensitive"
+        );
+    }
+
+    #[test]
+    fn token_scope_request_default_fields() {
+        let req = TokenScopeRequest::default();
+        assert_eq!(req.role, "admin");
+        assert!(req.databases.is_empty());
+    }
+
+    #[test]
+    fn token_scope_request_serde_default_role() {
+        // Deserialize with no role field: should use the serde default ("admin")
+        let json = r#"{"databases": ["mydb"]}"#;
+        let req: TokenScopeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.role, "admin");
+        assert_eq!(req.databases, vec!["mydb"]);
+    }
+
+    #[test]
+    fn token_scope_request_serde_roundtrip() {
+        let req = TokenScopeRequest {
+            role: "read-only".to_string(),
+            databases: vec!["db1".to_string(), "db2".to_string()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: TokenScopeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, "read-only");
+        assert_eq!(back.databases, vec!["db1", "db2"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // DatabaseType
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn database_type_display() {
+        assert_eq!(DatabaseType::Lpg.to_string(), "lpg");
+        assert_eq!(DatabaseType::Rdf.to_string(), "rdf");
+        assert_eq!(DatabaseType::OwlSchema.to_string(), "owl-schema");
+        assert_eq!(DatabaseType::RdfsSchema.to_string(), "rdfs-schema");
+        assert_eq!(DatabaseType::JsonSchema.to_string(), "json-schema");
+    }
+
+    #[test]
+    fn database_type_default_is_lpg() {
+        assert_eq!(DatabaseType::default(), DatabaseType::Lpg);
+    }
+
+    #[test]
+    fn storage_mode_default_is_in_memory() {
+        assert_eq!(StorageMode::default(), StorageMode::InMemory);
+    }
+
+    #[test]
+    fn storage_mode_as_str() {
+        assert_eq!(StorageMode::InMemory.as_str(), "in-memory");
+        assert_eq!(StorageMode::Persistent.as_str(), "persistent");
+    }
 }

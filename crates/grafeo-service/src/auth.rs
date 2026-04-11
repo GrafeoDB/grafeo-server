@@ -651,4 +651,209 @@ mod tests {
         let provider = AuthProvider::new(Some("tok".into()), None, None).unwrap();
         assert!(provider.token_store().is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // with_token_store: all credential combinations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn with_token_store_all_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::token_store::TokenStore::load(dir.path().join("tokens.json")).unwrap();
+        let store_arc = std::sync::Arc::new(store);
+        let provider = AuthProvider::with_token_store(
+            Some("tok".into()),
+            Some("user".into()),
+            Some("pass".into()),
+            store_arc,
+        )
+        .unwrap();
+        assert!(provider.is_enabled());
+        assert!(provider.token_store().is_some());
+        // Legacy bearer still works
+        assert!(provider.check_bearer("tok").is_some());
+        // Basic auth still works
+        assert!(provider.check_basic("user", "pass"));
+    }
+
+    #[test]
+    fn with_token_store_basic_only_plus_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::token_store::TokenStore::load(dir.path().join("tokens.json")).unwrap();
+        let store_arc = std::sync::Arc::new(store);
+        let provider =
+            AuthProvider::with_token_store(None, Some("u".into()), Some("p".into()), store_arc)
+                .unwrap();
+        assert!(provider.is_enabled());
+        assert!(provider.check_basic("u", "p"));
+        assert!(provider.check_bearer("anything").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // check_bearer: legacy miss, store hit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_bearer_legacy_miss_store_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::token_store::TokenStore::load(dir.path().join("tokens.json")).unwrap();
+
+        let plaintext = "managed-key-xyz";
+        let hash = crate::token_service::hash_token(plaintext);
+        store
+            .insert(TokenRecord {
+                id: "tok-m".to_string(),
+                name: "m-key".to_string(),
+                token_hash: hash,
+                scope: TokenScope {
+                    role: Role::ReadWrite,
+                    databases: vec!["db1".to_string()],
+                },
+                created_at: "2024-06-01T00:00:00Z".to_string(),
+            })
+            .unwrap();
+
+        let store_arc = std::sync::Arc::new(store);
+        // Legacy token is "legacy-secret", but we query with the managed key
+        let provider =
+            AuthProvider::with_token_store(Some("legacy-secret".into()), None, None, store_arc)
+                .unwrap();
+
+        // The managed key does NOT match legacy, but IS found in the store
+        let info = provider.check_bearer(plaintext).unwrap();
+        assert_eq!(info.id, "tok-m");
+        assert_eq!(info.scope.role, Role::ReadWrite);
+        assert_eq!(info.scope.databases, vec!["db1".to_string()]);
+    }
+
+    #[test]
+    fn check_bearer_no_legacy_no_store_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::token_store::TokenStore::load(dir.path().join("tokens.json")).unwrap();
+        let store_arc = std::sync::Arc::new(store);
+        let provider = AuthProvider::with_token_store(None, None, None, store_arc).unwrap();
+        // Empty store, no legacy token: nothing matches
+        assert!(provider.check_bearer("anything").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // check_basic: additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_basic_case_sensitive() {
+        let p = AuthProvider::new(None, Some("Admin".into()), Some("Pass".into())).unwrap();
+        assert!(!p.check_basic("admin", "Pass"));
+        assert!(!p.check_basic("Admin", "pass"));
+        assert!(p.check_basic("Admin", "Pass"));
+    }
+
+    #[test]
+    fn check_basic_user_only_no_password_rejects_all() {
+        // When only a username is configured (no password), check_basic
+        // must reject every attempt because the (Some, None) arm falls
+        // through to the catch-all `_ => false`.
+        let p = AuthProvider::new(None, Some("admin".into()), None).unwrap();
+        assert!(!p.check_basic("admin", ""));
+        assert!(!p.check_basic("admin", "guess"));
+        assert!(!p.check_basic("other", ""));
+    }
+
+    #[test]
+    fn check_basic_token_only_provider_rejects() {
+        // Provider with only a bearer token has no basic credentials at all
+        let p = AuthProvider::new(Some("tok".into()), None, None).unwrap();
+        assert!(!p.check_basic("", ""));
+        assert!(!p.check_basic("any", "any"));
+    }
+
+    // -----------------------------------------------------------------------
+    // str_to_role: error message content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn str_to_role_error_contains_input() {
+        let err = str_to_role("bogus").unwrap_err();
+        assert!(
+            err.contains("bogus"),
+            "error should mention the invalid input"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // spawn_pending_auth_reaper: cleanup expired entries
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pending_auth_reaper_removes_expired_entries() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let map: Arc<dashmap::DashMap<String, (String, Instant)>> =
+            Arc::new(dashmap::DashMap::new());
+
+        // Insert one fresh entry and one already-expired entry
+        map.insert("fresh".to_string(), ("val".to_string(), Instant::now()));
+        map.insert(
+            "stale".to_string(),
+            ("val".to_string(), Instant::now() - Duration::from_secs(10)),
+        );
+
+        assert_eq!(map.len(), 2);
+
+        let ttl = Duration::from_secs(5);
+        let interval = Duration::from_millis(50);
+        let handle = spawn_pending_auth_reaper(map.clone(), ttl, interval);
+
+        // Let the reaper tick at least once
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        // The stale entry should be gone, the fresh one should remain
+        assert!(map.contains_key("fresh"), "fresh entry should survive");
+        assert!(!map.contains_key("stale"), "stale entry should be reaped");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_auth_reaper_leaves_fresh_entries() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let map: Arc<dashmap::DashMap<String, (u32, Instant)>> = Arc::new(dashmap::DashMap::new());
+
+        // All entries are fresh
+        map.insert("a".to_string(), (1, Instant::now()));
+        map.insert("b".to_string(), (2, Instant::now()));
+
+        let ttl = Duration::from_secs(60);
+        let interval = Duration::from_millis(50);
+        let handle = spawn_pending_auth_reaper(map.clone(), ttl, interval);
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        assert_eq!(map.len(), 2, "all fresh entries should survive");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_auth_reaper_removes_all_when_all_expired() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let map: Arc<dashmap::DashMap<String, ((), Instant)>> = Arc::new(dashmap::DashMap::new());
+
+        let old = Instant::now() - Duration::from_secs(100);
+        map.insert("x".to_string(), ((), old));
+        map.insert("y".to_string(), ((), old));
+
+        let ttl = Duration::from_secs(5);
+        let interval = Duration::from_millis(50);
+        let handle = spawn_pending_auth_reaper(map.clone(), ttl, interval);
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        assert!(map.is_empty(), "all expired entries should be reaped");
+        handle.abort();
+    }
 }

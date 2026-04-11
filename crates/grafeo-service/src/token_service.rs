@@ -18,18 +18,12 @@ impl TokenService {
         name: String,
         scope: types::TokenScopeRequest,
     ) -> Result<(TokenRecord, String), ServiceError> {
-        let trimmed = name.trim().to_string();
-        if trimmed.is_empty() {
+        let name = name.trim().to_string();
+        if name.is_empty() {
             return Err(ServiceError::BadRequest(
                 "token name must not be empty".to_string(),
             ));
         }
-        if store.has_name(&trimmed) {
-            return Err(ServiceError::Conflict(format!(
-                "a token named '{trimmed}' already exists"
-            )));
-        }
-        let name = trimmed;
         let role = scope.to_role()?;
         let id = uuid::Uuid::new_v4().to_string();
         let plaintext = generate_token();
@@ -46,9 +40,13 @@ impl TokenService {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        store
-            .insert(record.clone())
-            .map_err(|e| ServiceError::Internal(format!("failed to store token: {e}")))?;
+        store.insert(record.clone()).map_err(|e| {
+            if e.starts_with("a token named") {
+                ServiceError::Conflict(e)
+            } else {
+                ServiceError::Internal(format!("failed to store token: {e}"))
+            }
+        })?;
 
         tracing::info!(token_id = %record.id, token_name = %record.name, "API token created");
 

@@ -67,8 +67,14 @@ impl TokenStore {
     }
 
     /// Insert a token record and persist to disk.
+    ///
+    /// Returns `Err` if a token with the same name already exists (checked
+    /// under the write lock so the guarantee is atomic).
     pub fn insert(&self, record: TokenRecord) -> Result<(), String> {
         let mut tokens = self.tokens.write();
+        if tokens.iter().any(|t| t.name == record.name) {
+            return Err(format!("a token named '{}' already exists", record.name));
+        }
         tokens.push(record);
         Self::save_locked(&tokens, &self.path)
     }
@@ -97,11 +103,6 @@ impl TokenStore {
             .iter()
             .find(|t| t.token_hash == hash)
             .cloned()
-    }
-
-    /// Check whether a token with the given name already exists.
-    pub fn has_name(&self, name: &str) -> bool {
-        self.tokens.read().iter().any(|t| t.name == name)
     }
 
     /// Get a token record by ID.
