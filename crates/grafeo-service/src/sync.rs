@@ -266,6 +266,12 @@ impl SyncService {
             .get(db_name)
             .ok_or_else(|| ServiceError::NotFound(format!("database '{db_name}' not found")))?;
 
+        if !entry.db.is_cdc_enabled() {
+            return Err(ServiceError::BadRequest(
+                "CDC is not enabled on this database — sync requires replication mode or explicit CDC activation".to_string(),
+            ));
+        }
+
         let server_epoch = entry.db.current_epoch().0;
         let since_id = grafeo_common::types::EpochId(since);
         let until_id = grafeo_common::types::EpochId(server_epoch);
@@ -691,6 +697,13 @@ mod tests {
         let mut mgr = DatabaseManager::new(None, false);
         mgr.set_cdc_enabled(true);
         mgr
+    }
+
+    #[test]
+    fn pull_without_cdc_returns_error() {
+        let mgr = DatabaseManager::new(None, false);
+        let err = SyncService::pull(&mgr, "default", 0, 1000).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
     }
 
     #[test]

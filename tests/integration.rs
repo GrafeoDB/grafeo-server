@@ -4372,6 +4372,36 @@ async fn e2e_metrics_reflect_activity() {
 // Offline-first sync: HTTP round-trip (v0.4.9)
 // ===========================================================================
 
+/// Creates an in-memory AppState with CDC enabled (required for sync).
+///
+/// Sync endpoints depend on CDC to record change events. In production this
+/// is activated by replication mode; tests must enable it explicitly.
+#[cfg(feature = "sync")]
+fn sync_state() -> grafeo_server::AppState {
+    let config = grafeo_service::ServiceConfig {
+        data_dir: None,
+        read_only: false,
+        session_ttl: 300,
+        query_timeout: 30,
+        rate_limit: 0,
+        rate_limit_window: 60,
+        #[cfg(feature = "auth")]
+        auth_token: None,
+        #[cfg(feature = "auth")]
+        auth_user: None,
+        #[cfg(feature = "auth")]
+        auth_password: None,
+        #[cfg(feature = "replication")]
+        replication_mode: grafeo_service::replication::ReplicationMode::Primary,
+    };
+    let service = grafeo_service::ServiceState::new(&config);
+    grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    )
+}
+
 /// Boots a server from a pre-seeded state, pulls its changefeed via HTTP,
 /// then pushes those changes to a second fresh server and verifies the result.
 ///
@@ -4385,7 +4415,7 @@ async fn e2e_metrics_reflect_activity() {
 #[tokio::test]
 async fn sync_round_trip_two_databases() {
     // --- Server A: seed 3 Person nodes via direct API ---
-    let state_a = grafeo_server::AppState::new_in_memory(300);
+    let state_a = sync_state();
     {
         let entry = state_a.databases().get("default").unwrap();
         entry.db.create_node(&["Person"]);
@@ -4438,8 +4468,8 @@ async fn sync_round_trip_two_databases() {
         "changes":         sync_changes,
     });
 
-    // --- Apply to server B (fresh, empty) ---
-    let base_b = spawn_server().await;
+    // --- Apply to server B (fresh, empty, CDC enabled) ---
+    let base_b = spawn_server_from_state(sync_state()).await;
     let apply_resp = client
         .post(format!("{base_b}/db/default/sync"))
         .json(&sync_req)
@@ -4476,7 +4506,7 @@ async fn sync_round_trip_two_databases() {
 #[cfg(feature = "sync")]
 #[tokio::test]
 async fn sync_with_edge_creates() {
-    let state_a = grafeo_server::AppState::new_in_memory(300);
+    let state_a = sync_state();
     let (alix_raw, gus_raw) = {
         let entry = state_a.databases().get("default").unwrap();
         let alix = entry.db.create_node(&["Person"]);
@@ -4509,8 +4539,8 @@ async fn sync_with_edge_creates() {
     assert_eq!(node_changes.len(), 2);
     assert_eq!(edge_changes.len(), 1);
 
-    // Push node creates to server B; collect id_mappings.
-    let base_b = spawn_server().await;
+    // Push node creates to server B (CDC enabled); collect id_mappings.
+    let base_b = spawn_server_from_state(sync_state()).await;
     let node_req = json!({
         "client_id": "test-edge-sync",
         "last_seen_epoch": 0u64,
@@ -4589,7 +4619,7 @@ async fn sync_with_edge_creates() {
 #[cfg(feature = "sync")]
 #[tokio::test]
 async fn sync_updates_and_deletes() {
-    let state_b = grafeo_server::AppState::new_in_memory(300);
+    let state_b = sync_state();
     let (n1, n2) = {
         let entry = state_b.databases().get("default").unwrap();
         let n1 = entry.db.create_node(&["Device"]).as_u64();
@@ -4646,7 +4676,7 @@ async fn sync_updates_and_deletes() {
 #[cfg(feature = "sync")]
 #[tokio::test]
 async fn sync_lww_conflict_detection() {
-    let state = grafeo_server::AppState::new_in_memory(300);
+    let state = sync_state();
     let node_id = {
         let entry = state.databases().get("default").unwrap();
         entry.db.create_node(&["Person"]).as_u64()
@@ -4691,7 +4721,7 @@ async fn sync_lww_conflict_detection() {
 #[cfg(feature = "sync")]
 #[tokio::test]
 async fn sync_limit_truncation() {
-    let state = grafeo_server::AppState::new_in_memory(300);
+    let state = sync_state();
     {
         let entry = state.databases().get("default").unwrap();
         for _ in 0..7 {
@@ -4746,7 +4776,7 @@ async fn sync_limit_truncation() {
 #[cfg(feature = "sync")]
 #[tokio::test]
 async fn sync_validation_errors() {
-    let base = spawn_server().await;
+    let base = spawn_server_from_state(sync_state()).await;
     let client = Client::new();
 
     let sync_req = json!({
