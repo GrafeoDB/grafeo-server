@@ -132,21 +132,23 @@ impl GqlBackend for GrafeoBackend {
             .ok_or_else(|| GqlError::Session("default database not found".to_owned()))?;
 
         // Resolve identity from auth_info principal (nonce -> TokenInfo -> Identity).
+        // When auth_info is None, no auth provider was configured: allow unauthenticated.
+        // When auth_info is Some but the nonce lookup fails, reject (stale or replayed).
         #[cfg(feature = "auth")]
-        let (identity, db_scope): (Option<grafeo_engine::auth::Identity>, Vec<String>) = {
-            let auth_info = config
-                .auth_info
-                .as_ref()
-                .ok_or_else(|| GqlError::Protocol("authentication required".to_owned()))?;
-            let (_, (token_info, _)) = self
-                .pending
-                .remove(&auth_info.principal)
-                .ok_or_else(|| GqlError::Protocol("auth session expired or invalid".to_owned()))?;
-            (
-                Some(token_info.identity()),
-                token_info.scope.databases.clone(),
-            )
-        };
+        let (identity, db_scope): (Option<grafeo_engine::auth::Identity>, Vec<String>) =
+            match config.auth_info.as_ref() {
+                Some(info) => {
+                    let (_, (token_info, _)) =
+                        self.pending.remove(&info.principal).ok_or_else(|| {
+                            GqlError::Protocol("auth session expired or invalid".to_owned())
+                        })?;
+                    (
+                        Some(token_info.identity()),
+                        token_info.scope.databases.clone(),
+                    )
+                }
+                None => (None, vec![]),
+            };
 
         #[cfg(not(feature = "auth"))]
         let _ = config;

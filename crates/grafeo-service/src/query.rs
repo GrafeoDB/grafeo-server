@@ -33,7 +33,7 @@ fn create_session(
 
 /// Centralized query execution service.
 ///
-/// Stateless method collection — all state is borrowed from `ServiceState`.
+/// Stateless method collection: all state is borrowed from `ServiceState`.
 pub struct QueryService;
 
 impl QueryService {
@@ -90,9 +90,10 @@ impl QueryService {
         language: Option<&str>,
         params: Option<HashMap<String, grafeo_common::Value>>,
         timeout: Option<Duration>,
+        caller_token_id: Option<&str>,
     ) -> Result<QueryResult, ServiceError> {
         let session_arc = sessions
-            .get(session_id, ttl_secs)
+            .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
         let lang = determine_language(language);
@@ -118,12 +119,16 @@ impl QueryService {
     }
 
     /// Begin a new transaction. Returns session ID.
+    ///
+    /// `owner_token_id` ties the session to the authenticated token so that
+    /// only the same token can query/commit/rollback this transaction.
     pub async fn begin_tx(
         databases: &DatabaseManager,
         sessions: &SessionRegistry,
         db_name: &str,
         read_only: bool,
         identity: Option<Identity>,
+        owner_token_id: Option<String>,
     ) -> Result<String, ServiceError> {
         let entry = databases.get_available(db_name)?;
 
@@ -139,7 +144,7 @@ impl QueryService {
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))??;
 
-        let id = sessions.create(session_id, &db_name);
+        let id = sessions.create(session_id, &db_name, owner_token_id);
         Ok(id)
     }
 
@@ -148,9 +153,10 @@ impl QueryService {
         sessions: &SessionRegistry,
         session_id: &str,
         ttl_secs: u64,
+        caller_token_id: Option<&str>,
     ) -> Result<(), ServiceError> {
         let session_arc = sessions
-            .get(session_id, ttl_secs)
+            .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
         tokio::task::spawn_blocking(move || {
@@ -172,9 +178,10 @@ impl QueryService {
         sessions: &SessionRegistry,
         session_id: &str,
         ttl_secs: u64,
+        caller_token_id: Option<&str>,
     ) -> Result<(), ServiceError> {
         let session_arc = sessions
-            .get(session_id, ttl_secs)
+            .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
         tokio::task::spawn_blocking(move || {
@@ -191,7 +198,7 @@ impl QueryService {
         Ok(())
     }
 
-    /// Batch execute — all queries in one implicit transaction.
+    /// Batch execute: all queries in one implicit transaction.
     /// Rolls back on first failure.
     pub async fn batch_execute(
         databases: &DatabaseManager,
@@ -276,7 +283,7 @@ impl QueryService {
         ttl_secs: u64,
     ) -> Result<std::sync::Arc<parking_lot::Mutex<ManagedSession>>, ServiceError> {
         sessions
-            .get(session_id, ttl_secs)
+            .get(session_id, ttl_secs, None)
             .ok_or(ServiceError::SessionNotFound)
     }
 }
@@ -406,7 +413,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // execute — auto-commit queries
+    // execute: auto-commit queries
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -574,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn begin_tx_returns_session_id() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None)
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
             .await
             .unwrap();
         assert!(!id.is_empty());
@@ -583,16 +590,17 @@ mod tests {
     #[tokio::test]
     async fn begin_tx_not_found_database() {
         let s = state();
-        let err = QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db", false, None)
-            .await
-            .unwrap_err();
+        let err =
+            QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db", false, None, None)
+                .await
+                .unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
     #[tokio::test]
     async fn tx_execute_then_commit() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None)
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
             .await
             .unwrap();
 
@@ -605,15 +613,18 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(qr.rows().len(), 1);
 
-        QueryService::commit(s.sessions(), &id, 300).await.unwrap();
+        QueryService::commit(s.sessions(), &id, 300, None)
+            .await
+            .unwrap();
 
         // Session should be removed after commit.
-        let err = QueryService::commit(s.sessions(), &id, 300)
+        let err = QueryService::commit(s.sessions(), &id, 300, None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::SessionNotFound));
@@ -622,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn tx_execute_then_rollback() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None)
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
             .await
             .unwrap();
 
@@ -635,16 +646,17 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
 
-        QueryService::rollback(s.sessions(), &id, 300)
+        QueryService::rollback(s.sessions(), &id, 300, None)
             .await
             .unwrap();
 
         // Session should be removed after rollback.
-        let err = QueryService::rollback(s.sessions(), &id, 300)
+        let err = QueryService::rollback(s.sessions(), &id, 300, None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::SessionNotFound));
@@ -662,6 +674,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -671,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn commit_session_not_found() {
         let s = state();
-        let err = QueryService::commit(s.sessions(), "bad-id", 300)
+        let err = QueryService::commit(s.sessions(), "bad-id", 300, None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::SessionNotFound));
@@ -680,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_session_not_found() {
         let s = state();
-        let err = QueryService::rollback(s.sessions(), "bad-id", 300)
+        let err = QueryService::rollback(s.sessions(), "bad-id", 300, None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::SessionNotFound));
@@ -909,7 +922,7 @@ mod tests {
     #[tokio::test]
     async fn get_session_after_begin() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None)
+        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
             .await
             .unwrap();
         let session = QueryService::get_session(s.sessions(), &id, 300);
@@ -917,7 +930,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // dispatch — permission denied -> Forbidden mapping
+    // dispatch: permission denied -> Forbidden mapping
     // -----------------------------------------------------------------------
 
     #[tokio::test]

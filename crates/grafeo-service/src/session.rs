@@ -17,6 +17,10 @@ pub struct ManagedSession {
     pub engine_session: grafeo_engine::Session,
     /// Name of the database this session belongs to.
     pub db_name: String,
+    /// Token ID of the authenticated user who created this session.
+    /// `None` when auth is disabled. When set, only requests from
+    /// the same token may access this session.
+    pub owner_token_id: Option<String>,
     /// When the session was created.
     pub created_at: Instant,
     /// Last time the session was accessed.
@@ -53,12 +57,22 @@ impl SessionRegistry {
 
     /// Registers an engine session (with an already-open transaction) and
     /// returns a UUID session ID.
-    pub fn create(&self, engine_session: grafeo_engine::Session, db_name: &str) -> String {
+    ///
+    /// `owner_token_id` ties the session to the authenticated token. When
+    /// set, only requests bearing the same token ID may access this session.
+    /// Pass `None` when auth is disabled.
+    pub fn create(
+        &self,
+        engine_session: grafeo_engine::Session,
+        db_name: &str,
+        owner_token_id: Option<String>,
+    ) -> String {
         let id = Uuid::new_v4().to_string();
         let now = Instant::now();
         let session = Arc::new(Mutex::new(ManagedSession {
             engine_session,
             db_name: db_name.to_string(),
+            owner_token_id,
             created_at: now,
             last_used: now,
         }));
@@ -66,9 +80,18 @@ impl SessionRegistry {
         id
     }
 
-    /// Returns a clone of the session `Arc` if the session exists and is
-    /// not expired. Touches the session timestamp on success.
-    pub fn get(&self, session_id: &str, ttl_secs: u64) -> Option<Arc<Mutex<ManagedSession>>> {
+    /// Returns a clone of the session `Arc` if the session exists, is not
+    /// expired, and the caller is the session owner.
+    ///
+    /// `caller_token_id` is the token ID of the current request. When the
+    /// session has an owner, the caller must match. Pass `None` when auth
+    /// is disabled (ownership check is skipped).
+    pub fn get(
+        &self,
+        session_id: &str,
+        ttl_secs: u64,
+        caller_token_id: Option<&str>,
+    ) -> Option<Arc<Mutex<ManagedSession>>> {
         let entry = self.sessions.get(session_id)?;
         let arc = Arc::clone(entry.value());
         drop(entry); // release DashMap shard lock
@@ -79,6 +102,16 @@ impl SessionRegistry {
             self.sessions.remove(session_id);
             return None;
         }
+
+        // Verify session ownership: if the session has an owner, the
+        // caller must present the same token ID.
+        if let Some(ref owner) = session.owner_token_id {
+            match caller_token_id {
+                Some(caller) if caller == owner => {}
+                _ => return None,
+            }
+        }
+
         session.last_used = Instant::now();
         drop(session);
 
@@ -144,29 +177,29 @@ mod tests {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
 
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
         assert!(!id.is_empty(), "create should return a non-empty id");
 
-        let arc = reg.get(&id, 300);
+        let arc = reg.get(&id, 300, None);
         assert!(arc.is_some(), "get should return the session within TTL");
     }
 
     #[test]
     fn get_nonexistent_returns_none() {
         let reg = SessionRegistry::new();
-        assert!(reg.get("no-such-id", 300).is_none());
+        assert!(reg.get("no-such-id", 300, None).is_none());
     }
 
     #[test]
     fn get_expired_returns_none_and_removes_session() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
 
         // Wait >1 s so elapsed().as_secs() > 0 == ttl_secs
         std::thread::sleep(std::time::Duration::from_secs(2));
 
-        let arc = reg.get(&id, 0);
+        let arc = reg.get(&id, 0, None);
         assert!(arc.is_none(), "expired session should return None");
         assert!(
             !reg.exists(&id),
@@ -178,7 +211,7 @@ mod tests {
     fn db_name_returns_correct_name() {
         let reg = SessionRegistry::new();
         let (sess, _) = make_session("default");
-        let id = reg.create(sess, "mydb");
+        let id = reg.create(sess, "mydb", None);
 
         assert_eq!(reg.db_name(&id).as_deref(), Some("mydb"));
     }
@@ -193,7 +226,7 @@ mod tests {
     fn exists_true_after_create() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
         assert!(reg.exists(&id));
     }
 
@@ -201,7 +234,7 @@ mod tests {
     fn exists_false_after_remove() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
         reg.remove(&id);
         assert!(!reg.exists(&id));
     }
@@ -218,11 +251,11 @@ mod tests {
         assert_eq!(reg.active_count(), 0);
 
         let (s1, db) = make_session("default");
-        let id1 = reg.create(s1, &db);
+        let id1 = reg.create(s1, &db, None);
         assert_eq!(reg.active_count(), 1);
 
         let (s2, _) = make_session("default");
-        let id2 = reg.create(s2, "other");
+        let id2 = reg.create(s2, "other", None);
         assert_eq!(reg.active_count(), 2);
 
         reg.remove(&id1);
@@ -236,9 +269,9 @@ mod tests {
     fn cleanup_expired_removes_stale_sessions() {
         let reg = SessionRegistry::new();
         let (s1, db) = make_session("default");
-        let id1 = reg.create(s1, &db);
+        let id1 = reg.create(s1, &db, None);
         let (s2, _) = make_session("default");
-        let _id2 = reg.create(s2, &db);
+        let _id2 = reg.create(s2, &db, None);
         assert_eq!(reg.active_count(), 2);
 
         // Wait so both sessions are older than 0 s TTL
@@ -254,7 +287,7 @@ mod tests {
     fn cleanup_expired_keeps_fresh_sessions() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
 
         // TTL of u64::MAX: nothing should be removed
         let removed = reg.cleanup_expired(u64::MAX);
@@ -266,11 +299,11 @@ mod tests {
     fn remove_by_database_removes_matching_sessions() {
         let reg = SessionRegistry::new();
         let (s1, _) = make_session("default");
-        let id1 = reg.create(s1, "alpha");
+        let id1 = reg.create(s1, "alpha", None);
         let (s2, _) = make_session("default");
-        let id2 = reg.create(s2, "beta");
+        let id2 = reg.create(s2, "beta", None);
         let (s3, _) = make_session("default");
-        let id3 = reg.create(s3, "alpha");
+        let id3 = reg.create(s3, "alpha", None);
 
         reg.remove_by_database("alpha");
 
@@ -284,7 +317,7 @@ mod tests {
     fn remove_by_database_noop_when_no_match() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
-        let id = reg.create(sess, &db);
+        let id = reg.create(sess, &db, None);
 
         reg.remove_by_database("nonexistent");
         assert!(

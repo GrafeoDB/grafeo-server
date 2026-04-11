@@ -50,6 +50,7 @@ pub async fn tx_begin(
 
     auth.check_db_access(db_name)?;
     let identity = auth.identity(state.service().is_query_read_only());
+    let owner_token_id = auth.0.as_ref().map(|info| info.id.clone());
 
     let session_id = QueryService::begin_tx(
         state.databases(),
@@ -57,6 +58,7 @@ pub async fn tx_begin(
         db_name,
         state.service().is_query_read_only(),
         Some(identity),
+        owner_token_id,
     )
     .await?;
 
@@ -85,11 +87,12 @@ pub async fn tx_begin(
 )]
 pub async fn tx_query(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
     let session_id = get_session_id(&headers)?;
+    let caller_token_id = auth.0.as_ref().map(|info| info.id.as_str());
     let params = convert_json_params(req.params.as_ref())?;
     let timeout = state.effective_timeout(req.timeout_ms);
 
@@ -102,6 +105,7 @@ pub async fn tx_query(
         req.language.as_deref(),
         params,
         timeout,
+        caller_token_id,
     )
     .await?;
 
@@ -127,12 +131,19 @@ pub async fn tx_query(
 )]
 pub async fn tx_commit(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
+    let caller_token_id = auth.0.as_ref().map(|info| info.id.as_str());
 
-    QueryService::commit(state.sessions(), &session_id, state.session_ttl()).await?;
+    QueryService::commit(
+        state.sessions(),
+        &session_id,
+        state.session_ttl(),
+        caller_token_id,
+    )
+    .await?;
 
     Ok(Json(TransactionResponse {
         session_id,
@@ -159,12 +170,19 @@ pub async fn tx_commit(
 )]
 pub async fn tx_rollback(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let session_id = get_session_id(&headers)?;
+    let caller_token_id = auth.0.as_ref().map(|info| info.id.as_str());
 
-    QueryService::rollback(state.sessions(), &session_id, state.session_ttl()).await?;
+    QueryService::rollback(
+        state.sessions(),
+        &session_id,
+        state.session_ttl(),
+        caller_token_id,
+    )
+    .await?;
 
     Ok(Json(TransactionResponse {
         session_id,

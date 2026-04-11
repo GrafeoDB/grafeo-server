@@ -48,17 +48,24 @@ pub async fn serve(
         builder = builder.max_sessions(limit);
     }
 
+    // Keep the reaper handle alive until serve() returns so it can be
+    // aborted when the runtime shuts down.
+    #[cfg(feature = "auth")]
+    let _reaper: Option<tokio::task::JoinHandle<()>>;
+
     #[cfg(feature = "auth")]
     if let Some(provider) = options.auth_provider {
         let pending = backend_pending.clone();
         builder = builder.auth(auth::BoltrAuthValidator::new(provider, pending));
 
         // Reap stale auth nonces from clients that never completed session creation.
-        let _reaper = grafeo_service::auth::spawn_pending_auth_reaper(
+        _reaper = Some(grafeo_service::auth::spawn_pending_auth_reaper(
             backend_pending,
             Duration::from_secs(60),
             Duration::from_secs(30),
-        );
+        ));
+    } else {
+        _reaper = None;
     }
 
     #[cfg(feature = "tls")]
