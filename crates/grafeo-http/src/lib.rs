@@ -95,10 +95,6 @@ pub use state::AppState;
         routes::search::vector_search,
         routes::search::text_search,
         routes::search::hybrid_search,
-        routes::tokens::create_token,
-        routes::tokens::list_tokens,
-        routes::tokens::get_token,
-        routes::tokens::delete_token,
     ),
     components(
         schemas(
@@ -137,6 +133,17 @@ pub use state::AppState;
     )
 )]
 struct ApiDoc;
+
+/// Token management OpenAPI paths (only compiled with `auth` feature).
+#[cfg(feature = "auth")]
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(
+    routes::tokens::create_token,
+    routes::tokens::list_tokens,
+    routes::tokens::get_token,
+    routes::tokens::delete_token,
+))]
+struct TokenApiDoc;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -306,7 +313,14 @@ pub fn router(state: AppState) -> Router {
         .layer(cors_layer(&state))
         .with_state(state);
 
-    api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", ApiDoc::openapi()))
+    let mut openapi = ApiDoc::openapi();
+    #[cfg(feature = "auth")]
+    {
+        use utoipa::OpenApi;
+        openapi.merge(TokenApiDoc::openapi());
+    }
+
+    api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", openapi))
 }
 
 /// Serve the HTTP router on the given listener with graceful shutdown.
