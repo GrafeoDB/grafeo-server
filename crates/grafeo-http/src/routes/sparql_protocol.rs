@@ -25,6 +25,7 @@ use grafeo_service::query::QueryService;
 use crate::encode::{convert_json_params, streaming_json_response};
 use crate::encode_sparql::sparql_results_json_response;
 use crate::error::ApiError;
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 use crate::types::QueryRequest;
 
@@ -64,9 +65,11 @@ pub async fn sparql_get(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<SparqlGetParams>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let timeout = state.effective_timeout(None);
+    let identity = auth.identity(state.service().is_query_read_only());
 
     let result = QueryService::execute(
         state.databases(),
@@ -77,7 +80,7 @@ pub async fn sparql_get(
         None,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await?;
 
@@ -98,6 +101,7 @@ pub async fn sparql_get(
 pub async fn sparql_post(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
+    auth: AuthContext,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -112,6 +116,9 @@ pub async fn sparql_post(
         .next()
         .unwrap_or(content_type)
         .trim();
+
+    let read_only = state.service().is_query_read_only();
+    let identity = auth.identity(read_only);
 
     let statement = match base_ct {
         CT_SPARQL_QUERY | CT_SPARQL_UPDATE => String::from_utf8(body.to_vec())
@@ -143,8 +150,8 @@ pub async fn sparql_post(
                 Some("sparql"),
                 params,
                 timeout,
-                state.service().is_query_read_only(),
-                None,
+                read_only,
+                Some(identity),
             )
             .await?;
 
@@ -169,8 +176,8 @@ pub async fn sparql_post(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
-        None,
+        read_only,
+        Some(identity),
     )
     .await?;
 

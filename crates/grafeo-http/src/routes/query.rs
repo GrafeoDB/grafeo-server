@@ -28,6 +28,8 @@ async fn execute_query(
     let params = convert_json_params(req.params.as_ref())?;
     let timeout = state.effective_timeout(req.timeout_ms);
 
+    let identity = auth.identity(state.service().is_query_read_only());
+
     let result = QueryService::execute(
         state.databases(),
         state.metrics(),
@@ -37,7 +39,7 @@ async fn execute_query(
         params,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await?;
 

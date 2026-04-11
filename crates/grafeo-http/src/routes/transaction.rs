@@ -10,6 +10,7 @@ use grafeo_service::query::QueryService;
 
 use crate::encode::{convert_json_params, streaming_json_response};
 use crate::error::{ApiError, ErrorBody};
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 use crate::types::{QueryRequest, QueryResponse, TransactionResponse, TxBeginRequest};
 
@@ -39,6 +40,7 @@ fn get_session_id(headers: &HeaderMap) -> Result<String, ApiError> {
 )]
 pub async fn tx_begin(
     State(state): State<AppState>,
+    auth: AuthContext,
     body: Option<Json<TxBeginRequest>>,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let db_name = body
@@ -46,12 +48,14 @@ pub async fn tx_begin(
         .and_then(|b| b.database.as_deref())
         .unwrap_or("default");
 
+    let identity = auth.identity(state.service().is_query_read_only());
+
     let session_id = QueryService::begin_tx(
         state.databases(),
         state.sessions(),
         db_name,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await?;
 

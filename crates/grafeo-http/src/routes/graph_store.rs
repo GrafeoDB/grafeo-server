@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use grafeo_service::query::QueryService;
 
 use crate::error::ApiError;
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,7 @@ pub async fn graph_store_get(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<GraphStoreParams>,
+    auth: AuthContext,
     _headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let target = resolve_target(&params)?;
@@ -86,6 +88,7 @@ pub async fn graph_store_get(
     };
 
     let timeout = state.effective_timeout(None);
+    let identity = auth.identity(state.service().is_query_read_only());
 
     let result = QueryService::execute(
         state.databases(),
@@ -96,7 +99,7 @@ pub async fn graph_store_get(
         None,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await?;
 
@@ -130,6 +133,7 @@ pub async fn graph_store_head(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<GraphStoreParams>,
+    auth: AuthContext,
 ) -> Result<Response, ApiError> {
     let target = resolve_target(&params)?;
 
@@ -141,6 +145,7 @@ pub async fn graph_store_head(
     };
 
     let timeout = state.effective_timeout(None);
+    let identity = auth.identity(state.service().is_query_read_only());
 
     // If the query succeeds, the graph exists (or is the default graph).
     let result = QueryService::execute(
@@ -152,7 +157,7 @@ pub async fn graph_store_head(
         None,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await?;
 
@@ -194,6 +199,7 @@ pub async fn graph_store_put(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<GraphStoreParams>,
+    auth: AuthContext,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -207,6 +213,8 @@ pub async fn graph_store_put(
     };
 
     let timeout = state.effective_timeout(None);
+    let read_only = state.service().is_query_read_only();
+    let identity = auth.identity(read_only);
 
     QueryService::execute(
         state.databases(),
@@ -216,8 +224,8 @@ pub async fn graph_store_put(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
-        None,
+        read_only,
+        Some(identity.clone()),
     )
     .await?;
 
@@ -232,8 +240,8 @@ pub async fn graph_store_put(
             Some("sparql"),
             None,
             timeout,
-            state.service().is_query_read_only(),
-            None,
+            read_only,
+            Some(identity),
         )
         .await?;
     }
@@ -253,10 +261,13 @@ pub async fn graph_store_post(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<GraphStoreParams>,
+    auth: AuthContext,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let nt_triples = parse_body_to_ntriples(&headers, &body)?;
+    let read_only = state.service().is_query_read_only();
+    let identity = auth.identity(read_only);
 
     // No target params: create a new named graph.
     if params.default.is_none() && params.graph.is_none() {
@@ -272,8 +283,8 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            state.service().is_query_read_only(),
-            None,
+            read_only,
+            Some(identity.clone()),
         )
         .await?;
 
@@ -288,8 +299,8 @@ pub async fn graph_store_post(
                 Some("sparql"),
                 None,
                 timeout,
-                state.service().is_query_read_only(),
-                None,
+                read_only,
+                Some(identity),
             )
             .await?;
         }
@@ -317,8 +328,8 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            state.service().is_query_read_only(),
-            None,
+            read_only,
+            Some(identity),
         )
         .await?;
     }
@@ -335,6 +346,7 @@ pub async fn graph_store_delete(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
     Query(params): Query<GraphStoreParams>,
+    auth: AuthContext,
 ) -> Result<Response, ApiError> {
     let target = resolve_target(&params)?;
 
@@ -344,6 +356,7 @@ pub async fn graph_store_delete(
     };
 
     let timeout = state.effective_timeout(None);
+    let identity = auth.identity(state.service().is_query_read_only());
 
     let result = QueryService::execute(
         state.databases(),
@@ -354,7 +367,7 @@ pub async fn graph_store_delete(
         None,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity),
     )
     .await;
 

@@ -15,10 +15,12 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 
+use grafeo_engine::auth::Identity;
 use grafeo_service::error::ServiceError;
 use grafeo_service::query::QueryService;
 
 use crate::encode::{convert_json_params, query_result_to_response};
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 use crate::types::{QueryRequest, WsClientMessage, WsServerMessage};
 
@@ -27,16 +29,21 @@ use crate::types::{QueryRequest, WsClientMessage, WsServerMessage};
 /// Authentication is handled by the middleware stack before this handler
 /// runs — the `/ws` route is inside the authenticated router, so the
 /// HTTP upgrade request must carry valid credentials.
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> impl IntoResponse {
+    let identity = auth.identity(state.service().is_query_read_only());
+    ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, identity: Identity) {
     let (mut sender, mut receiver) = socket.split();
 
     #[cfg(feature = "push-changefeed")]
     {
-        handle_with_subscriptions(&mut sender, &mut receiver, state).await;
+        handle_with_subscriptions(&mut sender, &mut receiver, state, identity).await;
     }
 
     #[cfg(not(feature = "push-changefeed"))]
@@ -74,7 +81,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
             let reply = match client_msg {
                 WsClientMessage::Ping => WsServerMessage::Pong,
-                WsClientMessage::Query { id, request } => process_query(&state, id, request).await,
+                WsClientMessage::Query { id, request } => {
+                    process_query(&state, id, request, &identity).await
+                }
             };
 
             if send_json(&mut sender, &reply).await.is_err() {
@@ -91,8 +100,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "push-changefeed")]
-async fn handle_with_subscriptions<S, R>(sender: &mut S, receiver: &mut R, state: AppState)
-where
+async fn handle_with_subscriptions<S, R>(
+    sender: &mut S,
+    receiver: &mut R,
+    state: AppState,
+    identity: Identity,
+) where
     S: SinkExt<Message, Error = axum::Error> + Unpin,
     R: StreamExt<Item = Result<Message, axum::Error>> + Unpin,
 {
@@ -148,7 +161,7 @@ where
                 let reply: WsServerMessage = match client_msg {
                     WsClientMessage::Ping => WsServerMessage::Pong,
                     WsClientMessage::Query { id, request } => {
-                        process_query(&state, id, request).await
+                        process_query(&state, id, request, &identity).await
                     }
                     WsClientMessage::Subscribe { sub_id, db, since } => {
                         let rx = state.change_hub().subscribe(&db, since, state.service().clone());
@@ -224,7 +237,12 @@ where
 }
 
 /// Executes a query and returns a `WsServerMessage`.
-async fn process_query(state: &AppState, id: Option<String>, req: QueryRequest) -> WsServerMessage {
+async fn process_query(
+    state: &AppState,
+    id: Option<String>,
+    req: QueryRequest,
+    identity: &Identity,
+) -> WsServerMessage {
     let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
     let params = match convert_json_params(req.params.as_ref()) {
         Ok(p) => p,
@@ -247,7 +265,7 @@ async fn process_query(state: &AppState, id: Option<String>, req: QueryRequest) 
         params,
         timeout,
         state.service().is_query_read_only(),
-        None,
+        Some(identity.clone()),
     )
     .await;
 

@@ -133,8 +133,7 @@ impl ServiceState {
                     // Resolve token store path: explicit > {data_dir}/tokens.json > None
                     // Only auto-derive from data_dir when at least one credential
                     // is configured, so data_dir alone doesn't activate auth.
-                    let has_credentials = config.auth_token.is_some()
-                        || config.auth_user.is_some();
+                    let has_credentials = config.auth_token.is_some() || config.auth_user.is_some();
                     let store_path = config.token_store_path.clone().or_else(|| {
                         if !has_credentials {
                             return None;

@@ -181,7 +181,7 @@ async fn replicate(client: &Client, primary: &str, replica: &str, since: u64) ->
     assert!(
         apply_resp["conflicts"]
             .as_array()
-            .map_or(true, |c| c.is_empty()),
+            .is_none_or(|c| c.is_empty()),
         "Unexpected conflicts during replication: {:?}",
         apply_resp["conflicts"]
     );
