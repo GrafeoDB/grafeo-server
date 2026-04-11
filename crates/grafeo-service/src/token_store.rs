@@ -99,6 +99,11 @@ impl TokenStore {
             .cloned()
     }
 
+    /// Check whether a token with the given name already exists.
+    pub fn has_name(&self, name: &str) -> bool {
+        self.tokens.read().iter().any(|t| t.name == name)
+    }
+
     /// Get a token record by ID.
     pub fn get(&self, id: &str) -> Option<TokenRecord> {
         self.tokens.read().iter().find(|t| t.id == id).cloned()

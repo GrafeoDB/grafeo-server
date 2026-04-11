@@ -18,6 +18,18 @@ impl TokenService {
         name: String,
         scope: types::TokenScopeRequest,
     ) -> Result<(TokenRecord, String), ServiceError> {
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ServiceError::BadRequest(
+                "token name must not be empty".to_string(),
+            ));
+        }
+        if store.has_name(&trimmed) {
+            return Err(ServiceError::Conflict(format!(
+                "a token named '{trimmed}' already exists"
+            )));
+        }
+        let name = trimmed;
         let role = scope.to_role()?;
         let id = uuid::Uuid::new_v4().to_string();
         let plaintext = generate_token();
@@ -213,6 +225,30 @@ mod tests {
         let store = make_store();
         let err = TokenService::get_token(&store, "nonexistent").unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[test]
+    fn create_token_rejects_empty_name() {
+        let store = make_store();
+        let err = TokenService::create_token(&store, "".to_string(), default_scope()).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[test]
+    fn create_token_rejects_whitespace_only_name() {
+        let store = make_store();
+        let err =
+            TokenService::create_token(&store, "   ".to_string(), default_scope()).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[test]
+    fn create_token_rejects_duplicate_name() {
+        let store = make_store();
+        TokenService::create_token(&store, "dup".to_string(), default_scope()).unwrap();
+        let err =
+            TokenService::create_token(&store, "dup".to_string(), default_scope()).unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)));
     }
 
     #[test]
