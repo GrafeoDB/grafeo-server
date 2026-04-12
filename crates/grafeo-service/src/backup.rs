@@ -728,6 +728,62 @@ mod tests {
         assert_eq!(days_to_ymd(19737), (2024, 1, 15));
     }
 
+    // -----------------------------------------------------------------------
+    // GrafeoDB/grafeo#258: backup_full() fails on Windows and read-only
+    //
+    // These tests document the two engine bugs that force the server to
+    // fall back to save(). They are expected to fail until grafeo-engine
+    // 0.5.37 lands the fix. Once they pass, remove the workarounds in
+    // backup_database() and do_restore() (the !cfg!(windows) and
+    // !is_read_only guards).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[ignore = "grafeo#258: backup_full() fails on read-only databases (fixed in engine 0.5.37)"]
+    fn backup_full_works_on_read_only_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent database, then reopen read-only
+        let db_path = dir.path().join("data.grafeo");
+        {
+            let db = GrafeoDB::open(db_path.to_str().unwrap()).unwrap();
+            db.session().execute("INSERT (:Test {v: 1})").unwrap();
+            db.close().ok();
+        }
+        let db = GrafeoDB::open_read_only(db_path.to_str().unwrap()).unwrap();
+
+        // This should succeed: the on-disk file is already a valid snapshot,
+        // no checkpoint flush needed. Currently fails with
+        // "cannot write snapshot: database is open in read-only mode".
+        let result = db.backup_full(backup_dir.path());
+        assert!(
+            result.is_ok(),
+            "backup_full() on a read-only database should succeed: {result:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "grafeo#258: backup_full() fails on Windows due to open-file copy (fixed in engine 0.5.37)"]
+    fn backup_full_works_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        let db_path = dir.path().join("data.grafeo");
+        let db = GrafeoDB::open(db_path.to_str().unwrap()).unwrap();
+        db.session().execute("INSERT (:Test {v: 1})").unwrap();
+
+        // This should succeed: the engine should handle Windows file locking
+        // gracefully (e.g., snapshot to temp file). Currently fails because
+        // std::fs::copy() cannot read a file held by an exclusive lock.
+        let result = db.backup_full(backup_dir.path());
+        assert!(
+            result.is_ok(),
+            "backup_full() on Windows should succeed: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn backup_and_list() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -897,6 +953,395 @@ mod tests {
             BackupService::restore_database(&mgr, "default", &dummy, backup_dir.path()).await,
             Err(ServiceError::ReadOnly)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // In-memory backup (save() fallback)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn backup_in_memory_database_uses_save_fallback() {
+        let mgr = crate::database::DatabaseManager::new(None, false);
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(backup.database, "default");
+        assert_eq!(backup.kind, "full");
+        assert!(backup.size_bytes > 0);
+        // In-memory backup has epoch 0 (no chain API)
+        assert_eq!(backup.start_epoch, 0);
+        assert_eq!(backup.end_epoch, 0);
+        assert_eq!(backup.checksum, 0);
+        assert!(!backup.created_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn backup_in_memory_listed_as_untracked() {
+        let mgr = crate::database::DatabaseManager::new(None, false);
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path())
+            .await
+            .unwrap();
+
+        let list = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].filename.ends_with(".grafeo"));
+    }
+
+    // -----------------------------------------------------------------------
+    // db_backup_dir validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn db_backup_dir_rejects_traversal() {
+        let dir = Path::new("/backups");
+        assert!(db_backup_dir(dir, "valid-db").is_ok());
+        assert!(db_backup_dir(dir, "has/slash").is_err());
+        assert!(db_backup_dir(dir, "has\\backslash").is_err());
+        assert!(db_backup_dir(dir, "has..dots").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Retention enforcement
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn retention_keeps_latest_n() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        // Create 3 backups
+        for _ in 0..3 {
+            BackupService::backup_database(&mgr, "default", backup_dir.path())
+                .await
+                .unwrap();
+        }
+
+        let before = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(before.len(), 3);
+
+        // Keep 2
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 2).unwrap();
+        assert_eq!(deleted.len(), 1);
+
+        let after = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(after.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retention_keep_zero_treated_as_one() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path())
+            .await
+            .unwrap();
+        BackupService::backup_database(&mgr, "default", backup_dir.path())
+            .await
+            .unwrap();
+
+        // keep=0 is clamped to 1
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 0).unwrap();
+        assert_eq!(deleted.len(), 1);
+
+        let remaining = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retention_no_op_when_under_limit() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path())
+            .await
+            .unwrap();
+
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 5).unwrap();
+        assert!(deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retention_file_based_for_in_memory() {
+        let mgr = crate::database::DatabaseManager::new(None, false);
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        for _ in 0..3 {
+            BackupService::backup_database(&mgr, "default", backup_dir.path())
+                .await
+                .unwrap();
+            // Small delay so timestamps differ
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let deleted = BackupService::enforce_retention("default", backup_dir.path(), 1).unwrap();
+        assert_eq!(deleted.len(), 2);
+
+        let remaining = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Legacy migration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_legacy_backups_moves_files() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        // Create a legacy-style file: {db}_{YYYY}_{MM}_{DD}_{HH}_{MM}_{SS}.grafeo
+        let legacy = "mydb_2024_01_15_10_30_45.grafeo";
+        std::fs::write(root.join(legacy), b"fake backup").unwrap();
+
+        migrate_legacy_backups(root);
+
+        // File should have moved to mydb/ subdirectory
+        assert!(!root.join(legacy).exists());
+        assert!(root.join("mydb").join(legacy).exists());
+    }
+
+    #[test]
+    fn migrate_legacy_backups_7_part_timestamp() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        // 7-part timestamp (with millis)
+        let legacy = "db_2024_01_15_10_30_45_123.grafeo";
+        std::fs::write(root.join(legacy), b"data").unwrap();
+
+        migrate_legacy_backups(root);
+
+        assert!(!root.join(legacy).exists());
+        assert!(root.join("db").join(legacy).exists());
+    }
+
+    #[test]
+    fn migrate_legacy_backups_underscore_in_db_name() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        // DB name with underscores: "my_cool_db"
+        let legacy = "my_cool_db_2024_01_15_10_30_45.grafeo";
+        std::fs::write(root.join(legacy), b"data").unwrap();
+
+        migrate_legacy_backups(root);
+
+        assert!(!root.join(legacy).exists());
+        assert!(root.join("my_cool_db").join(legacy).exists());
+    }
+
+    #[test]
+    fn migrate_legacy_backups_skips_non_grafeo() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        std::fs::write(root.join("readme.txt"), b"not a backup").unwrap();
+        std::fs::write(root.join("data.json"), b"{}").unwrap();
+
+        migrate_legacy_backups(root);
+
+        // Non-grafeo files should remain in root
+        assert!(root.join("readme.txt").exists());
+        assert!(root.join("data.json").exists());
+    }
+
+    #[test]
+    fn migrate_legacy_backups_skips_short_filenames() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        // Too few parts to be a legacy backup
+        std::fs::write(root.join("simple.grafeo"), b"data").unwrap();
+        std::fs::write(root.join("two_parts.grafeo"), b"data").unwrap();
+
+        migrate_legacy_backups(root);
+
+        // Should remain untouched
+        assert!(root.join("simple.grafeo").exists());
+        assert!(root.join("two_parts.grafeo").exists());
+    }
+
+    #[test]
+    fn migrate_legacy_backups_skips_already_migrated() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        let legacy = "mydb_2024_01_15_10_30_45.grafeo";
+        // Pre-create the target
+        std::fs::create_dir_all(root.join("mydb")).unwrap();
+        std::fs::write(root.join("mydb").join(legacy), b"existing").unwrap();
+        // Put a source file too
+        std::fs::write(root.join(legacy), b"source").unwrap();
+
+        migrate_legacy_backups(root);
+
+        // Source should remain (target already existed)
+        assert!(root.join(legacy).exists());
+        // Target should still have original content
+        let content = std::fs::read(root.join("mydb").join(legacy)).unwrap();
+        assert_eq!(content, b"existing");
+    }
+
+    #[test]
+    fn migrate_legacy_backups_empty_dir() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        // Should not panic on empty directory
+        migrate_legacy_backups(backup_dir.path());
+    }
+
+    // -----------------------------------------------------------------------
+    // restore edge cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn restore_nonexistent_database_returns_not_found() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        let dummy = backup_dir.path().join("dummy.grafeo");
+        std::fs::write(&dummy, b"fake").unwrap();
+
+        let result =
+            BackupService::restore_database(&mgr, "nonexistent", &dummy, backup_dir.path()).await;
+        assert!(matches!(result, Err(ServiceError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn restore_missing_backup_file_returns_not_found() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        let missing = backup_dir.path().join("does-not-exist.grafeo");
+        let result =
+            BackupService::restore_database(&mgr, "default", &missing, backup_dir.path()).await;
+        assert!(matches!(result, Err(ServiceError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn restore_in_memory_database_rejected() {
+        let mgr = crate::database::DatabaseManager::new(None, false);
+        let backup_dir = tempfile::tempdir().unwrap();
+        let dummy = backup_dir.path().join("dummy.grafeo");
+        std::fs::write(&dummy, b"fake").unwrap();
+
+        // In-memory manager has no data_dir
+        let result =
+            BackupService::restore_database(&mgr, "default", &dummy, backup_dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // list_backups with untracked files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_from_manifest_includes_untracked_grafeo_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("mydb");
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        // Create an untracked .grafeo file (no manifest)
+        std::fs::write(db_dir.join("legacy_backup.grafeo"), b"data").unwrap();
+
+        let entries = BackupService::list_from_manifest(&db_dir, "mydb").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename, "legacy_backup.grafeo");
+        assert_eq!(entries[0].database, "mydb");
+        assert_eq!(entries[0].kind, "full");
+    }
+
+    #[test]
+    fn list_from_manifest_nonexistent_dir() {
+        let entries =
+            BackupService::list_from_manifest(Path::new("/nonexistent/path"), "test").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // delete_backup validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delete_backup_rejects_db_name_traversal() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            BackupService::delete_backup("../evil", "backup.grafeo", backup_dir.path()),
+            Err(ServiceError::BadRequest(_))
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // segment_to_entry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn segment_to_entry_maps_fields() {
+        let seg = BackupSegment {
+            filename: "test.grafeo".to_string(),
+            kind: BackupKind::Full,
+            size_bytes: 1024,
+            created_at_ms: 1_705_282_245_123,
+            start_epoch: grafeo_common::types::EpochId::new(1),
+            end_epoch: grafeo_common::types::EpochId::new(5),
+            checksum: 42,
+        };
+        let entry = segment_to_entry(seg, "mydb".to_string());
+        assert_eq!(entry.filename, "test.grafeo");
+        assert_eq!(entry.database, "mydb");
+        assert_eq!(entry.kind, "full");
+        assert_eq!(entry.size_bytes, 1024);
+        assert_eq!(entry.start_epoch, 1);
+        assert_eq!(entry.end_epoch, 5);
+        assert_eq!(entry.checksum, 42);
+        assert_eq!(entry.created_at, "2024-01-15T01:30:45.123Z");
+    }
+
+    #[test]
+    fn segment_to_entry_incremental() {
+        let seg = BackupSegment {
+            filename: "inc.grafeo".to_string(),
+            kind: BackupKind::Incremental,
+            size_bytes: 512,
+            created_at_ms: 0,
+            start_epoch: grafeo_common::types::EpochId::new(3),
+            end_epoch: grafeo_common::types::EpochId::new(7),
+            checksum: 99,
+        };
+        let entry = segment_to_entry(seg, "db2".to_string());
+        assert_eq!(entry.kind, "incremental");
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_migrated (idempotent wrapper)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_migrated_is_idempotent() {
+        let backup_dir = tempfile::tempdir().unwrap();
+        let root = backup_dir.path();
+
+        let legacy = "mydb_2024_01_15_10_30_45.grafeo";
+        std::fs::write(root.join(legacy), b"data").unwrap();
+
+        ensure_migrated(root);
+        ensure_migrated(root); // second call should not panic
+
+        assert!(root.join("mydb").join(legacy).exists());
     }
 
     #[tokio::test]

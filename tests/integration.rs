@@ -6695,3 +6695,228 @@ async fn auth_tx_rollback_owner_mismatch_rejected() {
         "owner token should be able to rollback its own transaction"
     );
 }
+
+/// Scoped token denied on tx/begin for out-of-scope database.
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn auth_tx_begin_denied_for_out_of_scope_database() {
+    use grafeo_service::auth::TokenScope;
+
+    let scope = TokenScope {
+        role: grafeo_service::auth::Role::ReadWrite,
+        databases: vec!["default".to_string()],
+    };
+    let (base, admin_token, tokens) =
+        spawn_server_with_token_store("admin-tok-tx", vec![("scoped-tx-tok", "tx-svc", scope)])
+            .await;
+    let scoped_token = &tokens[0].0;
+    let client = Client::new();
+
+    // Admin creates "otherdb"
+    let resp = client
+        .post(format!("{base}/db"))
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .json(&json!({"name": "otherdb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Scoped token can begin tx on "default" (in scope)
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .json(&json!({"database": "default"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "scoped token should begin tx on in-scope db"
+    );
+
+    // Scoped token denied tx/begin on "otherdb" (out of scope)
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .json(&json!({"database": "otherdb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "scoped token should be denied tx/begin on out-of-scope db, got {}",
+        resp.status()
+    );
+}
+
+/// Scoped token denied batch query on out-of-scope database.
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn auth_batch_denied_for_out_of_scope_database() {
+    use grafeo_service::auth::TokenScope;
+
+    let scope = TokenScope {
+        role: grafeo_service::auth::Role::ReadWrite,
+        databases: vec!["default".to_string()],
+    };
+    let (base, admin_token, tokens) = spawn_server_with_token_store(
+        "admin-tok-batch",
+        vec![("scoped-batch-tok", "batch-svc", scope)],
+    )
+    .await;
+    let scoped_token = &tokens[0].0;
+    let client = Client::new();
+
+    // Admin creates "batchdb"
+    let resp = client
+        .post(format!("{base}/db"))
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .json(&json!({"name": "batchdb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Scoped token denied batch on "batchdb" (out of scope)
+    let resp = client
+        .post(format!("{base}/batch"))
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .json(&json!({
+            "queries": [{"query": "MATCH (n) RETURN n"}],
+            "database": "batchdb"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "scoped token should be denied batch on out-of-scope db"
+    );
+}
+
+/// WebSocket query denied for out-of-scope database.
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn auth_websocket_denied_for_out_of_scope_database() {
+    use grafeo_service::auth::TokenScope;
+    use tokio_tungstenite::tungstenite;
+
+    let scope = TokenScope {
+        role: grafeo_service::auth::Role::ReadWrite,
+        databases: vec!["default".to_string()],
+    };
+    let (base, admin_token, tokens) =
+        spawn_server_with_token_store("admin-tok-ws", vec![("scoped-ws-tok", "ws-svc", scope)])
+            .await;
+    let scoped_token = &tokens[0].0;
+    let client = Client::new();
+
+    // Admin creates "wsdb"
+    let resp = client
+        .post(format!("{base}/db"))
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .json(&json!({"name": "wsdb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Connect WebSocket with scoped token
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .header("Host", "localhost")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    use futures_util::{SinkExt, StreamExt};
+
+    // Send query targeting out-of-scope database
+    let msg = json!({
+        "type": "query",
+        "id": "q1",
+        "query": "MATCH (n) RETURN n",
+        "database": "wsdb"
+    });
+    ws.send(tungstenite::Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    let response = ws.next().await.unwrap().unwrap();
+    let resp_json: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+    assert_eq!(
+        resp_json["type"], "error",
+        "websocket should return error for out-of-scope db"
+    );
+    assert_eq!(resp_json["error"], "forbidden");
+
+    ws.close(None).await.ok();
+}
+
+/// Database info/stats/schema denied for out-of-scope database.
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn auth_database_info_denied_for_out_of_scope() {
+    use grafeo_service::auth::TokenScope;
+
+    let scope = TokenScope {
+        role: grafeo_service::auth::Role::ReadWrite,
+        databases: vec!["default".to_string()],
+    };
+    let (base, admin_token, tokens) = spawn_server_with_token_store(
+        "admin-tok-info",
+        vec![("scoped-info-tok", "info-svc", scope)],
+    )
+    .await;
+    let scoped_token = &tokens[0].0;
+    let client = Client::new();
+
+    // Admin creates "infodb"
+    let resp = client
+        .post(format!("{base}/db"))
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .json(&json!({"name": "infodb"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Scoped token denied GET /db/infodb (info)
+    let resp = client
+        .get(format!("{base}/db/infodb"))
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "info should be denied for out-of-scope db"
+    );
+
+    // Scoped token denied GET /db/infodb/stats
+    let resp = client
+        .get(format!("{base}/db/infodb/stats"))
+        .header("Authorization", format!("Bearer {scoped_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "stats should be denied for out-of-scope db"
+    );
+}
