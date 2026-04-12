@@ -45,7 +45,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.5.36",
+        version = "0.5.37",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -86,10 +86,16 @@ pub use state::AppState;
         routes::admin::admin_memory_usage,
         routes::admin::admin_write_snapshot,
         routes::admin::admin_compact,
+        routes::admin::admin_create_projection,
+        routes::admin::admin_list_projections,
+        routes::admin::admin_drop_projection,
+        routes::admin::admin_validate_shacl,
         routes::backup::create_backup,
+        routes::backup::create_incremental_backup,
         routes::backup::list_backups,
         routes::backup::list_all_backups,
         routes::backup::restore_backup,
+        routes::backup::restore_to_epoch,
         routes::backup::delete_backup,
         routes::backup::download_backup,
         routes::search::vector_search,
@@ -118,8 +124,14 @@ pub use state::AppState;
             grafeo_service::types::CreateSchemaRequest,
             grafeo_service::types::ImportTsvRequest,
             grafeo_service::types::ImportResponse,
+            grafeo_service::types::CreateProjectionRequest,
+            grafeo_service::types::ProjectionListResponse,
+            grafeo_service::types::ShaclValidateRequest,
+            grafeo_service::types::ShaclValidationReport,
+            grafeo_service::types::ShaclViolation,
             grafeo_service::types::BackupEntry,
             grafeo_service::types::RestoreRequest,
+            grafeo_service::types::RestoreToEpochRequest,
             SearchResponse,
         )
     ),
@@ -235,10 +247,32 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::admin_write_snapshot),
         )
         .route("/admin/{db}/compact", post(routes::admin::admin_compact))
+        // Graph projections
+        .route(
+            "/admin/{db}/projections",
+            get(routes::admin::admin_list_projections).post(routes::admin::admin_create_projection),
+        )
+        .route(
+            "/admin/{db}/projections/{name}",
+            delete(routes::admin::admin_drop_projection),
+        )
+        // SHACL validation
+        .route(
+            "/admin/{db}/validate/shacl",
+            post(routes::admin::admin_validate_shacl),
+        )
         // Backup & Restore
         .route("/admin/{db}/backup", post(routes::backup::create_backup))
+        .route(
+            "/admin/{db}/backup/incremental",
+            post(routes::backup::create_incremental_backup),
+        )
         .route("/admin/{db}/backups", get(routes::backup::list_backups))
         .route("/admin/{db}/restore", post(routes::backup::restore_backup))
+        .route(
+            "/admin/{db}/restore/epoch",
+            post(routes::backup::restore_to_epoch),
+        )
         .route("/backups", get(routes::backup::list_all_backups))
         .route(
             "/admin/{db}/backups/{filename}",

@@ -98,6 +98,15 @@ tracing = ["grafeo-engine/tracing"]
 triple-store = ["grafeo-engine/triple-store"]
 rdf = ["triple-store"]  # deprecated alias
 
+# Engine: SHACL constraint validation
+shacl = ["grafeo-engine/shacl", "sparql"]
+
+# Engine: Ring Index for RDF (compact wavelet-tree triple index)
+ring-index = ["grafeo-engine/ring-index", "triple-store"]
+
+# Engine: Arrow IPC export
+arrow-export = ["grafeo-engine/arrow-export"]
+
 # Schema loading
 owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
 rdfs-schema = ["owl-schema"]

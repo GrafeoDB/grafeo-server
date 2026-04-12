@@ -131,6 +131,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-array"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "772bd34cacdda8baec9418d80d23d0fb4d50ef0735685bd45158b83dfeb6e62d"
+dependencies = [
+ "ahash",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "chrono",
+ "half",
+ "hashbrown 0.16.1",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-buffer"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "898f4cf1e9598fdb77f356fdf2134feedfd0ee8d5a4e0a5f573e7d0aec16baa4"
+dependencies = [
+ "bytes",
+ "half",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-data"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42d10beeab2b1c3bb0b53a00f7c944a178b622173a5c7bcabc3cb45d90238df4"
+dependencies = [
+ "arrow-buffer",
+ "arrow-schema",
+ "half",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-ipc"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "609a441080e338147a84e8e6904b6da482cefb957c5cdc0f3398872f69a315d0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "arrow-select",
+ "flatbuffers",
+]
+
+[[package]]
+name = "arrow-schema"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c30a1365d7a7dc50cc847e54154e6af49e4c4b0fddc9f607b687f29212082743"
+
+[[package]]
+name = "arrow-select"
+version = "58.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78694888660a9e8ac949853db393af2a8b8fc82c19ce333132dfa2e72cc1a7fe"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "num-traits",
+]
+
+[[package]]
 name = "async-compression"
 version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1023,6 +1100,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags",
+ "rustc_version",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1253,9 +1340,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.36"
+version = "0.5.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17f2fae9de59f79c714be04dd9ef0b9a48295d22ef2c18cd4c8de7c28476704"
+checksum = "ea0e09f1d8141e4bcefa30440dc27eba2a803f71bf94b2e452d5dbc40aa25c9b"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -1271,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1287,9 +1374,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.36"
+version = "0.5.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe736f6273a0b9e15396509742aca31218a820afe5bce0fb4bd655a7418d9026"
+checksum = "12f43b3fd1dcc08af34baa2f2a37371a31102d79d231c59e1d3b0919f83ffbe8"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1309,9 +1396,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.36"
+version = "0.5.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3971ad73e091e58266407c1d7fe5fed26cbdc10a44d519ef99fb88dcd1311190"
+checksum = "f5fb4daa51baa3f60c03dcf4c964f76e1777b8fe530867617ceee6bcb13b2fb7"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1339,12 +1426,15 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.36"
+version = "0.5.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cc90650b6bed906ece44d665691cf37ba6f2311764ff944694daf416eff83f3"
+checksum = "9b61af581329324e68d6a08edf583b569c2811b75bb01e035d6bcd67057695e1"
 dependencies = [
  "anyhow",
  "arcstr",
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
  "bincode",
  "crc32fast",
  "crossbeam",
@@ -1372,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1388,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "async-stream",
  "axum",
@@ -1419,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "serde",
  "serde_json",
@@ -1427,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1452,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1481,9 +1571,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.5.36"
+version = "0.5.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d65b3872f5cf024eee5d3677c8d869c373aa4a6161d7c8c3849b323994fe7e"
+checksum = "e7383f75036747ddf0b2ab3cd0056c0c05a33d885fdb9bd27ddb13332a21763c"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1501,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1510,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.5.36"
+version = "0.5.37"
 dependencies = [
  "axum",
  "grafeo-service",
@@ -1597,6 +1687,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3282,6 +3374,15 @@ name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
 
 [[package]]
 name = "rustix"

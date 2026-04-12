@@ -58,6 +58,7 @@ sync = ["grafeo-service/sync"]
 push-changefeed = ["grafeo-service/push-changefeed", "sync"]
 replication = ["grafeo-service/replication", "dep:reqwest", "sync"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:hyper", "dep:hyper-util"]
+arrow-export = ["grafeo-service/arrow-export"]
 
 [lints]
 workspace = true

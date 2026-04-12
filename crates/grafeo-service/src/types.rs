@@ -455,6 +455,14 @@ pub struct RestoreRequest {
     pub backup: String,
 }
 
+/// Request to restore a database to a specific epoch.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RestoreToEpochRequest {
+    /// Target epoch to restore to.
+    pub epoch: u64,
+}
+
 // ============================================================================
 // Token management types
 // ============================================================================
@@ -556,6 +564,32 @@ pub struct CreateSchemaRequest {
 }
 
 // ============================================================================
+// Graph projection types
+// ============================================================================
+
+/// Request to create a graph projection.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateProjectionRequest {
+    /// Name for the projection.
+    pub name: String,
+    /// Node labels to include (empty = all nodes).
+    #[serde(default)]
+    pub node_labels: Vec<String>,
+    /// Edge types to include (empty = all edges).
+    #[serde(default)]
+    pub edge_types: Vec<String>,
+}
+
+/// Response for listing graph projections.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProjectionListResponse {
+    /// Named projections in the database.
+    pub projections: Vec<String>,
+}
+
+// ============================================================================
 // Bulk import types
 // ============================================================================
 
@@ -594,6 +628,54 @@ pub struct ImportResponse {
     pub nodes_created: usize,
     /// Number of edges created.
     pub edges_created: usize,
+}
+
+// ============================================================================
+// SHACL validation types
+// ============================================================================
+
+/// Request to validate RDF data against SHACL shapes.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ShaclValidateRequest {
+    /// SHACL shapes graph (Turtle syntax).
+    pub shapes_graph: String,
+    /// Named data graph to validate. If omitted, validates the default graph.
+    #[serde(default)]
+    pub data_graph: Option<String>,
+}
+
+/// SHACL validation report.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ShaclValidationReport {
+    /// Whether the data conforms to all shapes.
+    pub conforms: bool,
+    /// Individual constraint violations.
+    pub results: Vec<ShaclViolation>,
+}
+
+/// A single SHACL constraint violation.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ShaclViolation {
+    /// The focus node that violated the constraint.
+    pub focus_node: String,
+    /// The constraint component that was violated.
+    pub constraint: String,
+    /// The source shape that defined the constraint.
+    pub source_shape: String,
+    /// Severity level: "Violation", "Warning", or "Info".
+    pub severity: String,
+    /// The value that caused the violation, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The property path, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[cfg(test)]

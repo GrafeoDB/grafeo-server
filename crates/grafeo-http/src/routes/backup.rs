@@ -229,6 +229,65 @@ pub async fn download_backup(
     Ok((headers, body))
 }
 
+/// Create an incremental backup.
+///
+/// Exports WAL records since the last backup. Requires a persistent database
+/// with at least one prior full backup.
+#[utoipa::path(
+    post,
+    path = "/admin/{db}/backup/incremental",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    responses(
+        (status = 200, description = "Incremental backup created", body = types::BackupEntry),
+        (status = 400, description = "Not a persistent database", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn create_incremental_backup(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+) -> Result<Json<types::BackupEntry>, ApiError> {
+    auth.check_admin()?;
+    let backup_dir = require_backup_dir(&state)?;
+    let entry = BackupService::backup_incremental(state.databases(), &db, &backup_dir).await?;
+    Ok(Json(entry))
+}
+
+/// Restore a database to a specific epoch.
+///
+/// Replays the backup chain (full + incrementals) up to the target epoch,
+/// then hot-swaps the database handle.
+#[utoipa::path(
+    post,
+    path = "/admin/{db}/restore/epoch",
+    params(
+        ("db" = String, Path, description = "Database name"),
+    ),
+    request_body = types::RestoreToEpochRequest,
+    responses(
+        (status = 204, description = "Database restored to epoch"),
+        (status = 400, description = "Invalid request", body = crate::error::ErrorBody),
+        (status = 403, description = "Server is read-only", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn restore_to_epoch(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+    Json(req): Json<types::RestoreToEpochRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    auth.check_admin()?;
+    let backup_dir = require_backup_dir(&state)?;
+    BackupService::restore_to_epoch(state.databases(), &db, req.epoch, &backup_dir).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 fn require_backup_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
     state
         .backup_dir()
@@ -239,4 +298,58 @@ fn require_backup_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> 
         })
         .map(|p| p.to_path_buf())
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app() -> axum::Router {
+        let state = crate::AppState::new_in_memory(300);
+        crate::router(state)
+    }
+
+    #[tokio::test]
+    async fn incremental_backup_no_backup_dir() {
+        // In-memory AppState has no backup dir configured
+        let resp = app()
+            .oneshot(
+                Request::post("/admin/default/backup/incremental")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_no_backup_dir() {
+        let resp = app()
+            .oneshot(
+                Request::post("/admin/default/restore/epoch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"epoch": 1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn incremental_backup_database_not_found() {
+        let resp = app()
+            .oneshot(
+                Request::post("/admin/nonexistent/backup/incremental")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 400 because backup dir not configured (checked before DB lookup)
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

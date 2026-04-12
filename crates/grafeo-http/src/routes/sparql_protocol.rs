@@ -13,11 +13,12 @@
 //! Response format is negotiated via the `Accept` header:
 //! - `application/sparql-results+json` for SELECT/ASK (default)
 //! - `application/json` for Grafeo's native JSON format
-//! - `text/turtle` for CONSTRUCT/DESCRIBE (future)
+//! - `text/turtle` for CONSTRUCT/DESCRIBE
+//! - `application/n-triples` for CONSTRUCT/DESCRIBE
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 
 use grafeo_service::query::QueryService;
@@ -40,6 +41,8 @@ const CT_JSON: &str = "application/json";
 
 const ACCEPT_SPARQL_JSON: &str = "application/sparql-results+json";
 const ACCEPT_JSON: &str = "application/json";
+const ACCEPT_TURTLE: &str = "text/turtle";
+const ACCEPT_NTRIPLES: &str = "application/n-triples";
 
 // ---------------------------------------------------------------------------
 // GET /db/{name}/sparql?query=...
@@ -191,6 +194,15 @@ pub async fn sparql_post(
 // ---------------------------------------------------------------------------
 
 /// Picks the response format based on the `Accept` header.
+///
+/// For CONSTRUCT/DESCRIBE results (columns: subject, predicate, object):
+/// - `text/turtle`: Turtle serialization
+/// - `application/n-triples`: N-Triples serialization
+/// - Default: W3C SPARQL Results JSON (bindings format)
+///
+/// For SELECT/ASK results:
+/// - `application/sparql-results+json` (default): W3C SPARQL Results JSON
+/// - `application/json`: Grafeo native JSON
 fn format_sparql_response(
     result: grafeo_engine::database::QueryResult,
     headers: &HeaderMap,
@@ -200,6 +212,23 @@ fn format_sparql_response(
         .and_then(|v| v.to_str().ok())
         .unwrap_or(ACCEPT_SPARQL_JSON);
 
+    // CONSTRUCT/DESCRIBE: columns are [subject, predicate, object]
+    let is_triples = result.columns.len() == 3
+        && result.columns[0] == "subject"
+        && result.columns[1] == "predicate"
+        && result.columns[2] == "object";
+
+    if is_triples && accept.contains(ACCEPT_TURTLE) {
+        return turtle_response(&result);
+    }
+    if is_triples && accept.contains(ACCEPT_NTRIPLES) {
+        return ntriples_response(&result);
+    }
+    // For triples with no specific RDF format requested, default to Turtle
+    if is_triples && (accept.contains("*/*") || accept == ACCEPT_SPARQL_JSON) {
+        return turtle_response(&result);
+    }
+
     if accept.contains(ACCEPT_JSON) && !accept.contains(ACCEPT_SPARQL_JSON) {
         // Explicit request for Grafeo's native JSON format.
         streaming_json_response(result)
@@ -207,6 +236,40 @@ fn format_sparql_response(
         // Default: W3C SPARQL Results JSON.
         sparql_results_json_response(result)
     }
+}
+
+/// Serializes CONSTRUCT/DESCRIBE results as triples with the given Content-Type.
+///
+/// Values are converted to proper N-Triples term syntax (IRIs wrapped in
+/// angle brackets, literals quoted with datatype annotations, etc.).
+fn triples_response(result: &grafeo_engine::database::QueryResult, content_type: &str) -> Response {
+    use super::graph_store::value_to_nt_term;
+
+    let mut lines = Vec::new();
+    for row in result.rows() {
+        if row.len() >= 3 {
+            let s = value_to_nt_term(&row[0]);
+            let p = value_to_nt_term(&row[1]);
+            let o = value_to_nt_term(&row[2]);
+            lines.push(format!("{s} {p} {o} ."));
+        }
+    }
+    let body = lines.join("\n");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", content_type)
+        .body(Body::from(body))
+        .expect("valid response")
+}
+
+/// Serializes CONSTRUCT/DESCRIBE results as Turtle.
+fn turtle_response(result: &grafeo_engine::database::QueryResult) -> Response {
+    triples_response(result, "text/turtle; charset=utf-8")
+}
+
+/// Serializes CONSTRUCT/DESCRIBE results as N-Triples.
+fn ntriples_response(result: &grafeo_engine::database::QueryResult) -> Response {
+    triples_response(result, "application/n-triples; charset=utf-8")
 }
 
 #[cfg(test)]
@@ -472,6 +535,58 @@ mod tests {
                 .unwrap();
             assert!(ct.contains("application/json"), "ct: {ct}");
             assert!(!ct.contains("sparql-results"), "ct: {ct}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // triples_response / turtle / ntriples helpers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_turtle_for_construct() {
+        let resp = app()
+            .oneshot(
+                Request::get(
+                    "/db/default/sparql?query=CONSTRUCT%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%201"
+                )
+                    .header("accept", "text/turtle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.contains("turtle"), "ct: {ct}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_ntriples_for_construct() {
+        let resp = app()
+            .oneshot(
+                Request::get(
+                    "/db/default/sparql?query=CONSTRUCT%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%201"
+                )
+                    .header("accept", "application/n-triples")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(ct.contains("n-triples"), "ct: {ct}");
         }
     }
 }
