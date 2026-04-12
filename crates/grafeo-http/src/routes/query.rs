@@ -17,13 +17,39 @@ use crate::state::AppState;
 use crate::types::{QueryRequest, QueryResponse};
 
 /// Check if the client accepts Arrow IPC format.
+///
+/// Parses the `Accept` header respecting quality values: a media type
+/// with `q=0` is explicitly rejected and must not match.
 #[cfg(feature = "arrow-export")]
 fn accepts_arrow(headers: &HeaderMap) -> bool {
-    headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .map(|a| a.contains("application/vnd.apache.arrow.stream"))
-        .unwrap_or(false)
+    const ARROW_MIME: &str = "application/vnd.apache.arrow.stream";
+    let accept = match headers.get("accept").and_then(|v| v.to_str().ok()) {
+        Some(a) => a,
+        None => return false,
+    };
+    for part in accept.split(',') {
+        let part = part.trim();
+        if !part.contains(ARROW_MIME) {
+            continue;
+        }
+        // Check for an explicit q=0 (rejected).
+        let q = part
+            .split(';')
+            .filter_map(|p| {
+                let p = p.trim();
+                p.strip_prefix("q=").or_else(|| p.strip_prefix("q ="))
+            })
+            .next();
+        match q {
+            Some(v) => {
+                if v.trim().parse::<f32>().unwrap_or(1.0) > 0.0 {
+                    return true;
+                }
+            }
+            None => return true,
+        }
+    }
+    false
 }
 
 /// Serialize a query result as Arrow IPC.

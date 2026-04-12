@@ -647,7 +647,7 @@ impl AdminService {
             } else {
                 session.validate_shacl(&shapes)
             }
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            .map_err(|e| ServiceError::BadRequest(e.to_string()))?;
 
             Ok(types::ShaclValidationReport {
                 conforms: report.conforms,

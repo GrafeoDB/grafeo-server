@@ -175,6 +175,10 @@ impl BackupService {
             ));
         }
 
+        // Resolve the per-db backup subdirectory before transitioning state,
+        // so validation errors don't orphan the entry in Restoring.
+        let backup_sub = db_backup_dir(backup_dir, db_name)?;
+
         if !entry.set_restoring() {
             return Err(ServiceError::Conflict(
                 "database is already being restored".to_string(),
@@ -183,7 +187,6 @@ impl BackupService {
 
         let db_dir = data_dir.join(db_name);
         let db_file = db_dir.join("data.grafeo");
-        let backup_sub = db_backup_dir(backup_dir, db_name)?;
 
         let epoch_id = grafeo_common::types::EpochId::new(target_epoch);
         let backup_dir_clone = backup_sub.clone();

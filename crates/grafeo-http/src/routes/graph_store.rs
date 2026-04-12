@@ -402,6 +402,31 @@ struct ParsedBody {
     lines: Vec<String>,
 }
 
+/// Validates that a Turtle `@prefix`/`@base` directive body contains only
+/// the expected content (prefix name + IRI) and nothing that could inject
+/// additional SPARQL statements when embedded in the query prologue.
+fn validate_turtle_directive(rest: &str, kind: &str) -> Result<(), ApiError> {
+    // The directive body must not contain characters that could break out
+    // of the prologue: newlines, semicolons, or braces.
+    if rest.contains('\n')
+        || rest.contains('\r')
+        || rest.contains(';')
+        || rest.contains('{')
+        || rest.contains('}')
+    {
+        return Err(ApiError::bad_request(format!(
+            "invalid @{kind} directive: contains disallowed characters"
+        )));
+    }
+    // Must contain a valid IRI (enclosed in angle brackets).
+    if !rest.contains('<') || !rest.contains('>') {
+        return Err(ApiError::bad_request(format!(
+            "invalid @{kind} directive: missing IRI"
+        )));
+    }
+    Ok(())
+}
+
 /// Parses the request body into data lines and optional prologue declarations.
 ///
 /// Accepts `application/n-triples` and `text/turtle`.
@@ -455,10 +480,12 @@ fn parse_body_to_ntriples(headers: &HeaderMap, body: &Bytes) -> Result<ParsedBod
                 if let Some(rest) = trimmed.strip_prefix("@prefix") {
                     // @prefix foo: <uri> . → PREFIX foo: <uri>
                     let rest = rest.trim_end().trim_end_matches('.').trim_end();
+                    validate_turtle_directive(rest, "prefix")?;
                     prologue.push(format!("PREFIX{rest}"));
                 } else if let Some(rest) = trimmed.strip_prefix("@base") {
                     // @base <uri> . → BASE <uri>
                     let rest = rest.trim_end().trim_end_matches('.').trim_end();
+                    validate_turtle_directive(rest, "base")?;
                     prologue.push(format!("BASE{rest}"));
                 } else {
                     lines.push(line.to_string());
@@ -493,7 +520,7 @@ fn build_insert_data(target: &GraphTarget, parsed: &ParsedBody) -> String {
 
 /// Converts a Grafeo `Value` to an N-Triples term string.
 #[allow(clippy::match_same_arms)]
-fn value_to_nt_term(value: &grafeo_common::Value) -> String {
+pub(crate) fn value_to_nt_term(value: &grafeo_common::Value) -> String {
     use grafeo_common::Value;
     match value {
         Value::String(s) => {

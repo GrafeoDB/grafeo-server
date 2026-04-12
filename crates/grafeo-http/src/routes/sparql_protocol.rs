@@ -239,13 +239,18 @@ fn format_sparql_response(
 }
 
 /// Serializes CONSTRUCT/DESCRIBE results as triples with the given Content-Type.
+///
+/// Values are converted to proper N-Triples term syntax (IRIs wrapped in
+/// angle brackets, literals quoted with datatype annotations, etc.).
 fn triples_response(result: &grafeo_engine::database::QueryResult, content_type: &str) -> Response {
+    use super::graph_store::value_to_nt_term;
+
     let mut lines = Vec::new();
     for row in result.rows() {
         if row.len() >= 3 {
-            let s = &row[0];
-            let p = &row[1];
-            let o = &row[2];
+            let s = value_to_nt_term(&row[0]);
+            let p = value_to_nt_term(&row[1]);
+            let o = value_to_nt_term(&row[2]);
             lines.push(format!("{s} {p} {o} ."));
         }
     }
