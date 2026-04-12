@@ -428,11 +428,10 @@ fn parse_body_to_ntriples(headers: &HeaderMap, body: &Bytes) -> Result<Vec<Strin
                 .collect())
         }
         CT_TURTLE => {
-            // Full Turtle parsing requires grafeo-core >= 0.5.30.
-            Err(ApiError::bad_request(
-                "text/turtle input is not yet supported for Graph Store Protocol. \
-                 Use application/n-triples instead.",
-            ))
+            // Turtle syntax is valid inside SPARQL INSERT DATA blocks,
+            // so we pass each line through as-is. The SPARQL parser handles
+            // @prefix, blank nodes, and all Turtle syntax.
+            Ok(text.lines().map(String::from).collect())
         }
         _ => Err(ApiError::bad_request(format!(
             "unsupported Content-Type: {base_ct}. Expected application/n-triples"
