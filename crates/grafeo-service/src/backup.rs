@@ -150,13 +150,16 @@ impl BackupService {
             )));
         }
 
+        // Resolve the per-db backup subdirectory before transitioning state,
+        // so validation errors don't orphan the entry in Restoring.
+        let db_dir = db_backup_dir(backup_dir, db_name)?;
+
         if !entry.set_restoring() {
             return Err(ServiceError::Conflict(
                 "database is already being restored".to_string(),
             ));
         }
 
-        let db_dir = db_backup_dir(backup_dir, db_name)?;
         let (result, has_valid_handle) =
             Self::do_restore(&entry, db_name, backup_path, &db_dir, data_dir).await;
 
@@ -185,11 +188,11 @@ impl BackupService {
             );
         }
 
+        // Manager-wide read-only is rejected in restore_database() before we get here,
+        // so the only fallback cases here are in-memory and Windows.
         let safety_dir = backup_dir.to_path_buf();
         let safety_db = entry.db();
-        let use_chain_api = safety_db.path().is_some()
-            && !cfg!(target_os = "windows")
-            && !safety_db.path().map_or(true, |_| false); // persistent + not read-only checked above
+        let use_chain_api = safety_db.path().is_some() && !cfg!(target_os = "windows");
         let (save_result, safety_file) = if use_chain_api {
             let dir = safety_dir.clone();
             let result = tokio::task::spawn_blocking(move || {

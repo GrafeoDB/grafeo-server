@@ -118,11 +118,14 @@ pub async fn restore_backup(
     auth.check_admin()?;
     let backup_dir = require_backup_dir(&state)?;
 
-    if req.backup.contains('/') || req.backup.contains('\\') || req.backup.contains("..") {
-        return Err(grafeo_service::error::ServiceError::BadRequest(
-            "invalid backup filename".to_string(),
-        )
-        .into());
+    // Validate both params — axum percent-decodes path segments
+    for param in [&db, &req.backup] {
+        if param.contains('/') || param.contains('\\') || param.contains("..") {
+            return Err(grafeo_service::error::ServiceError::BadRequest(
+                "invalid path parameter".to_string(),
+            )
+            .into());
+        }
     }
 
     let backup_path = backup_dir.join(&db).join(&req.backup);
