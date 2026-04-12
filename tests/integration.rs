@@ -5921,14 +5921,12 @@ async fn gwp_auth_bearer_token_allows_query() {
     let mut stream = stream;
     let mut found_success = false;
     while let Some(msg) = stream.next().await {
-        if let Ok(resp) = msg {
-            if let Some(gwp::proto::execute_response::Frame::Summary(summary)) = resp.frame {
-                if let Some(status) = summary.status {
-                    if status.code == "00000" {
-                        found_success = true;
-                    }
-                }
-            }
+        if let Ok(resp) = msg
+            && let Some(gwp::proto::execute_response::Frame::Summary(summary)) = resp.frame
+            && let Some(status) = summary.status
+            && status.code == "00000"
+        {
+            found_success = true;
         }
     }
     assert!(
@@ -6067,15 +6065,13 @@ async fn gwp_auth_read_only_token_cannot_write() {
     use futures_util::StreamExt;
     let mut found_error = false;
     while let Some(msg) = stream.next().await {
-        if let Ok(resp) = msg {
-            if let Some(gwp::proto::execute_response::Frame::Summary(summary)) = resp.frame {
-                if let Some(status) = summary.status {
-                    // A non-success GQLSTATUS indicates an error.
-                    if status.code != "00000" {
-                        found_error = true;
-                    }
-                }
-            }
+        if let Ok(resp) = msg
+            && let Some(gwp::proto::execute_response::Frame::Summary(summary)) = resp.frame
+            && let Some(status) = summary.status
+            && status.code != "00000"
+        {
+            // A non-success GQLSTATUS indicates an error.
+            found_error = true;
         }
     }
     assert!(found_error, "read-only token should not allow writes");

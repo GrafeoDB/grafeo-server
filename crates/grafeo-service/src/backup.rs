@@ -228,7 +228,7 @@ impl BackupService {
                     true,
                 );
             }
-            Ok(Ok(_)) => {}
+            Ok(Ok(())) => {}
         }
 
         // 2. Close the old handle
@@ -395,12 +395,11 @@ impl BackupService {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if let Ok(mut backups) = Self::list_from_manifest(&path, name) {
-                        all.append(&mut backups);
-                    }
-                }
+            if path.is_dir()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && let Ok(mut backups) = Self::list_from_manifest(&path, name)
+            {
+                all.append(&mut backups);
             }
         }
 
@@ -449,8 +448,7 @@ impl BackupService {
                         .modified()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
+                        .map_or(0, |d| d.as_millis() as u64);
                     entries.push(types::BackupEntry {
                         filename: fname.to_owned(),
                         database: db_name.to_owned(),
@@ -660,10 +658,8 @@ fn migrate_legacy_backups(backup_dir: &Path) {
         let target_dir = backup_dir.join(&db_name);
         if std::fs::create_dir_all(&target_dir).is_ok() {
             let target = target_dir.join(fname);
-            if !target.exists() {
-                if std::fs::rename(&path, &target).is_ok() {
-                    tracing::info!(filename = %fname, database = %db_name, "Migrated legacy backup");
-                }
+            if !target.exists() && std::fs::rename(&path, &target).is_ok() {
+                tracing::info!(filename = %fname, database = %db_name, "Migrated legacy backup");
             }
         }
     }
