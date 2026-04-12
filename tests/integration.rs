@@ -5158,12 +5158,13 @@ async fn bolt_route_returns_routing_table() {
 // Backup & Restore
 // ---------------------------------------------------------------------------
 
-/// Boots a server with backup configured, returning (base_url, backup_tempdir).
-/// The TempDir must be kept alive for the duration of the test.
-async fn spawn_server_with_backup() -> (String, TempDir) {
+/// Boots a server with persistent storage and backup configured.
+/// Returns (base_url, data_tempdir, backup_tempdir).
+async fn spawn_server_with_backup() -> (String, TempDir, TempDir) {
+    let data_dir = TempDir::new().unwrap();
     let backup_dir = TempDir::new().unwrap();
     let config = grafeo_service::ServiceConfig {
-        data_dir: None,
+        data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
         read_only: false,
         session_ttl: 300,
         query_timeout: 30,
@@ -5189,7 +5190,7 @@ async fn spawn_server_with_backup() -> (String, TempDir) {
         grafeo_service::types::EnabledFeatures::default(),
     );
     let base = spawn_server_from_state(state).await;
-    (base, backup_dir)
+    (base, data_dir, backup_dir)
 }
 
 #[tokio::test]
@@ -5207,7 +5208,7 @@ async fn backup_requires_configuration() {
 
 #[tokio::test]
 async fn backup_create_and_list() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     // Create a backup
@@ -5238,7 +5239,7 @@ async fn backup_create_and_list() {
 
 #[tokio::test]
 async fn backup_list_all() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     client
@@ -5256,7 +5257,7 @@ async fn backup_list_all() {
 
 #[tokio::test]
 async fn backup_not_found_database() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     let resp = client
@@ -5269,7 +5270,7 @@ async fn backup_not_found_database() {
 
 #[tokio::test]
 async fn backup_delete() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     let resp = client
@@ -5281,7 +5282,7 @@ async fn backup_delete() {
     let filename = body["filename"].as_str().unwrap();
 
     let resp = client
-        .delete(format!("{base}/backups/{filename}"))
+        .delete(format!("{base}/admin/default/backups/{filename}"))
         .send()
         .await
         .unwrap();
@@ -5298,11 +5299,11 @@ async fn backup_delete() {
 
 #[tokio::test]
 async fn backup_delete_not_found() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     let resp = client
-        .delete(format!("{base}/backups/nonexistent.grafeo"))
+        .delete(format!("{base}/admin/default/backups/nonexistent.grafeo"))
         .send()
         .await
         .unwrap();
@@ -5311,7 +5312,7 @@ async fn backup_delete_not_found() {
 
 #[tokio::test]
 async fn backup_download() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     let resp = client
@@ -5324,7 +5325,7 @@ async fn backup_download() {
     let size = body["size_bytes"].as_u64().unwrap();
 
     let resp = client
-        .get(format!("{base}/backups/download/{filename}"))
+        .get(format!("{base}/admin/default/backups/download/{filename}"))
         .send()
         .await
         .unwrap();
@@ -5344,11 +5345,11 @@ async fn backup_download() {
 
 #[tokio::test]
 async fn backup_download_not_found() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
     let resp = client
-        .get(format!("{base}/backups/download/nonexistent.grafeo"))
+        .get(format!("{base}/admin/default/backups/download/nonexistent.grafeo"))
         .send()
         .await
         .unwrap();
@@ -5371,10 +5372,23 @@ async fn restore_requires_backup_config() {
 
 #[tokio::test]
 async fn restore_in_memory_rejected() {
-    let (base, _dir) = spawn_server_with_backup().await;
+    let (base, _data, _dir) = spawn_server_with_backup().await;
     let client = Client::new();
 
-    // Create a backup first so the file exists
+    // Create an in-memory database
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "memdb",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Create a backup of the persistent default db so we have a file
     let resp = client
         .post(format!("{base}/admin/default/backup"))
         .send()
@@ -5383,9 +5397,9 @@ async fn restore_in_memory_rejected() {
     let body: Value = resp.json().await.unwrap();
     let filename = body["filename"].as_str().unwrap();
 
-    // Restore should fail because the default db is in-memory
+    // Restore to the in-memory db should fail
     let resp = client
-        .post(format!("{base}/admin/default/restore"))
+        .post(format!("{base}/admin/memdb/restore"))
         .json(&json!({ "backup": filename }))
         .send()
         .await
@@ -5509,7 +5523,7 @@ async fn restore_data_rollback() {
         .await
         .unwrap();
     let filename = resp["filename"].as_str().unwrap().to_string();
-    assert_eq!(resp["node_count"], 10);
+    assert_eq!(resp["kind"], "full");
 
     // Add more nodes
     seed_nodes(&client, &base, "default", 5).await;
@@ -5610,7 +5624,7 @@ async fn backup_download_integrity() {
     let filename = resp["filename"].as_str().unwrap().to_string();
 
     let bytes = client
-        .get(format!("{base}/backups/download/{filename}"))
+        .get(format!("{base}/admin/default/backups/download/{filename}"))
         .send()
         .await
         .unwrap()
@@ -5620,7 +5634,9 @@ async fn backup_download_integrity() {
     assert!(!bytes.is_empty());
 
     // Write downloaded bytes as a new file in the backup dir
-    let copy_path = backup_dir.path().join("downloaded_copy.grafeo");
+    let db_backup = backup_dir.path().join("default");
+    std::fs::create_dir_all(&db_backup).unwrap();
+    let copy_path = db_backup.join("downloaded_copy.grafeo");
     std::fs::write(&copy_path, &bytes).unwrap();
 
     // Mutate
@@ -5646,7 +5662,9 @@ async fn restore_corrupt_backup_recovers() {
     seed_nodes(&client, &base, "default", 10).await;
 
     // Write a corrupt file
-    std::fs::write(backup_dir.path().join("corrupt.grafeo"), b"garbage").unwrap();
+    let db_backup = backup_dir.path().join("default");
+    std::fs::create_dir_all(&db_backup).unwrap();
+    std::fs::write(db_backup.join("corrupt.grafeo"), b"garbage").unwrap();
 
     let resp = client
         .post(format!("{base}/admin/default/restore"))

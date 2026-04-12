@@ -425,7 +425,7 @@ fn default_db_name() -> String {
 // Backup types
 // ============================================================================
 
-/// Information about a single backup file.
+/// Information about a single backup segment.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BackupEntry {
@@ -433,16 +433,18 @@ pub struct BackupEntry {
     pub filename: String,
     /// Database this backup belongs to.
     pub database: String,
+    /// Segment kind: "full" or "incremental".
+    pub kind: String,
     /// Backup file size in bytes.
     pub size_bytes: u64,
     /// Backup creation timestamp (ISO 8601).
     pub created_at: String,
-    /// Node count at time of backup.
-    pub node_count: u64,
-    /// Edge count at time of backup.
-    pub edge_count: u64,
-    /// Database epoch at time of backup.
-    pub epoch: u64,
+    /// Start epoch (inclusive).
+    pub start_epoch: u64,
+    /// End epoch (inclusive).
+    pub end_epoch: u64,
+    /// CRC-32 checksum of the backup file.
+    pub checksum: u32,
 }
 
 /// Request to restore a database from a backup.

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use grafeo_engine::{AccessMode, Config, DurabilityMode, GrafeoDB};
+use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 
 use crate::error::ServiceError;
 use crate::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
@@ -153,7 +153,7 @@ impl DatabaseEntry {
 /// Thread-safe registry of named database instances.
 pub struct DatabaseManager {
     databases: DashMap<String, Arc<DatabaseEntry>>,
-    /// If `Some`, databases are persisted under `{data_dir}/{name}/grafeo.db`.
+    /// If `Some`, databases are persisted under `{data_dir}/{name}/data.grafeo`.
     data_dir: Option<PathBuf>,
     /// When `true`, reject all write operations.
     read_only: bool,
@@ -178,21 +178,42 @@ impl DatabaseManager {
         if let Some(ref dir) = mgr.data_dir {
             std::fs::create_dir_all(dir).expect("failed to create data directory");
 
-            // Migration: old layout had `{data_dir}/grafeo.db` directly.
-            // Move it to `{data_dir}/default/grafeo.db`.
-            let old_path = dir.join("grafeo.db");
-            if old_path.exists() {
+            // Migration: old flat layout had `{data_dir}/grafeo.db` directly.
+            // Skip in read-only mode — can't rename on read-only mounts.
+            let old_flat = dir.join("grafeo.db");
+            if !mgr.read_only && old_flat.exists() {
                 let new_dir = dir.join("default");
                 std::fs::create_dir_all(&new_dir).expect("failed to create default db directory");
-                let new_path = new_dir.join("grafeo.db");
+                let new_path = new_dir.join("data.grafeo");
                 if !new_path.exists() {
-                    tracing::info!("Migrating old database layout to default/grafeo.db");
-                    std::fs::rename(&old_path, &new_path).expect("failed to migrate database file");
-                    // Also move WAL file if present
+                    tracing::info!("Migrating old flat layout to default/data.grafeo");
+                    std::fs::rename(&old_flat, &new_path).expect("failed to migrate database file");
                     let old_wal = dir.join("grafeo.db.wal");
                     if old_wal.exists() {
-                        let new_wal = new_dir.join("grafeo.db.wal");
+                        let new_wal = new_dir.join("data.grafeo.wal");
                         let _ = std::fs::rename(&old_wal, &new_wal);
+                    }
+                }
+            }
+
+            // Read-only flat layout: open {data_dir}/grafeo.db directly as "default"
+            if mgr.read_only && old_flat.exists() && !mgr.databases.contains_key("default") {
+                tracing::info!("Opening legacy flat layout in read-only mode");
+                match GrafeoDB::open_read_only(old_flat.to_str().unwrap()) {
+                    Ok(db) => {
+                        mgr.databases.insert(
+                            "default".to_string(),
+                            Arc::new(DatabaseEntry::new(
+                                Arc::new(db),
+                                DatabaseMetadata {
+                                    storage_mode: "persistent".to_string(),
+                                    ..Default::default()
+                                },
+                            )),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to open legacy flat layout");
                     }
                 }
             }
@@ -202,14 +223,31 @@ impl DatabaseManager {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
-                        let db_file = path.join("grafeo.db");
-                        if db_file.exists() {
+                        // Migrate legacy grafeo.db → data.grafeo (skip in read-only mode)
+                        let legacy = path.join("grafeo.db");
+                        let current = path.join("data.grafeo");
+                        if !mgr.read_only && legacy.exists() && !current.exists() {
+                            tracing::info!(path = %path.display(), "Migrating grafeo.db to data.grafeo");
+                            let _ = std::fs::rename(&legacy, &current);
+                            let legacy_wal = path.join("grafeo.db.wal");
+                            if legacy_wal.exists() {
+                                let _ = std::fs::rename(&legacy_wal, path.join("data.grafeo.wal"));
+                            }
+                        }
+
+                        // Try data.grafeo first, fall back to legacy grafeo.db
+                        let db_file = if current.exists() {
+                            current
+                        } else if legacy.exists() {
+                            legacy
+                        } else {
+                            continue;
+                        };
+                        {
                             let name = entry.file_name().to_string_lossy().to_string();
                             tracing::info!(name = %name, read_only = mgr.read_only, "Opening database");
                             let open_result = if mgr.read_only {
-                                let db_config = Config::persistent(db_file.to_str().unwrap())
-                                    .with_access_mode(AccessMode::ReadOnly);
-                                GrafeoDB::with_config(db_config)
+                                GrafeoDB::open_read_only(db_file.to_str().unwrap())
                             } else {
                                 GrafeoDB::open(db_file.to_str().unwrap())
                             };
@@ -242,14 +280,14 @@ impl DatabaseManager {
                 let default_dir = dir.join("default");
                 std::fs::create_dir_all(&default_dir)
                     .expect("failed to create default db directory");
-                let db_path = default_dir.join("grafeo.db");
+                let db_path = default_dir.join("data.grafeo");
                 tracing::info!("Creating default persistent database");
                 let db = if mgr.read_only {
-                    let db_config = Config::persistent(db_path.to_str().unwrap())
-                        .with_access_mode(AccessMode::ReadOnly);
-                    GrafeoDB::with_config(db_config).expect("failed to create default db")
+                    GrafeoDB::open_read_only(db_path.to_str().unwrap())
+                        .expect("failed to create default db")
                 } else {
-                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db")
+                    GrafeoDB::open(db_path.to_str().unwrap())
+                        .expect("failed to create default db")
                 };
                 mgr.databases.insert(
                     "default".to_string(),
@@ -386,7 +424,7 @@ impl DatabaseManager {
                 std::fs::create_dir_all(&db_dir).map_err(|e| {
                     ServiceError::Internal(format!("failed to create directory: {e}"))
                 })?;
-                let db_path = db_dir.join("grafeo.db");
+                let db_path = db_dir.join("data.grafeo");
                 Config::persistent(db_path.to_str().unwrap())
             }
         };
