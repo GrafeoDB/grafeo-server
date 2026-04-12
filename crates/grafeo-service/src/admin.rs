@@ -536,6 +536,59 @@ impl AdminService {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Graph projections
+    // -----------------------------------------------------------------------
+
+    /// Create a graph projection.
+    pub async fn create_projection(
+        databases: &DatabaseManager,
+        db_name: &str,
+        req: types::CreateProjectionRequest,
+    ) -> Result<bool, ServiceError> {
+        if databases.is_read_only() {
+            return Err(ServiceError::ReadOnly);
+        }
+
+        let entry = databases.get_available(db_name)?;
+        tokio::task::spawn_blocking(move || {
+            let spec = grafeo_engine::ProjectionSpec::new()
+                .with_node_labels(req.node_labels)
+                .with_edge_types(req.edge_types);
+            Ok(entry.db().create_projection(req.name, spec))
+        })
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+    }
+
+    /// Drop a graph projection.
+    pub async fn drop_projection(
+        databases: &DatabaseManager,
+        db_name: &str,
+        name: &str,
+    ) -> Result<bool, ServiceError> {
+        if databases.is_read_only() {
+            return Err(ServiceError::ReadOnly);
+        }
+
+        let entry = databases.get_available(db_name)?;
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || Ok(entry.db().drop_projection(&name)))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+    }
+
+    /// List all graph projections in a database.
+    pub async fn list_projections(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<Vec<String>, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+        tokio::task::spawn_blocking(move || Ok(entry.db().list_projections()))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+    }
+
     /// Write a point-in-time snapshot to the `.grafeo` database file.
     ///
     /// Requires the `async-storage` and `grafeo-file` features. Returns an
@@ -569,6 +622,65 @@ impl AdminService {
                 "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
             ))
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHACL validation
+    // -----------------------------------------------------------------------
+
+    /// Validate RDF data against SHACL shapes.
+    #[cfg(feature = "shacl")]
+    #[allow(clippy::unused_async)]
+    pub async fn validate_shacl(
+        databases: &DatabaseManager,
+        db_name: &str,
+        req: &types::ShaclValidateRequest,
+    ) -> Result<types::ShaclValidationReport, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+        let shapes = req.shapes_graph.clone();
+        let data_graph = req.data_graph.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let session = entry.db().session();
+            let report = if let Some(ref dg) = data_graph {
+                session.validate_shacl_graph(dg, &shapes)
+            } else {
+                session.validate_shacl(&shapes)
+            }
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+            Ok(types::ShaclValidationReport {
+                conforms: report.conforms,
+                results: report
+                    .results
+                    .iter()
+                    .map(|r| types::ShaclViolation {
+                        focus_node: format!("{}", r.focus_node),
+                        constraint: r.source_constraint_component.clone(),
+                        source_shape: format!("{}", r.source_shape),
+                        severity: format!("{:?}", r.severity),
+                        value: r.value.as_ref().map(|v| format!("{v}")),
+                        path: r.result_path.as_ref().map(|p| format!("{p:?}")),
+                        message: r.message.clone(),
+                    })
+                    .collect(),
+            })
+        })
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+    }
+
+    /// Validate RDF data against SHACL shapes (stub when feature disabled).
+    #[cfg(not(feature = "shacl"))]
+    #[allow(clippy::unused_async)]
+    pub async fn validate_shacl(
+        _databases: &DatabaseManager,
+        _db_name: &str,
+        _req: &types::ShaclValidateRequest,
+    ) -> Result<types::ShaclValidationReport, ServiceError> {
+        Err(ServiceError::BadRequest(
+            "shacl feature not enabled".to_owned(),
+        ))
     }
 }
 

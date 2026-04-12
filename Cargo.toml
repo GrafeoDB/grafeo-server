@@ -163,12 +163,21 @@ tracing = ["grafeo-service/tracing"]
 triple-store = ["grafeo-service/triple-store"]
 rdf = ["triple-store"]  # deprecated alias
 
+# Engine: SHACL constraint validation (forwarded)
+shacl = ["grafeo-service/shacl"]
+
+# Engine: Ring Index for RDF (forwarded)
+ring-index = ["grafeo-service/ring-index"]
+
+# Engine: Arrow IPC export (forwarded)
+arrow-export = ["grafeo-service/arrow-export", "grafeo-http?/arrow-export"]
+
 # Tiers (named build profiles)
 full = [
     "lpg", "http", "studio", "all-languages", "algos", "ai", "triple-store", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
     "temporal", "import", "metrics", "tracing", "sync", "push-changefeed", "replication",
-    "async-storage", "compact-store",
+    "async-storage", "compact-store", "shacl", "ring-index", "arrow-export",
 ]
 
 [dependencies]

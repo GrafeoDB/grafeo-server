@@ -327,6 +327,15 @@ fn detect_features() -> EnabledFeatures {
     if cfg!(feature = "parquet-import") {
         engine.push("parquet-import".to_string());
     }
+    if cfg!(feature = "shacl") {
+        engine.push("shacl".to_string());
+    }
+    if cfg!(feature = "ring-index") {
+        engine.push("ring-index".to_string());
+    }
+    if cfg!(feature = "arrow-export") {
+        engine.push("arrow-export".to_string());
+    }
 
     let mut server = Vec::new();
     if cfg!(feature = "auth") {

@@ -4,6 +4,7 @@
 //! delegated to `grafeo_service::query::QueryService`.
 
 use axum::extract::{Json, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use grafeo_engine::database::QueryResult;
 
@@ -14,6 +15,28 @@ use crate::error::{ApiError, ErrorBody};
 use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 use crate::types::{QueryRequest, QueryResponse};
+
+/// Check if the client accepts Arrow IPC format.
+#[cfg(feature = "arrow-export")]
+fn accepts_arrow(headers: &HeaderMap) -> bool {
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.contains("application/vnd.apache.arrow.stream"))
+        .unwrap_or(false)
+}
+
+/// Serialize a query result as Arrow IPC.
+#[cfg(feature = "arrow-export")]
+fn arrow_ipc_response(result: QueryResult) -> Result<Response, ApiError> {
+    let ipc_bytes = result
+        .to_arrow_ipc()
+        .map_err(|e| ApiError::internal(format!("Arrow export failed: {e}")))?;
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", "application/vnd.apache.arrow.stream")
+        .body(axum::body::Body::from(ipc_bytes))
+        .expect("valid response"))
+}
 
 /// Shared implementation for all auto-commit query endpoints.
 async fn execute_query(
@@ -65,11 +88,16 @@ async fn execute_query(
 pub async fn query(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, None).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, None).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }
 
 /// Execute a Cypher query (auto-commit).
@@ -87,11 +115,16 @@ pub async fn query(
 pub async fn cypher(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, Some("cypher")).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, Some("cypher")).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }
 
 /// Execute a GraphQL query (auto-commit).
@@ -109,11 +142,16 @@ pub async fn cypher(
 pub async fn graphql(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, Some("graphql")).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, Some("graphql")).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }
 
 /// Execute a Gremlin query (auto-commit).
@@ -131,11 +169,16 @@ pub async fn graphql(
 pub async fn gremlin(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, Some("gremlin")).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, Some("gremlin")).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }
 
 /// Execute a SPARQL query (auto-commit).
@@ -153,11 +196,16 @@ pub async fn gremlin(
 pub async fn sparql(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, Some("sparql")).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, Some("sparql")).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }
 
 /// Execute a SQL/PGQ query (auto-commit).
@@ -178,9 +226,14 @@ pub async fn sparql(
 pub async fn sql(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(streaming_json_response(
-        execute_query(&state, &auth, &req, Some("sql-pgq")).await?,
-    ))
+    let result = execute_query(&state, &auth, &req, Some("sql-pgq")).await?;
+    #[cfg(feature = "arrow-export")]
+    if accepts_arrow(&headers) {
+        return arrow_ipc_response(result);
+    }
+    let _ = &headers;
+    Ok(streaming_json_response(result))
 }

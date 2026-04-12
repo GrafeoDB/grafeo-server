@@ -238,3 +238,93 @@ pub async fn admin_write_snapshot(
     AdminService::write_snapshot(state.databases(), &db).await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+/// Create a graph projection.
+#[utoipa::path(
+    post, path = "/admin/{db}/projections",
+    params(("db" = String, Path, description = "Database name")),
+    request_body = types::CreateProjectionRequest,
+    responses(
+        (status = 200, description = "Projection created (true) or already exists (false)", body = bool),
+        (status = 403, description = "Read-only mode", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_create_projection(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+    Json(req): Json<types::CreateProjectionRequest>,
+) -> Result<Json<bool>, ApiError> {
+    auth.check_admin()?;
+    let created = AdminService::create_projection(state.databases(), &db, req).await?;
+    Ok(Json(created))
+}
+
+/// List graph projections.
+#[utoipa::path(
+    get, path = "/admin/{db}/projections",
+    params(("db" = String, Path, description = "Database name")),
+    responses(
+        (status = 200, description = "Projection list", body = types::ProjectionListResponse),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_list_projections(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+) -> Result<Json<types::ProjectionListResponse>, ApiError> {
+    auth.check_admin()?;
+    let projections = AdminService::list_projections(state.databases(), &db).await?;
+    Ok(Json(types::ProjectionListResponse { projections }))
+}
+
+/// Drop a graph projection.
+#[utoipa::path(
+    delete, path = "/admin/{db}/projections/{name}",
+    params(
+        ("db" = String, Path, description = "Database name"),
+        ("name" = String, Path, description = "Projection name"),
+    ),
+    responses(
+        (status = 200, description = "Projection dropped (true) or not found (false)", body = bool),
+        (status = 403, description = "Read-only mode", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_drop_projection(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((db, name)): Path<(String, String)>,
+) -> Result<Json<bool>, ApiError> {
+    auth.check_admin()?;
+    let dropped = AdminService::drop_projection(state.databases(), &db, &name).await?;
+    Ok(Json(dropped))
+}
+
+/// Validate RDF data against SHACL shapes.
+#[utoipa::path(
+    post, path = "/admin/{db}/validate/shacl",
+    params(("db" = String, Path, description = "Database name")),
+    request_body = types::ShaclValidateRequest,
+    responses(
+        (status = 200, description = "Validation report", body = types::ShaclValidationReport),
+        (status = 400, description = "Feature not enabled or invalid shapes", body = crate::error::ErrorBody),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_validate_shacl(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+    Json(req): Json<types::ShaclValidateRequest>,
+) -> Result<Json<types::ShaclValidationReport>, ApiError> {
+    auth.check_admin()?;
+    let report = AdminService::validate_shacl(state.databases(), &db, &req).await?;
+    Ok(Json(report))
+}
