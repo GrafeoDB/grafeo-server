@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn to_role_default() {
         let req = TokenScopeRequest::default();
-        assert_eq!(req.to_role().unwrap(), grafeo_engine::auth::Role::Admin);
+        assert_eq!(req.to_role().unwrap(), grafeo_engine::auth::Role::ReadOnly);
     }
 
     #[test]
@@ -675,16 +675,16 @@ mod tests {
     #[test]
     fn token_scope_request_default_fields() {
         let req = TokenScopeRequest::default();
-        assert_eq!(req.role, "admin");
+        assert_eq!(req.role, "read-only");
         assert!(req.databases.is_empty());
     }
 
     #[test]
     fn token_scope_request_serde_default_role() {
-        // Deserialize with no role field: should use the serde default ("admin")
+        // Deserialize with no role field: should use the serde default ("read-only")
         let json = r#"{"databases": ["mydb"]}"#;
         let req: TokenScopeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.role, "admin");
+        assert_eq!(req.role, "read-only");
         assert_eq!(req.databases, vec!["mydb"]);
     }
 
