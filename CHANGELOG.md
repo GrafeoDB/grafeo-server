@@ -5,6 +5,31 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.37] - 2026-04-12
+
+SPARQL compliance, SHACL validation, graph projections, incremental backup, Arrow export, and engine 0.5.37 alignment.
+
+### Added
+
+- **Graph projection endpoints**: `POST/GET /admin/{db}/projections`, `DELETE /admin/{db}/projections/{name}` for creating filtered virtual subgraphs (node labels + edge types)
+- **SHACL validation** (`shacl` feature): `POST /admin/{db}/validate/shacl` validates default or named graph against SHACL shapes, returns conformance report with violations
+- **Incremental backup**: `POST /admin/{db}/backup/incremental` for WAL-based incremental snapshots, `POST /admin/{db}/restore/epoch` for point-in-time recovery
+- **Arrow IPC export** (`arrow-export` feature): `Accept: application/vnd.apache.arrow.stream` on any query endpoint returns Arrow IPC bytes (DuckDB, Polars, pandas compatible)
+- **Turtle content negotiation**: `text/turtle` accepted in Graph Store Protocol with proper `@prefix`/`@base` extraction to SPARQL prologue
+- **Feature flags**: `shacl`, `ring-index`, `arrow-export` added to feature chain and `full` tier
+
+### Changed
+
+- **grafeo-engine 0.5.37**: SPARQL compliance pass (18 spec gaps, 109 W3C tests), Ring Index planner, dictionary encoding, COUNT(*) fast paths, SHACL validation, Arrow bulk export, SPARQL EXPLAIN/PROFILE
+- **Backup workarounds removed**: `backup_full()` now works on Windows and read-only databases (grafeo#258 fixed in engine). Removed platform and access-mode guards from `backup_database()` and `do_restore()`
+
+### Fixed
+
+- **Turtle `@prefix`/`@base` in INSERT DATA**: Graph Store Protocol now extracts directives into SPARQL prologue instead of embedding them inside data blocks (per SPARQL 1.1 Update spec)
+- **Graph Store error message**: unsupported content type error now lists both accepted types
+- Incremental backup could skip WAL records (grafeo#258)
+- File manager leaked temp files on checkpoint failure (grafeo#258)
+
 ## [0.5.36] - 2026-04-12
 
 Role-based access control, per-database token scoping, and engine 0.5.36 alignment (Identity, Role, session-level permission enforcement).
