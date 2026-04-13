@@ -4,6 +4,7 @@
 //! via `Deref`, and adds transport-specific config like CORS origins and
 //! compiled feature flags.
 
+use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,9 @@ struct AppInner {
     service: ServiceState,
     cors_origins: Vec<String>,
     enabled_features: EnabledFeatures,
+    trusted_proxies: Vec<IpAddr>,
+    max_body_size: usize,
+    max_batch_size: usize,
 }
 
 impl Deref for AppState {
@@ -46,6 +50,30 @@ impl AppState {
                 service,
                 cors_origins,
                 enabled_features,
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
+            }),
+        }
+    }
+
+    /// Creates a new HTTP application state with additional configuration.
+    pub fn with_config(
+        service: ServiceState,
+        cors_origins: Vec<String>,
+        enabled_features: EnabledFeatures,
+        trusted_proxies: Vec<IpAddr>,
+        max_body_size: usize,
+        max_batch_size: usize,
+    ) -> Self {
+        Self {
+            inner: Arc::new(AppInner {
+                service,
+                cors_origins,
+                enabled_features,
+                trusted_proxies,
+                max_body_size,
+                max_batch_size,
             }),
         }
     }
@@ -57,6 +85,9 @@ impl AppState {
                 service: ServiceState::new_in_memory(session_ttl),
                 cors_origins: vec![],
                 enabled_features: EnabledFeatures::default(),
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
             }),
         }
     }
@@ -69,6 +100,9 @@ impl AppState {
                 service: ServiceState::new_in_memory_with_auth(session_ttl, auth_token),
                 cors_origins: vec![],
                 enabled_features: EnabledFeatures::default(),
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
             }),
         }
     }
@@ -81,6 +115,9 @@ impl AppState {
                 service: ServiceState::new_in_memory_with_basic_auth(session_ttl, user, password),
                 cors_origins: vec![],
                 enabled_features: EnabledFeatures::default(),
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
             }),
         }
     }
@@ -92,6 +129,9 @@ impl AppState {
                 service: ServiceState::new_in_memory_read_only(session_ttl),
                 cors_origins: vec![],
                 enabled_features: EnabledFeatures::default(),
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
             }),
         }
     }
@@ -111,6 +151,9 @@ impl AppState {
                 ),
                 cors_origins: vec![],
                 enabled_features: EnabledFeatures::default(),
+                trusted_proxies: vec![],
+                max_body_size: 2_097_152,
+                max_batch_size: 1000,
             }),
         }
     }
@@ -128,5 +171,20 @@ impl AppState {
     /// Returns a reference to the underlying service state.
     pub fn service(&self) -> &ServiceState {
         &self.inner.service
+    }
+
+    /// Returns the trusted proxy IPs for X-Forwarded-For parsing.
+    pub fn trusted_proxies(&self) -> &[IpAddr] {
+        &self.inner.trusted_proxies
+    }
+
+    /// Returns the configured maximum request body size in bytes.
+    pub fn max_body_size(&self) -> usize {
+        self.inner.max_body_size
+    }
+
+    /// Returns the configured maximum batch query count.
+    pub fn max_batch_size(&self) -> usize {
+        self.inner.max_batch_size
     }
 }

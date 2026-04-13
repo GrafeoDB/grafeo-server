@@ -104,6 +104,9 @@ pub struct TokenRecord {
     pub token_hash: String,
     pub scope: TokenScope,
     pub created_at: String,
+    /// Unix timestamp when the token expires. `None` for non-expiring tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 /// In-flight identity attached to a request after authentication.
@@ -121,6 +124,25 @@ impl TokenInfo {
     }
 }
 
+/// Trait for pluggable authentication providers.
+///
+/// Transport crates extract credentials from their wire format and call
+/// these methods. The `StaticAuthProvider` is the built-in implementation
+/// using bearer tokens, basic auth, and a token store.
+pub trait AuthProviderTrait: Send + Sync {
+    /// Check a bearer token or API key. Returns token identity on success.
+    fn check_bearer(&self, token: &str) -> Option<TokenInfo>;
+    /// Check HTTP Basic credentials. Returns true on match.
+    fn check_basic(&self, user: &str, password: &str) -> bool;
+    /// Whether any authentication method is configured.
+    fn is_enabled(&self) -> bool;
+    /// Returns a reference to the token store, if available.
+    #[cfg(feature = "auth")]
+    fn token_store(&self) -> Option<&crate::token_store::TokenStore> {
+        None
+    }
+}
+
 /// Authentication provider supporting bearer tokens, token store, and HTTP Basic auth.
 ///
 /// `check_bearer` checks the legacy single token first (from `--auth-token`),
@@ -128,7 +150,7 @@ impl TokenInfo {
 /// Basic auth always returns admin scope.
 #[cfg(feature = "auth")]
 #[derive(Clone)]
-pub struct AuthProvider {
+pub struct StaticAuthProvider {
     /// Legacy single bearer token (from --auth-token CLI flag).
     bearer_token: Option<String>,
     basic_user: Option<String>,
@@ -138,7 +160,7 @@ pub struct AuthProvider {
 }
 
 #[cfg(feature = "auth")]
-impl AuthProvider {
+impl StaticAuthProvider {
     /// Creates an auth provider if any credentials are configured.
     /// Returns `None` if no authentication is set up.
     pub fn new(
@@ -230,6 +252,29 @@ impl AuthProvider {
         }
     }
 }
+
+#[cfg(feature = "auth")]
+impl AuthProviderTrait for StaticAuthProvider {
+    fn check_bearer(&self, token: &str) -> Option<TokenInfo> {
+        self.check_bearer(token)
+    }
+
+    fn check_basic(&self, user: &str, password: &str) -> bool {
+        self.check_basic(user, password)
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.is_enabled()
+    }
+
+    fn token_store(&self) -> Option<&crate::token_store::TokenStore> {
+        self.token_store()
+    }
+}
+
+/// Backward-compatible type alias for the built-in authentication provider.
+#[cfg(feature = "auth")]
+pub type AuthProvider = StaticAuthProvider;
 
 /// Constant-time comparison of two byte slices.
 ///
@@ -591,6 +636,7 @@ mod tests {
                     databases: vec!["mydb".to_string()],
                 },
                 created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
             })
             .unwrap();
 
@@ -628,6 +674,7 @@ mod tests {
                 token_hash: hash,
                 scope: TokenScope::default(),
                 created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
             })
             .unwrap();
 
@@ -710,6 +757,7 @@ mod tests {
                     databases: vec!["db1".to_string()],
                 },
                 created_at: "2024-06-01T00:00:00Z".to_string(),
+                expires_at: None,
             })
             .unwrap();
 
@@ -796,7 +844,10 @@ mod tests {
         map.insert("fresh".to_string(), ("val".to_string(), Instant::now()));
         map.insert(
             "stale".to_string(),
-            ("val".to_string(), Instant::now() - Duration::from_secs(10)),
+            (
+                "val".to_string(),
+                Instant::now().checked_sub(Duration::from_secs(10)).unwrap(),
+            ),
         );
 
         assert_eq!(map.len(), 2);
@@ -843,7 +894,9 @@ mod tests {
 
         let map: Arc<dashmap::DashMap<String, ((), Instant)>> = Arc::new(dashmap::DashMap::new());
 
-        let old = Instant::now() - Duration::from_secs(100);
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(100))
+            .unwrap();
         map.insert("x".to_string(), ((), old));
         map.insert("y".to_string(), ((), old));
 

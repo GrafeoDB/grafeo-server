@@ -36,9 +36,13 @@ pub async fn create_token(
         )
     })?;
 
-    let (record, plaintext) =
-        grafeo_service::token_service::TokenService::create_token(store, req.name, req.scope)
-            .map_err(ApiError::from)?;
+    let (record, plaintext) = grafeo_service::token_service::TokenService::create_token(
+        store,
+        req.name,
+        req.scope,
+        req.expires_in,
+    )
+    .map_err(ApiError::from)?;
 
     Ok(Json(types::TokenResponse {
         id: record.id,
@@ -48,6 +52,7 @@ pub async fn create_token(
             databases: record.scope.databases,
         },
         created_at: record.created_at,
+        expires_at: record.expires_at,
         token: Some(plaintext),
     }))
 }

@@ -41,6 +41,14 @@ pub async fn batch_query(
         }));
     }
 
+    let max = state.max_batch_size();
+    if req.queries.len() > max {
+        return Err(ApiError::bad_request(format!(
+            "batch contains {} queries, exceeds maximum of {max}",
+            req.queries.len()
+        )));
+    }
+
     let db_name = grafeo_service::resolve_db_name(req.database.as_deref());
     auth.check_db_access(db_name)?;
     let timeout = state.effective_timeout(req.timeout_ms);

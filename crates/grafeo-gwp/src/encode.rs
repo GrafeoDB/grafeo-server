@@ -211,8 +211,8 @@ mod tests {
             GwpValue::Integer(42)
         ));
         assert!(matches!(
-            grafeo_to_gwp(&Value::Float64(3.14)),
-            GwpValue::Float(f) if (f - 3.14).abs() < f64::EPSILON
+            grafeo_to_gwp(&Value::Float64(1.23)),
+            GwpValue::Float(f) if (f - 1.23).abs() < f64::EPSILON
         ));
     }
 

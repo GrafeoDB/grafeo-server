@@ -496,6 +496,10 @@ pub struct CreateTokenRequest {
     /// Permission scope.
     #[serde(default)]
     pub scope: TokenScopeRequest,
+    /// Token lifetime in seconds. If set, the token will expire after this
+    /// duration. Omit for a non-expiring token.
+    #[serde(default)]
+    pub expires_in: Option<u64>,
 }
 
 /// Scope definition in a create/update request.
@@ -538,6 +542,9 @@ pub struct TokenResponse {
     pub name: String,
     pub scope: TokenScopeRequest,
     pub created_at: String,
+    /// Unix timestamp when the token expires. `null` if non-expiring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
     /// The plaintext token. Only present in the create response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,

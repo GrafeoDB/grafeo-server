@@ -177,6 +177,7 @@ impl AdminService {
                     metric.as_deref(),
                     m.map(|v| v as usize),
                     ef_construction.map(|v| v as usize),
+                    None, // quantization: expose in a future release
                 )
                 .map_err(|e| ServiceError::BadRequest(e.to_string())),
             #[cfg(not(feature = "vector-index"))]

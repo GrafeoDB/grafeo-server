@@ -36,12 +36,10 @@ fn accepts_arrow(headers: &HeaderMap) -> bool {
             continue;
         }
         // Check for an explicit q=0 (rejected).
-        let q = segments
-            .filter_map(|p| {
-                let p = p.trim();
-                p.strip_prefix("q=").or_else(|| p.strip_prefix("q ="))
-            })
-            .next();
+        let q = segments.find_map(|p| {
+            let p = p.trim();
+            p.strip_prefix("q=").or_else(|| p.strip_prefix("q ="))
+        });
         match q {
             Some(v) => {
                 if v.trim().parse::<f32>().unwrap_or(1.0) > 0.0 {

@@ -159,6 +159,12 @@ impl SessionRegistry {
             s.db_name != db_name
         });
     }
+
+    /// Force-removes all sessions. Used during graceful shutdown after the
+    /// drain timeout expires.
+    pub fn clear_all(&self) {
+        self.sessions.clear();
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +382,29 @@ mod tests {
             result.is_none(),
             "get should return None when session has owner but caller has no token"
         );
+    }
+
+    #[test]
+    fn clear_all_removes_all_sessions() {
+        let reg = SessionRegistry::new();
+        let (s1, db) = make_session("default");
+        let id1 = reg.create(s1, &db, None);
+        let (s2, _) = make_session("default");
+        let id2 = reg.create(s2, "other", None);
+        assert_eq!(reg.active_count(), 2);
+
+        reg.clear_all();
+
+        assert_eq!(reg.active_count(), 0);
+        assert!(!reg.exists(&id1));
+        assert!(!reg.exists(&id2));
+    }
+
+    #[test]
+    fn clear_all_on_empty_registry_is_noop() {
+        let reg = SessionRegistry::new();
+        reg.clear_all();
+        assert_eq!(reg.active_count(), 0);
     }
 
     #[test]

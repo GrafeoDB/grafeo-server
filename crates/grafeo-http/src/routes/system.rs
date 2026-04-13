@@ -32,6 +32,32 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
+/// Readiness probe for orchestrators (e.g., Kubernetes).
+///
+/// Returns 200 when the server is ready to accept requests (default database
+/// is accessible). Returns 503 when the server is starting up, mid-restore,
+/// or otherwise unable to serve queries.
+pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
+    // Check that the default database is accessible
+    let dbs = state.databases();
+    if dbs.get("default").is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "default database not available"
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ready"
+        })),
+    )
+}
+
 /// Get system resource availability.
 ///
 /// Returns total/available memory, disk space, available database types,

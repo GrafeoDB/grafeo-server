@@ -103,7 +103,7 @@ impl IntoResponse for ApiError {
             }
             ServiceError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", Some(msg.clone())),
             ServiceError::ReadOnly => (
-                StatusCode::FORBIDDEN,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "read_only",
                 Some("server is in read-only mode".to_string()),
             ),
@@ -114,11 +114,7 @@ impl IntoResponse for ApiError {
             ),
             ServiceError::Internal(msg) => {
                 tracing::error!(%msg, "internal server error");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    Some(msg.clone()),
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", None)
             }
         };
 
@@ -213,10 +209,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_maps_to_403() {
+    async fn read_only_maps_to_503() {
         use grafeo_service::error::ServiceError;
         let (status, body) = parse_response(ApiError::from(ServiceError::ReadOnly)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "read_only");
         assert_eq!(body["detail"], "server is in read-only mode");
     }
@@ -238,7 +234,8 @@ mod tests {
         let (status, body) = parse_response(ApiError::internal("disk full")).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"], "internal_error");
-        assert_eq!(body["detail"], "disk full");
+        // Detail is scrubbed to prevent leaking implementation details
+        assert!(body["detail"].is_null());
     }
 
     #[tokio::test]

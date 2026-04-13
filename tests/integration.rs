@@ -3568,7 +3568,7 @@ async fn read_only_create_database_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "read_only");
@@ -3586,7 +3586,7 @@ async fn read_only_delete_database_rejected() {
         .unwrap();
     // Default DB deletion is rejected (either 403 for read-only or 400 for protected)
     let status = resp.status().as_u16();
-    assert!(status == 403 || status == 400);
+    assert!(status == 503 || status == 400);
 }
 
 #[tokio::test]
@@ -3600,7 +3600,7 @@ async fn read_only_admin_create_index_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "read_only");
@@ -3684,7 +3684,7 @@ async fn read_only_wal_checkpoint_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 }
 
 #[tokio::test]
@@ -3699,7 +3699,7 @@ async fn read_only_named_graph_mutations_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     // List graphs should work
     let resp = client
@@ -6125,6 +6125,7 @@ async fn gwp_auth_read_only_token_cannot_write() {
                 databases: vec![],
             },
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: None,
         })
         .unwrap();
 
@@ -6305,6 +6306,7 @@ async fn bolt_auth_read_only_token_cannot_write() {
                 databases: vec![],
             },
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: None,
         })
         .unwrap();
 
@@ -6388,6 +6390,7 @@ async fn spawn_server_with_token_store(
                 token_hash: hash,
                 scope: scope.clone(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
             })
             .unwrap();
         token_infos.push((plaintext.to_string(), id));
@@ -7050,4 +7053,338 @@ async fn auth_database_info_denied_for_out_of_scope() {
         403,
         "stats should be denied for out-of-scope db"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Edge properties named "source" / "type" survive query round-trip (grafeo#272)
+// ---------------------------------------------------------------------------
+
+/// Edges with properties named "source", "target", "type", or "id" must
+/// survive a JSON round-trip through the query endpoint. These names collide
+/// with structural column names in Arrow/DataFrame export (engine-side fix),
+/// but the HTTP JSON path must always preserve them.
+#[tokio::test]
+async fn edge_property_named_source_survives_json_query() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create nodes and an edge with a "source" property
+    let setup = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (a:A {name:'a'}) CREATE (b:B {name:'b'}) CREATE (a)-[:CALLS {source:'jdt', confidence:0.9}]->(b)"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), 200);
+
+    // Query back the edge with its "source" property
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "MATCH ()-[r:CALLS]->() RETURN r.source AS src, r.confidence AS conf"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "should find exactly one CALLS edge");
+    assert_eq!(rows[0][0], "jdt", "source property should be 'jdt'");
+    assert_eq!(rows[0][1], 0.9, "confidence property should be 0.9");
+}
+
+/// Edges with properties named "type" and "id" must also survive. These
+/// collide with the structural _type and _id columns in edge maps.
+#[tokio::test]
+async fn edge_property_named_type_and_id_survives_json_query() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create edge with properties named "type" and "id"
+    let setup = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (a:X) CREATE (b:Y) CREATE (a)-[:LINK {type:'http', id:'req-42'}]->(b)"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "MATCH ()-[r:LINK]->() RETURN r.type AS t, r.id AS i"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "should find exactly one LINK edge");
+    assert_eq!(rows[0][0], "http", "type property should be 'http'");
+    assert_eq!(rows[0][1], "req-42", "id property should be 'req-42'");
+}
+
+// ---------------------------------------------------------------------------
+// Readiness endpoint (/ready)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ready_endpoint_returns_200() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client.get(format!("{base}/ready")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ready");
+}
+
+// ---------------------------------------------------------------------------
+// Batch query limit enforcement
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batch_exceeding_max_size_rejected() {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        5, // max_batch_size = 5
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 6 queries exceeds the limit of 5
+    let queries: Vec<Value> = (0..6)
+        .map(|i| json!({"query": format!("MATCH (n) RETURN {i}")}))
+        .collect();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": queries}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "bad_request");
+    assert!(
+        body["detail"].as_str().unwrap().contains("exceeds maximum"),
+        "error should mention exceeding the limit"
+    );
+}
+
+#[tokio::test]
+async fn batch_within_limit_succeeds() {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        5,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    let queries: Vec<Value> = (0..3)
+        .map(|i| json!({"query": format!("MATCH (n) RETURN {i}")}))
+        .collect();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": queries}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Security headers present on responses
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn security_headers_present() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket CORS origin validation
+// ---------------------------------------------------------------------------
+
+async fn spawn_server_with_cors(origins: Vec<String>) -> String {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        origins,
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        100,
+    );
+    spawn_server_from_state(state).await
+}
+
+#[tokio::test]
+async fn websocket_cors_allowed_origin_succeeds() {
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://allowed.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    // Connection succeeded: send a ping to confirm it works
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+#[tokio::test]
+async fn websocket_cors_disallowed_origin_rejected() {
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://evil.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    // The upgrade should fail (server returns 403)
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_err(), "disallowed origin should be rejected");
+}
+
+#[tokio::test]
+async fn websocket_cors_wildcard_allows_any_origin() {
+    let base = spawn_server_with_cors(vec!["*".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://any-site.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+#[tokio::test]
+async fn websocket_cors_no_origin_header_allowed() {
+    // When CORS is configured but the client sends no Origin header
+    // (non-browser clients), the connection should be allowed.
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter trusted proxy handling
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rate_limit_xff_trusted_from_loopback() {
+    // Loopback peers are always trusted for XFF. Since our test server
+    // binds to 127.0.0.1, the peer IP is loopback. Different XFF values
+    // should be rate-limited independently.
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory_with_rate_limit(
+            300,
+            2,
+            std::time::Duration::from_secs(60),
+        ),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![], // no explicit trusted proxies needed: loopback is always trusted
+        2_097_152,
+        100,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 2 requests with XFF=10.0.0.1 (uses up that IP's quota)
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // A request with a different XFF should still succeed (different IP bucket)
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }

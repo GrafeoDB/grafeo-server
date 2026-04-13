@@ -437,7 +437,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(qr.columns.len() >= 1);
+        assert!(!qr.columns.is_empty());
     }
 
     #[tokio::test]

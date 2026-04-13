@@ -23,10 +23,12 @@ pub mod tls;
 pub mod types;
 
 use axum::Router;
-use axum::http::{HeaderValue, Method};
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{delete, get, post};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -45,7 +47,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.5.37",
+        version = "0.5.38",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -288,6 +290,7 @@ pub fn router(state: AppState) -> Router {
         .route("/search/hybrid", post(routes::search::hybrid_search))
         // System
         .route("/health", get(routes::system::health))
+        .route("/ready", get(routes::system::readiness))
         .route("/system/resources", get(routes::system::system_resources))
         .route("/metrics", get(routes::system::metrics_endpoint));
 
@@ -323,6 +326,36 @@ pub fn router(state: AppState) -> Router {
         get(routes::replication::get_replication_status),
     );
 
+    // Merge Swagger/OpenAPI routes into the main router BEFORE middleware
+    // layers, so they are subject to auth and rate limiting.
+    #[allow(unused_mut)]
+    let mut openapi = ApiDoc::openapi();
+    #[cfg(feature = "auth")]
+    {
+        use utoipa::OpenApi;
+        openapi.merge(TokenApiDoc::openapi());
+    }
+    let api = api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", openapi));
+
+    // Security response headers
+    let api = api
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
+
+    // Explicit request body size limit
+    let body_limit = state.max_body_size();
+    let api = api.layer(DefaultBodyLimit::max(body_limit));
+
     let api = api
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
@@ -333,32 +366,25 @@ pub fn router(state: AppState) -> Router {
         middleware::replica_guard::replica_guard_middleware,
     ));
 
+    // Middleware ordering (outermost first): rate_limit -> auth -> request_id.
+    // Rate limiting runs before auth so brute-force attempts are throttled
+    // before paying the cost of credential verification.
+    let api = api.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        middleware::rate_limit::rate_limit_middleware,
+    ));
+
     #[cfg(feature = "auth")]
     let api = api.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::auth::auth_middleware,
     ));
 
-    let api = api
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::rate_limit::rate_limit_middleware,
-        ))
-        .layer(axum::middleware::from_fn(
-            middleware::request_id::request_id_middleware,
-        ))
-        .layer(cors_layer(&state))
-        .with_state(state);
-
-    #[allow(unused_mut)]
-    let mut openapi = ApiDoc::openapi();
-    #[cfg(feature = "auth")]
-    {
-        use utoipa::OpenApi;
-        openapi.merge(TokenApiDoc::openapi());
-    }
-
-    api.merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", openapi))
+    api.layer(axum::middleware::from_fn(
+        middleware::request_id::request_id_middleware,
+    ))
+    .layer(cors_layer(&state))
+    .with_state(state)
 }
 
 /// Serve the HTTP router on the given listener with graceful shutdown.

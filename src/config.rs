@@ -93,6 +93,25 @@ pub struct Config {
     #[arg(long, default_value = "pretty", env = "GRAFEO_LOG_FORMAT")]
     pub log_format: String,
 
+    /// Trusted reverse-proxy IPs (comma-separated). X-Forwarded-For is only
+    /// used for rate limiting when the TCP peer matches a trusted proxy.
+    /// Default: loopback only (127.0.0.1, ::1).
+    #[arg(long, env = "GRAFEO_TRUSTED_PROXIES", value_delimiter = ',')]
+    pub trusted_proxies: Vec<String>,
+
+    /// Maximum request body size in bytes (0 = use Axum default of 2 MB).
+    #[arg(long, default_value_t = 2_097_152, env = "GRAFEO_MAX_BODY_SIZE")]
+    pub max_body_size: usize,
+
+    /// Maximum number of queries in a single batch request.
+    #[arg(long, default_value_t = 1000, env = "GRAFEO_MAX_BATCH_SIZE")]
+    pub max_batch_size: usize,
+
+    /// Graceful shutdown timeout in seconds. Active sessions are drained
+    /// during this period before being force-rolled-back.
+    #[arg(long, default_value_t = 30, env = "GRAFEO_SHUTDOWN_TIMEOUT")]
+    pub shutdown_timeout: u64,
+
     /// Rate limit: max requests per window per IP. 0 = disabled.
     #[arg(long, default_value_t = 0, env = "GRAFEO_RATE_LIMIT")]
     pub rate_limit: u64,

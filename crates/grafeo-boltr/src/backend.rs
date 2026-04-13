@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use boltr::error::BoltError;
 use boltr::server::{
@@ -38,6 +39,8 @@ pub struct GrafeoBackend {
     state: ServiceState,
     sessions: DashMap<String, Arc<Mutex<GrafeoSession>>>,
     advertise_addr: Option<SocketAddr>,
+    /// Monotonic counter for generating bookmark strings.
+    bookmark_counter: AtomicU64,
     #[cfg(feature = "auth")]
     pub(crate) pending: PendingAuth,
 }
@@ -48,6 +51,7 @@ impl GrafeoBackend {
             state,
             sessions: DashMap::new(),
             advertise_addr: None,
+            bookmark_counter: AtomicU64::new(1),
             #[cfg(feature = "auth")]
             pending: std::sync::Arc::new(DashMap::new()),
         }
@@ -63,6 +67,7 @@ impl GrafeoBackend {
             state,
             sessions: DashMap::new(),
             advertise_addr: None,
+            bookmark_counter: AtomicU64::new(1),
             pending,
         }
     }
@@ -292,6 +297,7 @@ impl BoltBackend for GrafeoBackend {
         _transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
         let session_arc = self.get_session(session)?;
+        let is_mutation = is_mutation_query(query);
         let statement = query.to_owned();
         let params = convert_params(parameters);
 
@@ -341,7 +347,12 @@ impl BoltBackend for GrafeoBackend {
                 BoltValue::Integer((ms * 1000.0) as i64),
             );
         }
-        summary.insert("type".to_string(), BoltValue::String("r".to_string()));
+        // Report the correct query type to drivers for routing decisions.
+        let query_type = if is_mutation { "w" } else { "r" };
+        summary.insert(
+            "type".to_string(),
+            BoltValue::String(query_type.to_string()),
+        );
 
         Ok(ResultStream {
             metadata: ResultMetadata {
@@ -383,7 +394,15 @@ impl BoltBackend for GrafeoBackend {
         .await
         .map_err(BoltError::backend)?
         .map_err(|e| BoltError::Transaction(e.to_string()))?;
-        Ok(BoltDict::new())
+
+        // Return a monotonic bookmark for causal consistency.
+        let seq = self.bookmark_counter.fetch_add(1, Ordering::Relaxed);
+        let mut meta = BoltDict::new();
+        meta.insert(
+            "bookmark".to_string(),
+            BoltValue::String(format!("grafeo:tx:{seq}")),
+        );
+        Ok(meta)
     }
 
     async fn rollback(
@@ -444,4 +463,18 @@ impl BoltBackend for GrafeoBackend {
             servers,
         })
     }
+}
+
+/// Heuristic to detect mutation queries from the statement text.
+///
+/// Used to set the `type` field in RUN response metadata ("r" for read,
+/// "w" for write). Neo4j drivers use this for routing decisions.
+fn is_mutation_query(statement: &str) -> bool {
+    let upper = statement.to_ascii_uppercase();
+    // Check for mutation keywords that indicate write operations
+    [
+        "INSERT ", "CREATE ", "DELETE ", "SET ", "REMOVE ", "MERGE ", "DROP ", "ALTER ",
+    ]
+    .iter()
+    .any(|kw| upper.contains(kw))
 }

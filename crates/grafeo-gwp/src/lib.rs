@@ -73,7 +73,7 @@ pub struct GwpOptions {
 
     /// Auth provider for handshake credential validation.
     #[cfg(feature = "auth")]
-    pub auth_provider: Option<grafeo_service::auth::AuthProvider>,
+    pub auth_provider: Option<std::sync::Arc<dyn grafeo_service::auth::AuthProviderTrait>>,
 
     /// Shutdown signal. When the future resolves, the server stops
     /// accepting connections, drains in-flight requests, and stops

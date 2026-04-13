@@ -62,19 +62,25 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
             })
         }
         Value::Path { nodes, edges } => {
-            let dict: BoltDict = vec![
-                (
-                    "nodes".to_string(),
-                    BoltValue::List(nodes.iter().map(grafeo_to_bolt).collect()),
-                ),
-                (
-                    "edges".to_string(),
-                    BoltValue::List(edges.iter().map(grafeo_to_bolt).collect()),
-                ),
-            ]
-            .into_iter()
-            .collect();
-            BoltValue::Dict(dict)
+            let bolt_nodes: Vec<boltr::types::BoltNode> =
+                nodes.iter().map(value_to_bolt_node).collect();
+            let bolt_rels: Vec<boltr::types::BoltUnboundRelationship> =
+                edges.iter().map(value_to_bolt_rel).collect();
+            // Build alternating indices: +1, -2, +3, -4, ...
+            // Positive index = forward traversal, negative = backward.
+            // For a simple linear path, all forward: 1, 1, 2, 2, 3, ...
+            let indices: Vec<i64> = (0..bolt_rels.len())
+                .flat_map(|i| {
+                    let rel_idx = (i + 1) as i64;
+                    let node_idx = (i + 1) as i64;
+                    [rel_idx, node_idx]
+                })
+                .collect();
+            BoltValue::Path(boltr::types::BoltPath {
+                nodes: bolt_nodes,
+                rels: bolt_rels,
+                indices,
+            })
         }
         Value::GCounter(counters) => {
             // Resolve to the total count for Bolt clients.
@@ -88,6 +94,87 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
             BoltValue::Integer(pos_sum as i64 - neg_sum as i64)
         }
         _ => BoltValue::Null,
+    }
+}
+
+/// Extracts a `BoltNode` from a Grafeo path node value (typically a `Value::Map`).
+fn value_to_bolt_node(value: &grafeo_common::Value) -> boltr::types::BoltNode {
+    use grafeo_common::Value;
+    if let Value::Map(map) = value {
+        let id = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_id")
+            .and_then(|(_, v)| v.as_int64())
+            .unwrap_or(0);
+        let labels: Vec<String> = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_labels")
+            .and_then(|(_, v)| {
+                if let Value::List(items) = v {
+                    Some(
+                        items
+                            .iter()
+                            .filter_map(|i| i.as_str().map(str::to_owned))
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let properties: BoltDict = map
+            .iter()
+            .filter(|(k, _)| !k.as_str().starts_with('_'))
+            .map(|(k, v)| (k.to_string(), grafeo_to_bolt(v)))
+            .collect();
+        boltr::types::BoltNode {
+            id,
+            labels,
+            properties,
+            element_id: format!("0:default:{id}"),
+        }
+    } else {
+        boltr::types::BoltNode {
+            id: 0,
+            labels: vec![],
+            properties: BoltDict::new(),
+            element_id: String::new(),
+        }
+    }
+}
+
+/// Extracts a `BoltUnboundRelationship` from a Grafeo path edge value.
+fn value_to_bolt_rel(value: &grafeo_common::Value) -> boltr::types::BoltUnboundRelationship {
+    use grafeo_common::Value;
+    if let Value::Map(map) = value {
+        let id = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_id")
+            .and_then(|(_, v)| v.as_int64())
+            .unwrap_or(0);
+        let rel_type = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_type")
+            .and_then(|(_, v)| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let properties: BoltDict = map
+            .iter()
+            .filter(|(k, _)| !k.as_str().starts_with('_'))
+            .map(|(k, v)| (k.to_string(), grafeo_to_bolt(v)))
+            .collect();
+        boltr::types::BoltUnboundRelationship {
+            id,
+            rel_type,
+            properties,
+            element_id: format!("0:default:{id}"),
+        }
+    } else {
+        boltr::types::BoltUnboundRelationship {
+            id: 0,
+            rel_type: String::new(),
+            properties: BoltDict::new(),
+            element_id: String::new(),
+        }
     }
 }
 
@@ -304,21 +391,210 @@ mod tests {
     }
 
     #[test]
-    fn path_encodes_as_dict() {
-        let path = grafeo_common::Value::Path {
-            nodes: vec![
-                grafeo_common::Value::String("n1".into()),
-                grafeo_common::Value::String("n2".into()),
+    fn path_encodes_as_bolt_path() {
+        use std::sync::Arc;
+        // Build a minimal path with map-based nodes and edges
+        let node1 = grafeo_common::Value::Map(Arc::new(
+            [(
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(1),
+            )]
+            .into(),
+        ));
+        let node2 = grafeo_common::Value::Map(Arc::new(
+            [(
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(2),
+            )]
+            .into(),
+        ));
+        let edge = grafeo_common::Value::Map(Arc::new(
+            [
+                (
+                    grafeo_common::PropertyKey::new("_id"),
+                    grafeo_common::Value::Int64(10),
+                ),
+                (
+                    grafeo_common::PropertyKey::new("_type"),
+                    grafeo_common::Value::String("KNOWS".into()),
+                ),
             ]
             .into(),
-            edges: vec![grafeo_common::Value::String("e1".into())].into(),
+        ));
+        let path = grafeo_common::Value::Path {
+            nodes: vec![node1, node2].into(),
+            edges: vec![edge].into(),
         };
         let bolt = grafeo_to_bolt(&path);
-        let BoltValue::Dict(dict) = &bolt else {
-            panic!("expected BoltValue::Dict for path");
+        let BoltValue::Path(bp) = &bolt else {
+            panic!("expected BoltValue::Path, got {bolt:?}");
         };
-        assert!(dict.get("nodes").is_some());
-        assert!(dict.get("edges").is_some());
+        assert_eq!(bp.nodes.len(), 2);
+        assert_eq!(bp.rels.len(), 1);
+        assert_eq!(bp.rels[0].rel_type, "KNOWS");
+        assert_eq!(bp.nodes[0].id, 1);
+        assert_eq!(bp.nodes[1].id, 2);
+    }
+
+    #[test]
+    fn grafeo_to_bolt_bytes() {
+        let val = grafeo_common::Value::Bytes(vec![0xDE, 0xAD].into());
+        assert_eq!(grafeo_to_bolt(&val), BoltValue::Bytes(vec![0xDE, 0xAD]));
+    }
+
+    #[test]
+    fn grafeo_to_bolt_list() {
+        let val = grafeo_common::Value::List(
+            vec![
+                grafeo_common::Value::Int64(1),
+                grafeo_common::Value::String("two".into()),
+            ]
+            .into(),
+        );
+        let bolt = grafeo_to_bolt(&val);
+        assert_eq!(
+            bolt,
+            BoltValue::List(vec![BoltValue::Integer(1), BoltValue::String("two".into())]),
+        );
+    }
+
+    #[test]
+    fn grafeo_to_bolt_map() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([(
+            grafeo_common::PropertyKey::new("key"),
+            grafeo_common::Value::Int64(42),
+        )]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        let bolt = grafeo_to_bolt(&val);
+        let BoltValue::Dict(dict) = &bolt else {
+            panic!("expected BoltValue::Dict, got {bolt:?}");
+        };
+        assert_eq!(dict.get("key"), Some(&BoltValue::Integer(42)));
+    }
+
+    #[test]
+    fn grafeo_to_bolt_gcounter() {
+        use std::sync::Arc;
+        let mut counts = HashMap::new();
+        counts.insert("a".to_string(), 10u64);
+        counts.insert("b".to_string(), 5u64);
+        let val = grafeo_common::Value::GCounter(Arc::new(counts));
+        assert_eq!(grafeo_to_bolt(&val), BoltValue::Integer(15));
+    }
+
+    #[test]
+    fn grafeo_to_bolt_on_counter() {
+        use std::sync::Arc;
+        let mut pos = HashMap::new();
+        pos.insert("a".to_string(), 10u64);
+        let mut neg = HashMap::new();
+        neg.insert("a".to_string(), 3u64);
+        let val = grafeo_common::Value::OnCounter {
+            pos: Arc::new(pos),
+            neg: Arc::new(neg),
+        };
+        assert_eq!(grafeo_to_bolt(&val), BoltValue::Integer(7));
+    }
+
+    #[test]
+    fn bolt_to_grafeo_null() {
+        let result = bolt_to_grafeo(&BoltValue::Null).unwrap();
+        assert_eq!(result, grafeo_common::Value::Null);
+    }
+
+    #[test]
+    fn bolt_to_grafeo_bool() {
+        let result = bolt_to_grafeo(&BoltValue::Boolean(false)).unwrap();
+        assert_eq!(result, grafeo_common::Value::Bool(false));
+    }
+
+    #[test]
+    fn bolt_to_grafeo_integer() {
+        let result = bolt_to_grafeo(&BoltValue::Integer(-7)).unwrap();
+        assert_eq!(result, grafeo_common::Value::Int64(-7));
+    }
+
+    #[test]
+    fn bolt_to_grafeo_float() {
+        let result = bolt_to_grafeo(&BoltValue::Float(1.23)).unwrap();
+        assert_eq!(result, grafeo_common::Value::Float64(1.23));
+    }
+
+    #[test]
+    fn bolt_to_grafeo_bytes() {
+        let result = bolt_to_grafeo(&BoltValue::Bytes(vec![0xCA, 0xFE])).unwrap();
+        assert_eq!(result, grafeo_common::Value::Bytes(vec![0xCA, 0xFE].into()));
+    }
+
+    #[test]
+    fn bolt_to_grafeo_list() {
+        let bolt = BoltValue::List(vec![BoltValue::Integer(1), BoltValue::Integer(2)]);
+        let result = bolt_to_grafeo(&bolt).unwrap();
+        assert_eq!(
+            result,
+            grafeo_common::Value::List(
+                vec![
+                    grafeo_common::Value::Int64(1),
+                    grafeo_common::Value::Int64(2)
+                ]
+                .into()
+            ),
+        );
+    }
+
+    #[test]
+    fn bolt_to_grafeo_dict() {
+        let dict: BoltDict = vec![("x".to_string(), BoltValue::Integer(5))]
+            .into_iter()
+            .collect();
+        let bolt = BoltValue::Dict(dict);
+        let result = bolt_to_grafeo(&bolt).unwrap();
+        if let grafeo_common::Value::Map(map) = result {
+            assert_eq!(
+                map.get(&grafeo_common::PropertyKey::new("x")),
+                Some(&grafeo_common::Value::Int64(5))
+            );
+        } else {
+            panic!("expected Value::Map");
+        }
+    }
+
+    #[test]
+    fn bolt_to_grafeo_unsupported_graph_types_return_none() {
+        // Node, Relationship, Path are not supported as parameters
+        let node = BoltValue::Node(boltr::types::BoltNode {
+            id: 1,
+            labels: vec![],
+            properties: BoltDict::new(),
+            element_id: String::new(),
+        });
+        assert!(bolt_to_grafeo(&node).is_none());
+    }
+
+    #[test]
+    fn convert_params_filters_unsupported() {
+        let mut params = HashMap::new();
+        params.insert("good".into(), BoltValue::Integer(1));
+        params.insert(
+            "bad".into(),
+            BoltValue::Point2D(boltr::types::BoltPoint2D {
+                srid: 4326,
+                x: 0.0,
+                y: 0.0,
+            }),
+        );
+        let result = convert_params(&params);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("good"));
+        assert!(!result.contains_key("bad"));
+    }
+
+    #[test]
+    fn convert_params_empty() {
+        let params = HashMap::new();
+        let result = convert_params(&params);
+        assert!(result.is_empty());
     }
 
     #[test]
