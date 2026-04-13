@@ -64,14 +64,14 @@ impl TokenStore {
         std::fs::rename(&tmp_path, path)
             .map_err(|e| format!("failed to rename token store: {e}"))?;
 
-        // Restrict file permissions on Unix (0600: owner read/write only)
+        // Restrict file permissions on Unix (0600: owner read/write only).
+        // This is a hard error: token hashes must not be world-readable.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(path, perms) {
-                tracing::warn!("failed to restrict token store permissions: {e}");
-            }
+            std::fs::set_permissions(path, perms)
+                .map_err(|e| format!("failed to restrict token store permissions: {e}"))?;
         }
 
         Ok(())
