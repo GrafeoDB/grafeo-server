@@ -40,6 +40,21 @@ Security hardening, operational maturity, auth improvements, Bolt protocol compl
 - **Batch query limit**: `POST /batch` now enforces `--max-batch-size` (default: 1000), preventing unbounded resource consumption
 - **Explicit body size limit**: HTTP request bodies are limited to `--max-body-size` (default: 2 MB) via explicit `DefaultBodyLimit`
 
+### Studio
+
+- **Admin UI redesign**: top nav renames "Admin" to "Databases". New routes: `/databases` (list page with server stats strip and overview cards), `/databases/:name` (flat details page with stats, backups, danger zone), `/tokens` (standalone, visible when `auth` feature is compiled). Legacy `/admin/*` URLs redirect
+- **Backup labels**: optional user-supplied label on full backups, stored in a `labels.json` sidecar per database backup directory. Validated as `[A-Za-z0-9_-]{1,32}`. Corrupt sidecars are logged and ignored so listings still work
+- **Restore to epoch**: UI dialog with epoch number input and clickable backup pills that pre-fill the field. Row-level Restore button disabled on non-full backups with tooltip
+- **Cross-database restore**: `RestoreRequest` accepts optional `source_db` field to restore from another database's backup directory. Enables prod-to-staging restore flows
+- **Studio auth gating**: `/studio` routes gated behind HTTP Basic auth when `--auth-user`/`--auth-password` are set. Browsers show a native credential prompt via `WWW-Authenticate: Basic` on 401
+- **Database sidebar**: sidebar database picker replaced with `<select>` dropdown with inline node/edge counts and "Manage" link to details page
+- **Graph view fix**: node detection now recognizes Grafeo's `_id`/`_labels` format. Edge inference classifies columns as node/integer/other and treats K node columns with (K-1) integer columns as a path. Display labels use `name`/`title`/`id` properties
+
+### Fixed
+
+- **Restore-to-epoch file lock**: the old database handle was not closed before the engine replaced the file on disk, causing every `restore_to_epoch` call to fail with a file lock error. Fix: close and drop the handle before the engine call, with recovery logic that reopens the on-disk file if the engine fails mid-write
+- **Database stats showing 0 B**: `detailed_stats()` reported near-zero `memory_bytes` (buffer_manager.allocated() only) and `None` for `disk_bytes` (wrong path type). Service layer now overrides with `memory_usage().total_bytes` and recursive directory walk of the per-db data directory
+
 ### Fixed (via engine 0.5.38)
 
 - Incremental backup always failed after full backup: WAL rotation after backup ensures new writes are visible to subsequent incrementals (#267)
