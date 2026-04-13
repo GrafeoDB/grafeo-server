@@ -61,18 +61,24 @@ impl TokenStore {
         let tmp_path = path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &json)
             .map_err(|e| format!("failed to write token store tmp: {e}"))?;
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| format!("failed to rename token store: {e}"))?;
 
-        // Restrict file permissions on Unix (0600: owner read/write only).
-        // This is a hard error: token hashes must not be world-readable.
+        // Restrict file permissions on Unix (0600: owner read/write only)
+        // *before* the atomic rename, so the file is never world-readable at
+        // the final path, and a permissions failure does not leave a committed
+        // but errored mutation.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)
-                .map_err(|e| format!("failed to restrict token store permissions: {e}"))?;
+            std::fs::set_permissions(&tmp_path, perms).map_err(|e| {
+                // Clean up the temp file on failure
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("failed to restrict token store permissions: {e}")
+            })?;
         }
+
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| format!("failed to rename token store: {e}"))?;
 
         Ok(())
     }

@@ -7093,3 +7093,167 @@ async fn security_headers_present() {
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
+
+// ---------------------------------------------------------------------------
+// WebSocket CORS origin validation
+// ---------------------------------------------------------------------------
+
+async fn spawn_server_with_cors(origins: Vec<String>) -> String {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        origins,
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        100,
+    );
+    spawn_server_from_state(state).await
+}
+
+#[tokio::test]
+async fn websocket_cors_allowed_origin_succeeds() {
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://allowed.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    // Connection succeeded: send a ping to confirm it works
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+#[tokio::test]
+async fn websocket_cors_disallowed_origin_rejected() {
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://evil.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    // The upgrade should fail (server returns 403)
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_err(), "disallowed origin should be rejected");
+}
+
+#[tokio::test]
+async fn websocket_cors_wildcard_allows_any_origin() {
+    let base = spawn_server_with_cors(vec!["*".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", "localhost")
+        .header("Origin", "http://any-site.example.com")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+#[tokio::test]
+async fn websocket_cors_no_origin_header_allowed() {
+    // When CORS is configured but the client sends no Origin header
+    // (non-browser clients), the connection should be allowed.
+    let base = spawn_server_with_cors(vec!["http://allowed.example.com".to_string()]).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter trusted proxy handling
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rate_limit_xff_trusted_from_loopback() {
+    // Loopback peers are always trusted for XFF. Since our test server
+    // binds to 127.0.0.1, the peer IP is loopback. Different XFF values
+    // should be rate-limited independently.
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory_with_rate_limit(
+            300,
+            2,
+            std::time::Duration::from_secs(60),
+        ),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![], // no explicit trusted proxies needed: loopback is always trusted
+        2_097_152,
+        100,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 2 requests with XFF=10.0.0.1 (uses up that IP's quota)
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // A request with a different XFF should still succeed (different IP bucket)
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}

@@ -385,6 +385,29 @@ mod tests {
     }
 
     #[test]
+    fn clear_all_removes_all_sessions() {
+        let reg = SessionRegistry::new();
+        let (s1, db) = make_session("default");
+        let id1 = reg.create(s1, &db, None);
+        let (s2, _) = make_session("default");
+        let id2 = reg.create(s2, "other", None);
+        assert_eq!(reg.active_count(), 2);
+
+        reg.clear_all();
+
+        assert_eq!(reg.active_count(), 0);
+        assert!(!reg.exists(&id1));
+        assert!(!reg.exists(&id2));
+    }
+
+    #[test]
+    fn clear_all_on_empty_registry_is_noop() {
+        let reg = SessionRegistry::new();
+        reg.clear_all();
+        assert_eq!(reg.active_count(), 0);
+    }
+
+    #[test]
     fn get_with_no_owner_ignores_caller_token() {
         let reg = SessionRegistry::new();
         let (sess, db) = make_session("default");
