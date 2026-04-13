@@ -142,7 +142,7 @@ mod tests {
     fn make_store() -> TokenStore {
         let dir = tempfile::tempdir().unwrap();
         // Leak the tempdir so it stays alive for the test
-        let path = dir.into_path().join("tokens.json");
+        let path = dir.keep().join("tokens.json");
         TokenStore::load(path).unwrap()
     }
 
@@ -250,7 +250,7 @@ mod tests {
     fn create_token_rejects_empty_name() {
         let store = make_store();
         let err =
-            TokenService::create_token(&store, "".to_string(), default_scope(), None).unwrap_err();
+            TokenService::create_token(&store, String::new(), default_scope(), None).unwrap_err();
         assert!(matches!(err, ServiceError::BadRequest(_)));
     }
 

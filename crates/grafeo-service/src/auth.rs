@@ -844,7 +844,10 @@ mod tests {
         map.insert("fresh".to_string(), ("val".to_string(), Instant::now()));
         map.insert(
             "stale".to_string(),
-            ("val".to_string(), Instant::now() - Duration::from_secs(10)),
+            (
+                "val".to_string(),
+                Instant::now().checked_sub(Duration::from_secs(10)).unwrap(),
+            ),
         );
 
         assert_eq!(map.len(), 2);
@@ -891,7 +894,9 @@ mod tests {
 
         let map: Arc<dashmap::DashMap<String, ((), Instant)>> = Arc::new(dashmap::DashMap::new());
 
-        let old = Instant::now() - Duration::from_secs(100);
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(100))
+            .unwrap();
         map.insert("x".to_string(), ((), old));
         map.insert("y".to_string(), ((), old));
 

@@ -1060,7 +1060,7 @@ mod tests {
             parse_durability("nosync"),
             Ok(DurabilityMode::NoSync)
         ));
-        assert!(matches!(parse_durability("batch"), Ok(_)));
+        assert!(parse_durability("batch").is_ok());
         assert!(matches!(
             parse_durability("adaptive"),
             Ok(DurabilityMode::Adaptive { .. })

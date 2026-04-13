@@ -249,8 +249,8 @@ mod tests {
         assert_eq!(value_to_json(&Value::Bool(true)), serde_json::json!(true));
         assert_eq!(value_to_json(&Value::Int64(42)), serde_json::json!(42));
         assert_eq!(
-            value_to_json(&Value::Float64(3.14)),
-            serde_json::json!(3.14)
+            value_to_json(&Value::Float64(1.23)),
+            serde_json::json!(1.23)
         );
         assert_eq!(
             value_to_json(&Value::String("hello".into())),

@@ -7000,3 +7000,96 @@ async fn edge_property_named_type_and_id_survives_json_query() {
     assert_eq!(rows[0][0], "http", "type property should be 'http'");
     assert_eq!(rows[0][1], "req-42", "id property should be 'req-42'");
 }
+
+// ---------------------------------------------------------------------------
+// Readiness endpoint (/ready)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ready_endpoint_returns_200() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client.get(format!("{base}/ready")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ready");
+}
+
+// ---------------------------------------------------------------------------
+// Batch query limit enforcement
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batch_exceeding_max_size_rejected() {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        5, // max_batch_size = 5
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 6 queries exceeds the limit of 5
+    let queries: Vec<Value> = (0..6)
+        .map(|i| json!({"query": format!("MATCH (n) RETURN {i}")}))
+        .collect();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": queries}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "bad_request");
+    assert!(
+        body["detail"].as_str().unwrap().contains("exceeds maximum"),
+        "error should mention exceeding the limit"
+    );
+}
+
+#[tokio::test]
+async fn batch_within_limit_succeeds() {
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory(300),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec![],
+        2_097_152,
+        5,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    let queries: Vec<Value> = (0..3)
+        .map(|i| json!({"query": format!("MATCH (n) RETURN {i}")}))
+        .collect();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": queries}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Security headers present on responses
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn security_headers_present() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+}

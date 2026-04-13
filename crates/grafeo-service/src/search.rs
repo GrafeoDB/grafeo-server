@@ -158,6 +158,8 @@ impl SearchService {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::ServiceState;
 
@@ -179,7 +181,7 @@ mod tests {
             query_vector: vec![1.0, 2.0, 3.0],
             k: 5,
             ef: None,
-            filters: Default::default(),
+            filters: HashMap::default(),
         };
         let err = SearchService::vector_search(s.databases(), "no_such_db", req)
             .await
@@ -202,7 +204,7 @@ mod tests {
             query_vector: vec![1.0],
             k: 5,
             ef: None,
-            filters: Default::default(),
+            filters: HashMap::default(),
         };
         let err = SearchService::vector_search(s.databases(), "default", req)
             .await

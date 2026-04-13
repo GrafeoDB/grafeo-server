@@ -470,7 +470,7 @@ async fn drain_sessions(service: &ServiceState, timeout_secs: u64) {
 
         tracing::info!(
             active,
-            remaining_secs = (timeout - start.elapsed()).as_secs(),
+            remaining_secs = timeout.saturating_sub(start.elapsed()).as_secs(),
             "Draining active sessions"
         );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
