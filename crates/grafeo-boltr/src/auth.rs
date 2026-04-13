@@ -1,4 +1,4 @@
-//! Bridges `grafeo_service::auth::AuthProvider` to `boltr::server::AuthValidator`.
+//! Bridges `grafeo_service::auth::AuthProviderTrait` to `boltr::server::AuthValidator`.
 //!
 //! Uses a `PendingAuth` map to pass full `TokenInfo` from the validator
 //! to the backend. The validator stores `TokenInfo` under a UUID nonce
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use boltr::error::BoltError;
 use boltr::server::{AuthCredentials, AuthInfo, AuthValidator};
 use dashmap::DashMap;
-use grafeo_service::auth::{AuthProvider, TokenInfo};
+use grafeo_service::auth::{AuthProviderTrait, TokenInfo};
 use uuid::Uuid;
 
 /// Shared map for passing `TokenInfo` from the validator to the backend.
@@ -18,12 +18,12 @@ use uuid::Uuid;
 pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant)>>;
 
 pub(crate) struct BoltrAuthValidator {
-    provider: AuthProvider,
+    provider: Arc<dyn AuthProviderTrait>,
     pub(crate) pending: PendingAuth,
 }
 
 impl BoltrAuthValidator {
-    pub fn new(provider: AuthProvider, pending: PendingAuth) -> Self {
+    pub fn new(provider: Arc<dyn AuthProviderTrait>, pending: PendingAuth) -> Self {
         Self { provider, pending }
     }
 }

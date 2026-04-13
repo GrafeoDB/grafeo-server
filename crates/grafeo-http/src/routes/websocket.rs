@@ -29,18 +29,38 @@ use crate::types::{QueryRequest, WsClientMessage, WsServerMessage};
 /// Authentication is handled by the middleware stack before this handler
 /// runs, the `/ws` route is inside the authenticated router, so the
 /// HTTP upgrade request must carry valid credentials.
+///
+/// When CORS origins are configured, the `Origin` header is validated
+/// before upgrade. Browsers do not enforce CORS on WebSocket connections,
+/// so this server-side check prevents cross-site WebSocket hijacking.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     auth: AuthContext,
-) -> impl IntoResponse {
+    headers: axum::http::HeaderMap,
+) -> Result<impl IntoResponse, crate::error::ApiError> {
+    // Validate Origin header when CORS origins are configured.
+    // No Origin header is allowed (non-browser clients don't send one).
+    let cors_origins = state.cors_origins();
+    if !cors_origins.is_empty()
+        && let Some(origin) = headers.get(axum::http::header::ORIGIN)
+    {
+        let origin_str = origin.to_str().unwrap_or("");
+        let allowed = cors_origins.iter().any(|o| o == "*" || o == origin_str);
+        if !allowed {
+            return Err(crate::error::ApiError::forbidden(
+                "WebSocket origin not allowed".to_string(),
+            ));
+        }
+    }
+
     let identity = auth.identity(state.service().is_query_read_only());
     let db_scope = auth
         .0
         .as_ref()
         .map(|info| info.scope.databases.clone())
         .unwrap_or_default();
-    ws.on_upgrade(move |socket| handle_socket(socket, state, identity, db_scope))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, identity, db_scope)))
 }
 
 async fn handle_socket(

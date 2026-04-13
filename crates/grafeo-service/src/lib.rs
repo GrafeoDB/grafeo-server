@@ -91,7 +91,7 @@ struct Inner {
     start_time: Instant,
     read_only: bool,
     #[cfg(feature = "auth")]
-    auth: Option<auth::AuthProvider>,
+    auth: Option<Arc<dyn auth::AuthProviderTrait>>,
     #[cfg(feature = "push-changefeed")]
     change_hub: changefeed::ChangeHub,
     #[cfg(feature = "replication")]
@@ -156,12 +156,14 @@ impl ServiceState {
                             config.auth_password.clone(),
                             store,
                         )
+                        .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>)
                     } else {
                         auth::AuthProvider::new(
                             config.auth_token.clone(),
                             config.auth_user.clone(),
                             config.auth_password.clone(),
                         )
+                        .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>)
                     }
                 },
                 #[cfg(feature = "push-changefeed")]
@@ -219,7 +221,8 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
-                auth: auth::AuthProvider::new(Some(auth_token), None, None),
+                auth: auth::AuthProvider::new(Some(auth_token), None, None)
+                    .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>),
                 #[cfg(feature = "push-changefeed")]
                 change_hub: changefeed::ChangeHub::new(),
                 #[cfg(feature = "replication")]
@@ -245,7 +248,8 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
-                auth: auth::AuthProvider::new(None, Some(user), Some(password)),
+                auth: auth::AuthProvider::new(None, Some(user), Some(password))
+                    .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>),
                 #[cfg(feature = "push-changefeed")]
                 change_hub: changefeed::ChangeHub::new(),
                 #[cfg(feature = "replication")]
@@ -263,6 +267,35 @@ impl ServiceState {
     pub fn new_in_memory_with_auth_provider(
         session_ttl: u64,
         provider: auth::AuthProvider,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                databases: DatabaseManager::new(None, false),
+                sessions: SessionRegistry::new(),
+                metrics: Metrics::new(),
+                rate_limiter: RateLimiter::new(0, Duration::from_secs(60)),
+                session_ttl,
+                query_timeout: Duration::from_secs(30),
+                start_time: Instant::now(),
+                read_only: false,
+                auth: Some(Arc::new(provider) as Arc<dyn auth::AuthProviderTrait>),
+                #[cfg(feature = "push-changefeed")]
+                change_hub: changefeed::ChangeHub::new(),
+                #[cfg(feature = "replication")]
+                replication_mode: replication::ReplicationMode::Standalone,
+                #[cfg(feature = "replication")]
+                replication_state: Arc::new(replication::ReplicationState::new()),
+                backup_dir: None,
+                backup_retention: None,
+            }),
+        }
+    }
+
+    /// Creates an in-memory state with a custom auth provider (for custom/pluggable auth).
+    #[cfg(feature = "auth")]
+    pub fn with_auth_provider(
+        session_ttl: u64,
+        provider: Arc<dyn auth::AuthProviderTrait>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -383,7 +416,7 @@ impl ServiceState {
     }
 
     #[cfg(feature = "auth")]
-    pub fn auth(&self) -> Option<&auth::AuthProvider> {
+    pub fn auth(&self) -> Option<&Arc<dyn auth::AuthProviderTrait>> {
         self.inner.auth.as_ref()
     }
 

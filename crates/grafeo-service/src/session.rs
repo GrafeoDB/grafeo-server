@@ -159,6 +159,12 @@ impl SessionRegistry {
             s.db_name != db_name
         });
     }
+
+    /// Force-removes all sessions. Used during graceful shutdown after the
+    /// drain timeout expires.
+    pub fn clear_all(&self) {
+        self.sessions.clear();
+    }
 }
 
 #[cfg(test)]

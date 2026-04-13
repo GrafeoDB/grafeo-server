@@ -15,7 +15,7 @@ grafeo-common = { workspace = true }
 axum = { version = "0.8", features = ["json", "query", "ws"] }
 async-stream = "0.3"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "set-header", "trace"] }
 
 # OpenAPI documentation
 utoipa = { version = "5", features = ["axum_extras"] }

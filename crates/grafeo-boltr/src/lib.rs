@@ -25,7 +25,7 @@ pub struct BoltrOptions {
     #[cfg(feature = "tls")]
     pub tls_key: Option<String>,
     #[cfg(feature = "auth")]
-    pub auth_provider: Option<grafeo_service::auth::AuthProvider>,
+    pub auth_provider: Option<std::sync::Arc<dyn grafeo_service::auth::AuthProviderTrait>>,
     pub shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 

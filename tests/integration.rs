@@ -3568,7 +3568,7 @@ async fn read_only_create_database_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "read_only");
@@ -3586,7 +3586,7 @@ async fn read_only_delete_database_rejected() {
         .unwrap();
     // Default DB deletion is rejected (either 403 for read-only or 400 for protected)
     let status = resp.status().as_u16();
-    assert!(status == 403 || status == 400);
+    assert!(status == 503 || status == 400);
 }
 
 #[tokio::test]
@@ -3600,7 +3600,7 @@ async fn read_only_admin_create_index_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "read_only");
@@ -3684,7 +3684,7 @@ async fn read_only_wal_checkpoint_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 }
 
 #[tokio::test]
@@ -3699,7 +3699,7 @@ async fn read_only_named_graph_mutations_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 503);
 
     // List graphs should work
     let resp = client
@@ -5994,6 +5994,7 @@ async fn gwp_auth_read_only_token_cannot_write() {
                 databases: vec![],
             },
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: None,
         })
         .unwrap();
 
@@ -6174,6 +6175,7 @@ async fn bolt_auth_read_only_token_cannot_write() {
                 databases: vec![],
             },
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: None,
         })
         .unwrap();
 
@@ -6257,6 +6259,7 @@ async fn spawn_server_with_token_store(
                 token_hash: hash,
                 scope: scope.clone(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
             })
             .unwrap();
         token_infos.push((plaintext.to_string(), id));
@@ -6919,4 +6922,81 @@ async fn auth_database_info_denied_for_out_of_scope() {
         403,
         "stats should be denied for out-of-scope db"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Edge properties named "source" / "type" survive query round-trip (grafeo#272)
+// ---------------------------------------------------------------------------
+
+/// Edges with properties named "source", "target", "type", or "id" must
+/// survive a JSON round-trip through the query endpoint. These names collide
+/// with structural column names in Arrow/DataFrame export (engine-side fix),
+/// but the HTTP JSON path must always preserve them.
+#[tokio::test]
+async fn edge_property_named_source_survives_json_query() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create nodes and an edge with a "source" property
+    let setup = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (a:A {name:'a'}) CREATE (b:B {name:'b'}) CREATE (a)-[:CALLS {source:'jdt', confidence:0.9}]->(b)"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), 200);
+
+    // Query back the edge with its "source" property
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "MATCH ()-[r:CALLS]->() RETURN r.source AS src, r.confidence AS conf"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "should find exactly one CALLS edge");
+    assert_eq!(rows[0][0], "jdt", "source property should be 'jdt'");
+    assert_eq!(rows[0][1], 0.9, "confidence property should be 0.9");
+}
+
+/// Edges with properties named "type" and "id" must also survive. These
+/// collide with the structural _type and _id columns in edge maps.
+#[tokio::test]
+async fn edge_property_named_type_and_id_survives_json_query() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create edge with properties named "type" and "id"
+    let setup = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (a:X) CREATE (b:Y) CREATE (a)-[:LINK {type:'http', id:'req-42'}]->(b)"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "MATCH ()-[r:LINK]->() RETURN r.type AS t, r.id AS i"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "should find exactly one LINK edge");
+    assert_eq!(rows[0][0], "http", "type property should be 'http'");
+    assert_eq!(rows[0][1], "req-42", "id property should be 'req-42'");
 }

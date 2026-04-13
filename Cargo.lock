@@ -1340,14 +1340,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.37"
+version = "0.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea0e09f1d8141e4bcefa30440dc27eba2a803f71bf94b2e452d5dbc40aa25c9b"
+checksum = "303bad12b37dfc163fd33c4755d8b28a2d0d3ae3ac909d11da3417cafa69e954"
 dependencies = [
  "bincode",
  "grafeo-common",
  "grafeo-core",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "parking_lot",
  "rayon",
  "serde",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1374,9 +1374,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.37"
+version = "0.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f43b3fd1dcc08af34baa2f2a37371a31102d79d231c59e1d3b0919f83ffbe8"
+checksum = "6a71dbc4c3568807f4a6657acb4c65d5be29849648bda18ca7ebf6131c093b11"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1385,7 +1385,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "foldhash 0.2.0",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "indexmap",
  "parking_lot",
  "serde",
@@ -1396,9 +1396,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.37"
+version = "0.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5fb4daa51baa3f60c03dcf4c964f76e1777b8fe530867617ceee6bcb13b2fb7"
+checksum = "f7e9e126cdb4cd10c9a557d49040f7614f13358a9ddfab8c47807d6456133aa2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1409,7 +1409,7 @@ dependencies = [
  "dashmap",
  "foldhash 0.2.0",
  "grafeo-common",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "indexmap",
  "ordered-float 5.3.0",
  "parking_lot",
@@ -1426,9 +1426,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.37"
+version = "0.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b61af581329324e68d6a08edf583b569c2811b75bb01e035d6bcd67057695e1"
+checksum = "6838aaa3df91d37ff354b568a27449a8f2b7da1fc4b649faa6e01249f6721c4a"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -1442,7 +1442,7 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-storage",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "hf-hub",
  "indexmap",
  "md5",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "async-stream",
  "axum",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "serde",
  "serde_json",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1571,9 +1571,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.5.37"
+version = "0.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7383f75036747ddf0b2ab3cd0056c0c05a33d885fdb9bd27ddb13332a21763c"
+checksum = "fb4763979ab59f2676ad053be7235738d73c5e2d244a3f2fd1f0f90738ff1759"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.5.37"
+version = "0.5.38"
 dependencies = [
  "axum",
  "grafeo-service",
@@ -1687,8 +1687,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1696,6 +1694,13 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "heck"

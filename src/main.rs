@@ -162,8 +162,28 @@ async fn main() {
             std::net::SocketAddr::new(config.host.parse().expect("invalid host"), config.port);
 
         let features = detect_features();
-        let app_state =
-            grafeo_http::AppState::new(service.clone(), config.cors_origins.clone(), features);
+
+        // Parse trusted proxy IPs for X-Forwarded-For validation
+        let trusted_proxies: Vec<std::net::IpAddr> = config
+            .trusted_proxies
+            .iter()
+            .filter_map(|s| {
+                s.parse::<std::net::IpAddr>()
+                    .map_err(
+                        |e| tracing::warn!(proxy = %s, "ignoring invalid trusted proxy IP: {e}"),
+                    )
+                    .ok()
+            })
+            .collect();
+
+        let app_state = grafeo_http::AppState::with_config(
+            service.clone(),
+            config.cors_origins.clone(),
+            features,
+            trusted_proxies,
+            config.max_body_size,
+            config.max_batch_size,
+        );
 
         let mut app = grafeo_http::router(app_state);
 
@@ -238,6 +258,9 @@ async fn main() {
         tracing::info!(%addr, "Grafeo Server ready");
 
         grafeo_http::serve(listener, app, shutdown_signal()).await;
+
+        // Drain active sessions before final shutdown
+        drain_sessions(&service, config.shutdown_timeout).await;
 
         #[cfg(feature = "gwp")]
         gwp_handle.await.ok();
@@ -384,7 +407,7 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
         #[cfg(feature = "tls")]
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
-        auth_provider: service.auth().cloned(),
+        auth_provider: service.auth().map(std::sync::Arc::clone),
         shutdown: None,
     }
 }
@@ -406,7 +429,7 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         #[cfg(feature = "tls")]
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
-        auth_provider: service.auth().cloned(),
+        auth_provider: service.auth().map(std::sync::Arc::clone),
         shutdown: None,
     }
 }
@@ -417,4 +440,39 @@ async fn shutdown_signal() {
         .await
         .expect("failed to install signal handler");
     tracing::info!("Shutdown signal received");
+}
+
+/// Drains active sessions before shutting down.
+///
+/// Waits up to `timeout_secs` for active sessions to complete, logging
+/// progress every 5 seconds. Any sessions still open after the timeout
+/// are force-removed (their transactions will be rolled back by drop).
+async fn drain_sessions(service: &ServiceState, timeout_secs: u64) {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        let active = service.sessions().active_count();
+        if active == 0 {
+            tracing::info!("All sessions drained");
+            break;
+        }
+
+        if start.elapsed() >= timeout {
+            tracing::warn!(
+                active,
+                "Shutdown timeout reached, force-closing remaining sessions"
+            );
+            // Force cleanup: remove all expired and active sessions
+            service.sessions().clear_all();
+            break;
+        }
+
+        tracing::info!(
+            active,
+            remaining_secs = (timeout - start.elapsed()).as_secs(),
+            "Draining active sessions"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }

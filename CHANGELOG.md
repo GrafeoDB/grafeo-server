@@ -5,6 +5,47 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.38] - 2026-04-13
+
+Security hardening, operational maturity, auth improvements, Bolt protocol compliance, and engine 0.5.38 alignment.
+
+**Breaking:** Swagger UI (`/api/docs`) and OpenAPI spec (`/api/openapi.json`) are now inside the auth middleware scope, so authenticated deployments must supply credentials to access API docs. Rate limiting no longer trusts `X-Forwarded-For` from arbitrary clients: deployments behind a reverse proxy must pass `--trusted-proxies` with the proxy CIDR or rate limiting will key on the proxy IP instead of the real client. `ServiceError::ReadOnly` now returns HTTP 503 (was 403): clients or load balancers that match on 403 for replica detection should update to 503. Internal server errors no longer include implementation details in the response body: tooling that parsed the `detail` field for diagnostics should switch to server-side logs.
+
+### Added
+
+- **Readiness endpoint**: `GET /ready` returns 200 when the server can serve queries, 503 otherwise (e.g. during restore). `/health` remains as liveness probe. Use `/ready` for Kubernetes readiness probes
+- **Token expiry**: `POST /admin/tokens` accepts optional `expires_in` (seconds) parameter. Expired tokens are automatically rejected. `expires_at` (Unix timestamp) returned in token responses
+- **Pluggable auth**: `AuthProviderTrait` trait enables custom authentication backends (JWT, LDAP, etc.). Built-in `StaticAuthProvider` implements bearer token, basic auth, and token store. `ServiceState::with_auth_provider()` accepts any `Arc<dyn AuthProviderTrait>`
+- **Security response headers**: all HTTP responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`
+- **Graceful shutdown drain**: on SIGTERM, active sessions are drained for up to `--shutdown-timeout` seconds (default: 30) before force-rollback. Prevents data loss during rolling deployments
+- **Bolt bookmark propagation**: `COMMIT` now returns a monotonic `"bookmark": "grafeo:tx:{N}"` in response metadata, enabling causal consistency in Neo4j drivers
+- **Bolt mutation detection**: `RUN` response metadata `"type"` field correctly reports `"w"` for write queries and `"r"` for reads, enabling proper driver routing decisions
+- **Bolt native Path encoding**: `Value::Path` now encodes as `BoltValue::Path` with proper `BoltNode` and `BoltUnboundRelationship` structures instead of a generic dictionary
+- **CLI flags**: `--trusted-proxies` (CIDR list for X-Forwarded-For), `--max-body-size` (request body limit, default 2 MB), `--max-batch-size` (max queries per batch, default 1000), `--shutdown-timeout` (graceful drain period, default 30s)
+
+### Changed
+
+- **grafeo-engine 0.5.38**: quantized vector indexes (`"scalar"`, `"binary"`, `"product"` quantization for 4x memory reduction), EXPLAIN/PROFILE for all 6 query languages, parser recursion depth limits (DoS prevention), Unicode identifiers, `!=` operator, parser language-prefixed errors
+- **Middleware ordering**: rate limiting now runs before authentication, throttling brute-force attempts before paying auth verification cost
+- **Swagger/OpenAPI behind auth**: `/api/docs` and `/api/openapi.json` are now inside the auth middleware scope. When auth is enabled, API docs require valid credentials
+- **Read-only returns 503**: `ServiceError::ReadOnly` now maps to HTTP 503 (Service Unavailable) instead of 403, clearer for replicas and orchestrators
+- **Internal errors scrubbed**: `ServiceError::Internal` no longer exposes implementation details in HTTP responses. Full error logged server-side at `error!` level, clients receive generic "internal server error"
+- **Token store permissions**: `tokens.json` is written with 0600 permissions on Unix (owner read/write only)
+
+### Security
+
+- **Fixed Cypher injection in JSON schema loading**: `type_name` from user-provided JSON schemas was interpolated directly into Cypher query strings with insufficient sanitization. Label names are now validated against `^[a-zA-Z_][a-zA-Z0-9_]*$`
+- **Fixed X-Forwarded-For spoofing**: rate limiting unconditionally trusted the `X-Forwarded-For` header from any client. XFF is now only parsed when the TCP peer matches `--trusted-proxies` (default: loopback only)
+- **WebSocket origin validation**: `/ws` upgrade now validates the `Origin` header against configured `--cors-origins`, preventing cross-site WebSocket hijacking
+- **Batch query limit**: `POST /batch` now enforces `--max-batch-size` (default: 1000), preventing unbounded resource consumption
+- **Explicit body size limit**: HTTP request bodies are limited to `--max-body-size` (default: 2 MB) via explicit `DefaultBodyLimit`
+
+### Fixed (via engine 0.5.38)
+
+- Incremental backup always failed after full backup: WAL rotation after backup ensures new writes are visible to subsequent incrementals (#267)
+- Edge variables in multi-hop queries returned as raw IDs instead of full maps with properties (#268)
+- Weighted hybrid search inverted vector ranking: closer vectors now correctly rank higher with `fusion="weighted"`
+
 ## [0.5.37] - 2026-04-12
 
 SPARQL compliance, SHACL validation, graph projections, incremental backup, Arrow export, and engine 0.5.37 alignment.

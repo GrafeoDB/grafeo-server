@@ -52,7 +52,8 @@ impl TokenStore {
     /// Serialize `tokens` to JSON and write to disk atomically (write tmp, rename).
     ///
     /// Caller must hold the write lock to prevent concurrent saves from
-    /// clobbering each other's temp file.
+    /// clobbering each other's temp file. On Unix, the file is restricted
+    /// to owner-only access (mode 0600) since it contains token hashes.
     fn save_locked(tokens: &[TokenRecord], path: &std::path::Path) -> Result<(), String> {
         let json = serde_json::to_string_pretty(tokens)
             .map_err(|e| format!("failed to serialize tokens: {e}"))?;
@@ -62,6 +63,16 @@ impl TokenStore {
             .map_err(|e| format!("failed to write token store tmp: {e}"))?;
         std::fs::rename(&tmp_path, path)
             .map_err(|e| format!("failed to rename token store: {e}"))?;
+
+        // Restrict file permissions on Unix (0600: owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                tracing::warn!("failed to restrict token store permissions: {e}");
+            }
+        }
 
         Ok(())
     }
@@ -97,11 +108,22 @@ impl TokenStore {
     }
 
     /// Find a token record by its SHA-256 hash.
+    ///
+    /// Returns `None` if the token is not found or has expired.
     pub fn find_by_hash(&self, hash: &str) -> Option<TokenRecord> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
         self.tokens
             .read()
             .iter()
             .find(|t| t.token_hash == hash)
+            .filter(|t| match t.expires_at {
+                Some(exp) => exp > now,
+                None => true,
+            })
             .cloned()
     }
 
@@ -123,6 +145,7 @@ mod tests {
             token_hash: hash.to_string(),
             scope: TokenScope::default(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            expires_at: None,
         }
     }
 

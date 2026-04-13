@@ -8,6 +8,19 @@ use grafeo_engine::GrafeoDB;
 use crate::error::ServiceError;
 use crate::types::DatabaseType;
 
+/// Validates that a string is a safe identifier for use in query labels.
+///
+/// Accepts only ASCII letters, digits, and underscores, starting with a letter
+/// or underscore. Rejects anything that could be used for injection.
+#[cfg(feature = "json-schema")]
+fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Dispatches schema loading based on database type. No-op for types that
 /// don't use schemas (Lpg, Rdf).
 pub fn load_schema(
@@ -100,12 +113,14 @@ fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
         && let Some(obj) = defs.as_object()
     {
         for (type_name, _type_def) in obj {
-            // Create a node with the label matching the type name
-            // This establishes the label in the catalog
-            let cypher = format!(
-                "CREATE (n:{} {{_schema: true}}) RETURN n",
-                type_name.replace(' ', "_")
-            );
+            let safe_name = type_name.replace(' ', "_");
+            if !is_safe_identifier(&safe_name) {
+                return Err(ServiceError::BadRequest(format!(
+                    "invalid schema type name '{type_name}': must contain only \
+                     ASCII letters, digits, and underscores"
+                )));
+            }
+            let cypher = format!("CREATE (n:{safe_name} {{_schema: true}}) RETURN n");
             if let Err(e) = session.execute_cypher(&cypher) {
                 tracing::warn!(
                     type_name = %type_name,
@@ -120,10 +135,14 @@ fn load_json_schema(content: &[u8], db: &GrafeoDB) -> Result<(), ServiceError> {
 
     // If the schema itself has a "title", create that as a label too
     if let Some(title) = schema_value.get("title").and_then(|t| t.as_str()) {
-        let cypher = format!(
-            "CREATE (n:{} {{_schema: true}}) RETURN n",
-            title.replace(' ', "_")
-        );
+        let safe_title = title.replace(' ', "_");
+        if !is_safe_identifier(&safe_title) {
+            return Err(ServiceError::BadRequest(format!(
+                "invalid schema title '{title}': must contain only \
+                 ASCII letters, digits, and underscores"
+            )));
+        }
+        let cypher = format!("CREATE (n:{safe_title} {{_schema: true}}) RETURN n");
         let _ = session.execute_cypher(&cypher);
         label_count += 1;
     }

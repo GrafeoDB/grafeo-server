@@ -1,6 +1,6 @@
 //! GWP authentication adapter.
 //!
-//! Bridges `grafeo_service::auth::AuthProvider` to `gwp::server::AuthValidator`,
+//! Bridges `grafeo_service::auth::AuthProviderTrait` to `gwp::server::AuthValidator`,
 //! mapping GWP proto credentials to the transport-agnostic auth checks.
 //!
 //! Uses a `PendingAuth` map to pass full `TokenInfo` from the validator
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use grafeo_service::auth::{AuthProvider, TokenInfo};
+use grafeo_service::auth::{AuthProviderTrait, TokenInfo};
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{AuthInfo, AuthValidator};
@@ -21,14 +21,14 @@ use uuid::Uuid;
 /// Each entry includes an [`Instant`](std::time::Instant) for TTL-based cleanup.
 pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant)>>;
 
-/// Validates GWP handshake credentials using the shared [`AuthProvider`].
+/// Validates GWP handshake credentials using the shared [`AuthProviderTrait`].
 pub(crate) struct GwpAuthValidator {
-    provider: AuthProvider,
+    provider: Arc<dyn AuthProviderTrait>,
     pub(crate) pending: PendingAuth,
 }
 
 impl GwpAuthValidator {
-    pub fn new(provider: AuthProvider, pending: PendingAuth) -> Self {
+    pub fn new(provider: Arc<dyn AuthProviderTrait>, pending: PendingAuth) -> Self {
         Self { provider, pending }
     }
 }
