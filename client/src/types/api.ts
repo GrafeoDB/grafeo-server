@@ -18,13 +18,21 @@ export interface TransactionResponse {
   status: "open" | "committed" | "rolled_back";
 }
 
+export interface EnabledFeatures {
+  languages: string[];
+  engine: string[];
+  server: string[];
+}
+
 export interface HealthResponse {
   status: string;
   version: string;
   engine_version: string;
   persistent: boolean;
+  read_only: boolean;
   uptime_seconds: number;
   active_sessions: number;
+  features: EnabledFeatures;
 }
 
 export type DatabaseType =
@@ -119,11 +127,21 @@ export interface ValidationInfo {
 export interface BackupEntry {
   filename: string;
   database: string;
+  kind: string;
   size_bytes: number;
   created_at: string;
-  node_count: number;
-  edge_count: number;
-  epoch: number;
+  start_epoch: number;
+  end_epoch: number;
+  checksum: number;
+  /** Optional user-supplied label. Stored in a server-side sidecar
+   *  and merged into the entry on listing. */
+  label?: string;
+}
+
+export interface CreateBackupRequest {
+  /** Optional label: ^[A-Za-z0-9_-]{1,32}$ when set. Empty string or
+   *  undefined means unlabeled. */
+  label?: string;
 }
 
 // Token management types

@@ -47,6 +47,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new GrafeoApiError(res.status, body.detail ?? res.statusText);
   }
+  // 204 No Content and any other empty body: don't try to parse JSON.
+  // Endpoints like POST /admin/{db}/restore/epoch return 204 on success;
+  // calling res.json() on an empty body throws SyntaxError and the call
+  // site treats the successful restore as a failure.
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
   return res.json();
 }
 
@@ -158,29 +165,56 @@ export const api = {
   },
 
   backup: {
-    create: (db: string) =>
+    create: (db: string, label?: string) =>
       request<BackupEntry>(`/admin/${encodeURIComponent(db)}/backup`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(label ? { label } : {}),
       }),
+
+    // Kept wired for future re-enablement; currently not surfaced in the UI.
+    // Engine 0.5.37's do_backup_incremental() always returns "no new WAL
+    // records since last backup" even when the WAL has clearly advanced
+    // (grafeo-engine issue filed separately). Flip the Incremental toggle
+    // back on in CreateBackupDialog once that lands.
+    createIncremental: (db: string) =>
+      request<BackupEntry>(
+        `/admin/${encodeURIComponent(db)}/backup/incremental`,
+        { method: "POST" },
+      ),
 
     list: (db: string) =>
       request<BackupEntry[]>(`/admin/${encodeURIComponent(db)}/backups`),
 
-    listAll: () => request<BackupEntry[]>("/admin/backups"),
+    listAll: () => request<BackupEntry[]>("/backups"),
 
-    restore: (db: string, backup: string) =>
-      request<{ restored: boolean }>(`/admin/${encodeURIComponent(db)}/restore`, {
+    restore: (targetDb: string, backup: string, sourceDb?: string) =>
+      request<{ restored: boolean }>(
+        `/admin/${encodeURIComponent(targetDb)}/restore`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            sourceDb ? { backup, source_db: sourceDb } : { backup },
+          ),
+        },
+      ),
+
+    restoreToEpoch: (db: string, epoch: number) =>
+      request<null>(`/admin/${encodeURIComponent(db)}/restore/epoch`, {
         method: "POST",
-        body: JSON.stringify({ backup }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ epoch }),
       }),
 
-    remove: (filename: string) =>
-      request<{ deleted: boolean }>(`/admin/backups/${encodeURIComponent(filename)}`, {
-        method: "DELETE",
-      }),
+    remove: (db: string, filename: string) =>
+      request<{ deleted: boolean }>(
+        `/admin/${encodeURIComponent(db)}/backups/${encodeURIComponent(filename)}`,
+        { method: "DELETE" },
+      ),
 
-    downloadUrl: (filename: string) =>
-      `/admin/backups/download/${encodeURIComponent(filename)}`,
+    downloadUrl: (db: string, filename: string) =>
+      `/admin/${encodeURIComponent(db)}/backups/download/${encodeURIComponent(filename)}`,
   },
 
   tokens: {

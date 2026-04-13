@@ -5543,6 +5543,137 @@ async fn restore_data_rollback() {
 }
 
 #[tokio::test]
+async fn restore_cross_database_copies_source_into_target() {
+    // Cross-instance restore: backup default, restore it into a different
+    // database. This is the "backup from prod, restore to staging" flow
+    // from issue #51.
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    // Seed 7 nodes into `default` and take a backup.
+    seed_nodes(&client, &base, "default", 7).await;
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    // Create a separate empty persistent database.
+    let create = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "staging",
+            "database_type": "Lpg",
+            "storage_mode": "Persistent",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200);
+    assert_eq!(db_node_count(&client, &base, "staging").await, 0);
+
+    // Restore default's backup into staging. Without source_db this
+    // would 404 because staging's backup directory is empty.
+    let restore = client
+        .post(format!("{base}/admin/staging/restore"))
+        .json(&json!({ "backup": filename, "source_db": "default" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restore.status(), 200);
+
+    // staging should now hold the 7 nodes from default's snapshot.
+    assert_eq!(db_node_count(&client, &base, "staging").await, 7);
+    // default is untouched.
+    assert_eq!(db_node_count(&client, &base, "default").await, 7);
+}
+
+#[tokio::test]
+async fn restore_cross_database_rejects_unknown_source() {
+    // Asking for a source_db that has no backup subdirectory should
+    // return 404 rather than silently falling back to the target's dir.
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    seed_nodes(&client, &base, "default", 3).await;
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    let restore = client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": filename, "source_db": "nonexistent" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restore.status(), 404);
+}
+
+#[tokio::test]
+async fn restore_rejects_source_db_traversal() {
+    // A source_db containing `..` or `/` must be rejected before it ever
+    // hits the filesystem. Same defence-in-depth as target db and backup
+    // filename.
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    for evil in ["../etc", "foo/bar", "..\\etc", ".."] {
+        let restore = client
+            .post(format!("{base}/admin/default/restore"))
+            .json(&json!({ "backup": "anything.grafeo", "source_db": evil }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            restore.status(),
+            400,
+            "source_db '{evil}' should be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_same_database_still_works_without_source_db() {
+    // Back-compat: callers that don't send source_db get the same-database
+    // restore behaviour. Covers the happy path for existing clients.
+    let (base, _data, _backup) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    seed_nodes(&client, &base, "default", 4).await;
+    let resp: Value = client
+        .post(format!("{base}/admin/default/backup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filename = resp["filename"].as_str().unwrap().to_string();
+
+    seed_nodes(&client, &base, "default", 6).await;
+    assert_eq!(db_node_count(&client, &base, "default").await, 10);
+
+    let restore = client
+        .post(format!("{base}/admin/default/restore"))
+        .json(&json!({ "backup": filename }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restore.status(), 200);
+    assert_eq!(db_node_count(&client, &base, "default").await, 4);
+}
+
+#[tokio::test]
 async fn restore_creates_safety_backup() {
     let (base, _data, _backup) = spawn_server_persistent_backup().await;
     let client = Client::new();

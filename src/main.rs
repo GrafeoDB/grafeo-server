@@ -165,12 +165,23 @@ async fn main() {
         let app_state =
             grafeo_http::AppState::new(service.clone(), config.cors_origins.clone(), features);
 
-        let mut app = grafeo_http::router(app_state);
+        #[cfg_attr(not(feature = "studio"), allow(unused_mut))]
+        let mut app = grafeo_http::router(app_state.clone());
 
-        // Merge Studio UI routes if enabled
+        // Merge Studio UI routes if enabled. Studio is composed OUTSIDE
+        // grafeo_http::router(), so it does not inherit the API's auth
+        // middleware. When the auth feature is on, wrap_with_auth re-applies
+        // auth here so Studio is protected whenever credentials are
+        // configured at runtime, and attaches a wrapper that sets
+        // WWW-Authenticate: Basic on 401 responses so browsers show a
+        // native credential prompt.
         #[cfg(feature = "studio")]
         {
-            app = grafeo_studio::router().merge(app);
+            let studio = grafeo_studio::router();
+            #[cfg(feature = "auth")]
+            let studio =
+                grafeo_http::middleware::studio_auth::wrap_with_auth(studio, app_state.clone());
+            app = studio.merge(app);
         }
 
         let listener = tokio::net::TcpListener::bind(addr)
