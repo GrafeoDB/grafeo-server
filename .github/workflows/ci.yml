@@ -248,6 +248,128 @@ jobs:
           fail_ci_if_error: false
           verbose: true
 
+  # Dev seed smoke test (runs scripts/dev-seed.sh against a clean server
+  # and asserts the resulting state, including a cross-db restore).
+  dev-seed-smoke:
+    name: Dev Seed Smoke
+    runs-on: ubuntu-latest
+    needs: [rust-test, build-client]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-seed-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-seed-
+
+      - name: Download client dist
+        uses: actions/download-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist/
+
+      - name: Build server (release)
+        run: cargo build --release --bin grafeo-server
+
+      - name: Start server
+        run: |
+          mkdir -p /tmp/seed-data /tmp/seed-backups
+          ./target/release/grafeo-server \
+            --data-dir /tmp/seed-data \
+            --backup-dir /tmp/seed-backups \
+            > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for _ in $(seq 1 60); do
+            curl -sf http://localhost:7474/health > /dev/null && exit 0
+            sleep 0.5
+          done
+          echo "server failed to become ready" >&2
+          cat /tmp/server.log >&2
+          exit 1
+
+      - name: Run dev-seed
+        run: ./scripts/dev-seed.sh
+
+      - name: Assert seeded database count
+        run: |
+          dbs=$(curl -sf http://localhost:7474/db | jq '[.databases[] | select(.name != "default")] | length')
+          if [ "$dbs" != "6" ]; then
+            echo "expected 6 dbs, got $dbs" >&2
+            exit 1
+          fi
+
+      - name: Assert backup count per database
+        run: |
+          total=0
+          for d in social commerce movies iot knowledge tasks; do
+            n=$(curl -sf "http://localhost:7474/admin/$d/backups" | jq '. | length')
+            if [ "$n" != "3" ]; then
+              echo "expected 3 backups for $d, got $n" >&2
+              exit 1
+            fi
+            total=$((total + n))
+          done
+          if [ "$total" != "18" ]; then
+            echo "expected 18 total backups, got $total" >&2
+            exit 1
+          fi
+
+      - name: Assert cross-db restore
+        run: |
+          # tasks should be 252n / 0e after seeding (150 Task + 100 User + 2 SeedMarkers).
+          before_nodes=$(curl -sf http://localhost:7474/db | jq '.databases[] | select(.name=="tasks") | .node_count')
+          if [ "$before_nodes" != "252" ]; then
+            echo "expected tasks=252n before restore, got $before_nodes" >&2
+            exit 1
+          fi
+
+          # Use the first (chronologically earliest) social backup — snapshot of
+          # 400n / 250e taken before any SeedMarker mutations.
+          backup=$(curl -sf http://localhost:7474/admin/social/backups \
+            | jq -r '[.[].filename] | sort | .[0]')
+          curl -sf -X POST http://localhost:7474/admin/tasks/restore \
+            -H 'Content-Type: application/json' \
+            -d "{\"backup\":\"$backup\",\"source_db\":\"social\"}" \
+            | jq -e '.restored == true' > /dev/null
+
+          after_nodes=$(curl -sf http://localhost:7474/db | jq '.databases[] | select(.name=="tasks") | .node_count')
+          after_edges=$(curl -sf http://localhost:7474/db | jq '.databases[] | select(.name=="tasks") | .edge_count')
+          if [ "$after_nodes" != "400" ]; then
+            echo "expected tasks=400n after restore, got $after_nodes" >&2
+            exit 1
+          fi
+          if [ "$after_edges" != "250" ]; then
+            echo "expected tasks=250e after restore, got $after_edges" >&2
+            exit 1
+          fi
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-seed-smoke-server-log
+          path: /tmp/server.log
+          retention-days: 3
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/server.pid ]; then
+            kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+          fi
+
   # Docker build (validates the full pipeline)
   docker-build:
     name: Docker Build

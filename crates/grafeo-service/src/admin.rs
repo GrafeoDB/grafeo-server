@@ -2,6 +2,8 @@
 //!
 //! Transport-agnostic. Called by both HTTP routes and GWP backend.
 
+use std::path::Path;
+
 #[cfg(feature = "compact-store")]
 use crate::database::DatabaseEntry;
 use crate::database::DatabaseManager;
@@ -14,15 +16,36 @@ pub struct AdminService;
 
 impl AdminService {
     /// Get detailed database statistics.
+    ///
+    /// `memory_bytes` and `disk_bytes` come from the engine's
+    /// `detailed_stats()` path, which currently has two blind spots:
+    ///
+    /// - `memory_bytes` is just `buffer_manager.allocated()`, which is
+    ///   ~0 for most databases. We override it with
+    ///   `memory_usage().total_bytes` which walks every structure.
+    /// - `disk_bytes` feeds a file path to a directory-walker, so it
+    ///   always returns `None`. We compute it from the db's on-disk
+    ///   directory under `data_dir`.
+    ///
+    /// Both overrides should go away if the engine grows proper
+    /// accessors.
     pub async fn database_stats(
         databases: &DatabaseManager,
         db_name: &str,
     ) -> Result<types::DatabaseStats, ServiceError> {
         let entry = databases.get_available(db_name)?;
+        let per_db_dir = databases.data_dir().map(|root| root.join(db_name));
 
-        let stats = tokio::task::spawn_blocking(move || entry.db().detailed_stats())
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        let (stats, memory_total) = tokio::task::spawn_blocking(move || {
+            let db = entry.db();
+            let stats = db.detailed_stats();
+            let memory_total = db.memory_usage().total_bytes;
+            (stats, memory_total)
+        })
+        .await
+        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+        let disk_bytes = per_db_dir.and_then(|p| calculate_db_disk_usage(&p));
 
         Ok(types::DatabaseStats {
             name: db_name.to_owned(),
@@ -32,8 +55,8 @@ impl AdminService {
             edge_type_count: stats.edge_type_count,
             property_key_count: stats.property_key_count,
             index_count: stats.index_count,
-            memory_bytes: stats.memory_bytes,
-            disk_bytes: stats.disk_bytes,
+            memory_bytes: memory_total,
+            disk_bytes,
         })
     }
 
@@ -685,6 +708,35 @@ impl AdminService {
     }
 }
 
+/// Recursively sum the size of every regular file under `dir`.
+///
+/// Returns `None` if the directory doesn't exist, isn't a directory, or
+/// can't be fully traversed (e.g. permissions denied on a subtree). The
+/// caller treats `None` as "no known disk usage" and displays a dash
+/// rather than a bogus zero, which would read as "the database is
+/// empty on disk" when it might just be unreadable.
+fn calculate_db_disk_usage(dir: &Path) -> Option<usize> {
+    if !dir.exists() || !dir.is_dir() {
+        return None;
+    }
+    let mut total: usize = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let entries = std::fs::read_dir(&p).ok()?;
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len() as usize);
+            }
+        }
+    }
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +751,85 @@ mod tests {
         assert_eq!(stats.name, "default");
         assert_eq!(stats.node_count, 0);
         assert_eq!(stats.edge_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_database_stats_memory_and_disk_nonzero_on_persistent() {
+        use crate::database::DatabaseManager;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        // Insert some data so both memory and disk usage are non-zero.
+        {
+            let entry = mgr.get("default").unwrap();
+            for i in 0..10 {
+                entry
+                    .db()
+                    .session()
+                    .execute(&format!("INSERT (:Person {{idx: {i}}})"))
+                    .unwrap();
+            }
+        }
+
+        let stats = AdminService::database_stats(&mgr, "default").await.unwrap();
+        assert_eq!(stats.node_count, 10);
+        // memory_bytes now uses memory_usage().total_bytes which walks every
+        // structure — should be meaningfully > 0 with real data.
+        assert!(
+            stats.memory_bytes > 0,
+            "expected non-zero memory_bytes after inserts, got {}",
+            stats.memory_bytes
+        );
+        // disk_bytes now walks the per-db directory — should include at
+        // least the data.grafeo file or its WAL for a persistent database.
+        assert!(
+            stats.disk_bytes.is_some_and(|n| n > 0),
+            "expected non-zero disk_bytes for persistent db, got {:?}",
+            stats.disk_bytes
+        );
+    }
+
+    #[test]
+    fn calculate_db_disk_usage_missing_dir_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(calculate_db_disk_usage(&missing).is_none());
+    }
+
+    #[test]
+    fn calculate_db_disk_usage_sums_nested_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(tmp.path().join("a.bin"), vec![0u8; 100]).unwrap();
+        std::fs::write(sub.join("b.bin"), vec![0u8; 250]).unwrap();
+        let total = calculate_db_disk_usage(tmp.path()).unwrap();
+        assert_eq!(total, 350);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn calculate_db_disk_usage_returns_none_when_subdir_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.bin"), vec![0u8; 100]).unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("b.bin"), vec![0u8; 500]).unwrap();
+
+        // Strip read/execute on the subdirectory so read_dir fails.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = calculate_db_disk_usage(tmp.path());
+
+        // Restore permissions so TempDir cleanup works.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_none(),
+            "expected None when a subdirectory is unreadable, got {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
 //! real epoch tracking and checksums. Each database gets its own subdirectory
 //! within the configured backup dir (`{backup_dir}/{db_name}/`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +15,12 @@ use crate::database::{DatabaseEntry, DatabaseManager};
 use crate::error::ServiceError;
 use crate::types;
 
+/// Sidecar file name (relative to each per-database backup directory) that
+/// stores optional user-supplied labels keyed by backup filename. The engine
+/// owns filenames, so labels live out-of-band — losing this file loses
+/// labels but not backups.
+const LABELS_FILENAME: &str = "labels.json";
+
 /// Returns the per-database backup subdirectory.
 fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceError> {
     if db_name.contains('/') || db_name.contains('\\') || db_name.contains("..") {
@@ -22,6 +29,89 @@ fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceErr
         ));
     }
     Ok(backup_dir.join(db_name))
+}
+
+/// Validate a user-supplied backup label. Returns `Ok(None)` when the input
+/// is `None` or an empty string (treated as unlabeled).
+fn validate_label(label: Option<String>) -> Result<Option<String>, ServiceError> {
+    match label {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => {
+            if s.len() > 32 {
+                return Err(ServiceError::BadRequest(
+                    "backup label must be 32 characters or fewer".to_string(),
+                ));
+            }
+            if !s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(ServiceError::BadRequest(
+                    "backup label may only contain letters, digits, '-', and '_'".to_string(),
+                ));
+            }
+            Ok(Some(s))
+        }
+    }
+}
+
+fn labels_path(dir: &Path) -> PathBuf {
+    dir.join(LABELS_FILENAME)
+}
+
+/// Load the label sidecar for a database's backup directory. Missing or
+/// corrupt files yield an empty map — labels are best-effort metadata.
+fn load_labels(dir: &Path) -> HashMap<String, String> {
+    let path = labels_path(dir);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "backup label sidecar is corrupt, ignoring"
+            );
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_labels(dir: &Path, labels: &HashMap<String, String>) -> Result<(), ServiceError> {
+    let path = labels_path(dir);
+    let text = serde_json::to_string_pretty(labels)
+        .map_err(|e| ServiceError::Internal(format!("failed to serialize labels: {e}")))?;
+    std::fs::write(&path, text)
+        .map_err(|e| ServiceError::Internal(format!("failed to write labels sidecar: {e}")))?;
+    Ok(())
+}
+
+/// Merge label into the sidecar for `dir`. No-op if label is `None`.
+fn upsert_label(dir: &Path, filename: &str, label: Option<&str>) -> Result<(), ServiceError> {
+    let Some(label) = label else {
+        return Ok(());
+    };
+    let mut labels = load_labels(dir);
+    labels.insert(filename.to_owned(), label.to_owned());
+    save_labels(dir, &labels)
+}
+
+/// Remove a label entry from the sidecar. Best-effort — errors are logged
+/// but not surfaced because delete_backup itself already succeeded.
+fn remove_label(dir: &Path, filename: &str) {
+    let mut labels = load_labels(dir);
+    if labels.remove(filename).is_some()
+        && let Err(e) = save_labels(dir, &labels)
+    {
+        tracing::warn!(
+            filename = %filename,
+            error = %e,
+            "failed to update labels sidecar after delete"
+        );
+    }
 }
 
 /// Ensure legacy backups in the root backup directory are migrated to
@@ -38,11 +128,15 @@ impl BackupService {
     ///
     /// The database stays available during the backup (hot snapshot via
     /// MVCC checkpoint). The engine manages filenames and the manifest.
+    /// When `label` is provided, it's stored in the per-db `labels.json`
+    /// sidecar so listings can surface it; filenames remain engine-owned.
     pub async fn backup_database(
         databases: &DatabaseManager,
         db_name: &str,
         backup_dir: &Path,
+        label: Option<String>,
     ) -> Result<types::BackupEntry, ServiceError> {
+        let label = validate_label(label)?;
         let entry = databases.get_available(db_name)?;
         let db_name_owned = db_name.to_owned();
         let dir = db_backup_dir(backup_dir, db_name)?;
@@ -54,8 +148,11 @@ impl BackupService {
         let db = entry.db();
         let is_persistent = db.path().is_some();
 
-        if is_persistent {
-            let segment = tokio::task::spawn_blocking(move || db.backup_full(&dir))
+        // Engine 0.5.37 handles Windows and read-only databases natively,
+        // so this branch no longer needs platform or access-mode guards.
+        let mut entry_out = if is_persistent {
+            let dir_clone = dir.clone();
+            let segment = tokio::task::spawn_blocking(move || db.backup_full(&dir_clone))
                 .await
                 .map_err(|e| ServiceError::Internal(e.to_string()))?
                 .map_err(|e| ServiceError::Internal(format!("backup failed: {e}")))?;
@@ -68,7 +165,7 @@ impl BackupService {
                 "Full backup created"
             );
 
-            Ok(segment_to_entry(segment, db_name_owned))
+            segment_to_entry(segment, db_name_owned.clone())
         } else {
             // In-memory databases don't have a file manager, fall back to save()
             let timestamp = std::time::SystemTime::now()
@@ -93,17 +190,27 @@ impl BackupService {
                 "In-memory backup created via save()"
             );
 
-            Ok(types::BackupEntry {
+            types::BackupEntry {
                 filename,
-                database: db_name_owned,
+                database: db_name_owned.clone(),
                 kind: "full".to_owned(),
                 size_bytes,
                 created_at: millis_to_iso(timestamp as u64),
                 start_epoch: 0,
                 end_epoch: 0,
                 checksum: 0,
-            })
+                label: None,
+            }
+        };
+
+        // Persist the label in the sidecar before returning so the caller
+        // immediately sees it in the entry.
+        if let Some(ref l) = label {
+            upsert_label(&dir, &entry_out.filename, Some(l.as_str()))?;
+            entry_out.label = Some(l.clone());
         }
+
+        Ok(entry_out)
     }
 
     /// Create an incremental backup (WAL records since last backup).
@@ -188,6 +295,20 @@ impl BackupService {
         let db_dir = data_dir.join(db_name);
         let db_file = db_dir.join("data.grafeo");
 
+        // Release the current handle so the engine can replace the file on
+        // disk. Without this close(), restore_to_epoch() writes successfully
+        // but the subsequent GrafeoDB::open() below fails with a file lock
+        // error because the old handle is still holding it.
+        let old_db = entry.db();
+        if let Err(e) = old_db.close() {
+            tracing::warn!(
+                database = %db_name,
+                error = %e,
+                "Error closing database for epoch restore"
+            );
+        }
+        drop(old_db);
+
         let epoch_id = grafeo_common::types::EpochId::new(target_epoch);
         let backup_dir_clone = backup_sub.clone();
         let db_file_clone = db_file.clone();
@@ -201,7 +322,7 @@ impl BackupService {
         });
 
         if let Err(e) = restore_result {
-            entry.set_available();
+            Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
             return Err(e);
         }
 
@@ -226,8 +347,60 @@ impl BackupService {
                 Ok(())
             }
             Err(e) => {
-                entry.set_available();
+                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
                 Err(e)
+            }
+        }
+    }
+
+    /// Best-effort recovery when `restore_to_epoch` fails after the old
+    /// handle was closed. The ArcSwap inside the entry still points at
+    /// a dropped `GrafeoDB`, so calling `set_available()` without first
+    /// installing a fresh handle would expose a dead handle to callers.
+    ///
+    /// Try to reopen the on-disk file and swap the fresh handle in. If
+    /// that succeeds, mark the entry Available and the user can retry.
+    /// If it doesn't, leave the entry in `Restoring` so subsequent
+    /// requests return 503 instead of hitting a closed handle — an
+    /// operator can then intervene (restart, manual recovery) without
+    /// queries silently crashing.
+    async fn recover_after_failed_epoch_restore(
+        entry: &Arc<DatabaseEntry>,
+        db_file: &Path,
+        db_name: &str,
+    ) {
+        // to_string_lossy is safe here: the db file lives under --data-dir
+        // which is user-supplied, and if the path is not valid UTF-8 the
+        // engine's open() will fail with a descriptive error that the
+        // match below handles. The prior to_str match added a dead error
+        // branch that no real deployment exercised.
+        let db_file_str = db_file.to_string_lossy().into_owned();
+
+        let reopen = tokio::task::spawn_blocking(move || GrafeoDB::open(&db_file_str)).await;
+        match reopen {
+            Ok(Ok(db)) => {
+                entry.swap_db(Arc::new(db));
+                entry.set_available();
+                tracing::warn!(
+                    database = %db_name,
+                    "Recovered after failed epoch restore by reopening the on-disk file"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    database = %db_name,
+                    error = %e,
+                    "Epoch restore failed and the db file could not be reopened; \
+                     entry left in Restoring state so callers get 503"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    database = %db_name,
+                    error = %e,
+                    "Epoch restore failed and the recovery reopen task panicked; \
+                     entry left in Restoring state so callers get 503"
+                );
             }
         }
     }
@@ -582,7 +755,18 @@ impl BackupService {
                         start_epoch: 0,
                         end_epoch: 0,
                         checksum: 0,
+                        label: None,
                     });
+                }
+            }
+        }
+
+        // Merge user-supplied labels from the sidecar.
+        let labels = load_labels(dir);
+        if !labels.is_empty() {
+            for entry in &mut entries {
+                if let Some(label) = labels.get(&entry.filename) {
+                    entry.label = Some(label.clone());
                 }
             }
         }
@@ -618,6 +802,10 @@ impl BackupService {
 
         // Don't remove from manifest — the engine derives filenames from
         // segment count. list_backups filters out missing files.
+
+        // Best-effort sidecar cleanup so stale labels don't linger when
+        // a backup is recreated with the same filename later.
+        remove_label(&dir, filename);
 
         tracing::info!(database = %db_name, filename = %filename, "Backup deleted");
         Ok(())
@@ -804,6 +992,7 @@ fn segment_to_entry(seg: BackupSegment, database: String) -> types::BackupEntry 
         start_epoch: seg.start_epoch.0,
         end_epoch: seg.end_epoch.0,
         checksum: seg.checksum,
+        label: None,
     }
 }
 
@@ -903,7 +1092,7 @@ mod tests {
         let mgr =
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
-        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
         assert_eq!(backup.database, "default");
@@ -922,7 +1111,8 @@ mod tests {
         let mgr =
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
-        let result = BackupService::backup_database(&mgr, "nonexistent", backup_dir.path()).await;
+        let result =
+            BackupService::backup_database(&mgr, "nonexistent", backup_dir.path(), None).await;
         assert!(result.is_err());
     }
 
@@ -952,7 +1142,7 @@ mod tests {
         let mgr =
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
-        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
         BackupService::delete_backup("default", &backup.filename, backup_dir.path()).unwrap();
@@ -989,7 +1179,7 @@ mod tests {
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
         assert!(
-            BackupService::backup_database(&mgr, "default", &nested)
+            BackupService::backup_database(&mgr, "default", &nested, None)
                 .await
                 .is_ok()
         );
@@ -1030,7 +1220,7 @@ mod tests {
             assert_eq!(entry.db().node_count(), 1);
         }
 
-        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1076,7 +1266,7 @@ mod tests {
         let mgr = crate::database::DatabaseManager::new(None, false);
         let backup_dir = tempfile::tempdir().unwrap();
 
-        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path())
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1095,7 +1285,7 @@ mod tests {
         let mgr = crate::database::DatabaseManager::new(None, false);
         let backup_dir = tempfile::tempdir().unwrap();
 
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1136,7 +1326,7 @@ mod tests {
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
         // Create a full backup first (required before incremental)
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1190,6 +1380,154 @@ mod tests {
         assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_to_epoch_reopen_failure_leaves_entry_in_restoring() {
+        // Covers the recover_after_failed_epoch_restore "reopen failed
+        // too" branch: when the engine call fails AND the fallback reopen
+        // can't open the file, the entry must stay in Restoring so
+        // subsequent requests 503 instead of hitting a dropped handle.
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        {
+            let entry = mgr.get("default").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
+        }
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        // Strip write+read on the per-db data dir so both the engine's
+        // restore_to_epoch (tries to overwrite data.grafeo) and the
+        // recovery's GrafeoDB::open (tries to read the same file) fail.
+        let db_data_dir = data_dir.path().join("default");
+        let original_mode = std::fs::metadata(&db_data_dir)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = BackupService::restore_to_epoch(&mgr, "default", 0, backup_dir.path()).await;
+
+        // Restore perms before asserting so tempdir cleanup works even
+        // if the assertion fails.
+        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(original_mode))
+            .unwrap();
+
+        assert!(
+            result.is_err(),
+            "expected restore_to_epoch to fail when the db dir is unreadable, got {result:?}"
+        );
+
+        // The entry should still be in Restoring state because the
+        // recovery reopen also failed — no fresh handle was installed.
+        let entry = mgr.get("default").unwrap();
+        assert!(
+            entry.is_restoring(),
+            "expected entry to stay in Restoring after both engine and recovery reopen failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_failure_leaves_entry_queryable() {
+        // Covers the regression where a failed engine call (after the old
+        // handle has already been closed) left the entry marked Available
+        // while its ArcSwap pointed at a dropped GrafeoDB. Force a real
+        // engine failure by corrupting the backup file after the manifest
+        // references it, so restore_to_epoch can't read it.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        {
+            let entry = mgr.get("default").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
+        }
+
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        // Overwrite the backup file with garbage while keeping the
+        // manifest untouched. The engine's restore path opens the file
+        // from the manifest entry and chokes on the header.
+        let backup_file = backup_dir.path().join("default").join(&backup.filename);
+        std::fs::write(&backup_file, b"corrupt").unwrap();
+
+        let result = BackupService::restore_to_epoch(&mgr, "default", 0, backup_dir.path()).await;
+        assert!(
+            result.is_err(),
+            "expected restore_to_epoch to fail against a corrupt backup file, got {result:?}"
+        );
+
+        // The entry should still be queryable via a fresh handle that the
+        // recovery path reopened from disk. Without the recovery the
+        // ArcSwap points at a dropped handle and this call would hit
+        // stale state.
+        let entry = mgr.get("default").unwrap();
+        let _ = entry.db().node_count();
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_round_trip() {
+        // Covers the file-lock regression where restore_to_epoch failed to
+        // close the old handle before asking the engine to replace the file.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        // Seed a row so the initial backup captures non-trivial state.
+        {
+            let entry = mgr.get("default").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
+        }
+
+        let initial = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        // Add more data after the backup so the epoch moves forward.
+        {
+            let entry = mgr.get("default").unwrap();
+            entry
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Bob'})")
+                .unwrap();
+            assert_eq!(entry.db().node_count(), 2);
+        }
+
+        // Restore to the first backup's end_epoch — rolls Bob away.
+        BackupService::restore_to_epoch(&mgr, "default", initial.end_epoch, backup_dir.path())
+            .await
+            .unwrap();
+
+        // The entry should be usable after the swap — the old handle was
+        // released and a fresh one was opened from the restored file.
+        let entry = mgr.get("default").unwrap();
+        assert_eq!(entry.db().node_count(), 1);
+    }
+
     // -----------------------------------------------------------------------
     // db_backup_dir validation
     // -----------------------------------------------------------------------
@@ -1216,7 +1554,7 @@ mod tests {
 
         // Create 3 backups
         for _ in 0..3 {
-            BackupService::backup_database(&mgr, "default", backup_dir.path())
+            BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
                 .await
                 .unwrap();
         }
@@ -1239,10 +1577,10 @@ mod tests {
         let mgr =
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1261,7 +1599,7 @@ mod tests {
         let mgr =
             crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
 
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1275,7 +1613,7 @@ mod tests {
         let backup_dir = tempfile::tempdir().unwrap();
 
         for _ in 0..3 {
-            BackupService::backup_database(&mgr, "default", backup_dir.path())
+            BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
                 .await
                 .unwrap();
             // Small delay so timestamps differ
@@ -1559,10 +1897,10 @@ mod tests {
         };
         mgr.create(&req).unwrap();
 
-        BackupService::backup_database(&mgr, "default", backup_dir.path())
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
-        BackupService::backup_database(&mgr, "other", backup_dir.path())
+        BackupService::backup_database(&mgr, "other", backup_dir.path(), None)
             .await
             .unwrap();
 
@@ -1580,5 +1918,137 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn backup_with_label_round_trips_via_list() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        let created = BackupService::backup_database(
+            &mgr,
+            "default",
+            backup_dir.path(),
+            Some("pre-migration".to_owned()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.label.as_deref(), Some("pre-migration"));
+
+        let list = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].filename, created.filename);
+        assert_eq!(list[0].label.as_deref(), Some("pre-migration"));
+    }
+
+    #[tokio::test]
+    async fn backup_without_label_has_no_label_after_list() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        let list = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].label.is_none());
+    }
+
+    #[tokio::test]
+    async fn backup_label_validation_rejects_bad_input() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        // Spaces — rejected
+        assert!(matches!(
+            BackupService::backup_database(
+                &mgr,
+                "default",
+                backup_dir.path(),
+                Some("has spaces".to_owned()),
+            )
+            .await,
+            Err(ServiceError::BadRequest(_))
+        ));
+
+        // Slashes (path traversal attempt) — rejected
+        assert!(matches!(
+            BackupService::backup_database(
+                &mgr,
+                "default",
+                backup_dir.path(),
+                Some("../etc".to_owned()),
+            )
+            .await,
+            Err(ServiceError::BadRequest(_))
+        ));
+
+        // Too long — rejected
+        let long = "a".repeat(33);
+        assert!(matches!(
+            BackupService::backup_database(&mgr, "default", backup_dir.path(), Some(long)).await,
+            Err(ServiceError::BadRequest(_))
+        ));
+
+        // Empty string — treated as no label
+        let entry =
+            BackupService::backup_database(&mgr, "default", backup_dir.path(), Some(String::new()))
+                .await
+                .unwrap();
+        assert!(entry.label.is_none());
+    }
+
+    #[tokio::test]
+    async fn labels_sidecar_corrupt_is_ignored() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        // Write a corrupt sidecar and confirm listing still works.
+        let sidecar = backup_dir.path().join("default").join(LABELS_FILENAME);
+        std::fs::write(&sidecar, b"{not json").unwrap();
+
+        let list = BackupService::list_backups(Some("default"), backup_dir.path()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].label.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_backup_clears_label_sidecar() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        let first = BackupService::backup_database(
+            &mgr,
+            "default",
+            backup_dir.path(),
+            Some("first".to_owned()),
+        )
+        .await
+        .unwrap();
+
+        BackupService::delete_backup("default", &first.filename, backup_dir.path()).unwrap();
+
+        // Sidecar should no longer reference the deleted filename.
+        let sidecar = backup_dir.path().join("default").join(LABELS_FILENAME);
+        if sidecar.exists() {
+            let text = std::fs::read_to_string(&sidecar).unwrap();
+            let map: HashMap<String, String> = serde_json::from_str(&text).unwrap();
+            assert!(!map.contains_key(&first.filename));
+        }
     }
 }

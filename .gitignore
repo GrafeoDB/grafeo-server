@@ -7,6 +7,7 @@ Desktop.ini
 # ── IDE / Editor ──────────────────────────────────────────────────────
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
