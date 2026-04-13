@@ -15,16 +15,19 @@ use grafeo_service::types;
 /// Create a full backup of a database.
 ///
 /// Exports a point-in-time snapshot. The database stays available during
-/// the backup (hot snapshot via MVCC checkpoint).
+/// the backup (hot snapshot via MVCC checkpoint). Accepts an optional
+/// `{ label }` body — the label is stored in a sidecar file and surfaced
+/// on listings; filenames remain engine-controlled.
 #[utoipa::path(
     post,
     path = "/admin/{db}/backup",
     params(
         ("db" = String, Path, description = "Database name"),
     ),
+    request_body = types::CreateBackupRequest,
     responses(
         (status = 200, description = "Backup created", body = types::BackupEntry),
-        (status = 400, description = "Backup not configured", body = crate::error::ErrorBody),
+        (status = 400, description = "Backup not configured or invalid label", body = crate::error::ErrorBody),
         (status = 404, description = "Database not found", body = crate::error::ErrorBody),
     ),
     tag = "Admin"
@@ -33,11 +36,13 @@ pub async fn create_backup(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(db): Path<String>,
+    body: Option<Json<types::CreateBackupRequest>>,
 ) -> Result<Json<types::BackupEntry>, ApiError> {
     auth.check_admin()?;
     let backup_dir = require_backup_dir(&state)?;
 
-    let entry = BackupService::backup_database(state.databases(), &db, &backup_dir).await?;
+    let label = body.and_then(|Json(req)| req.label);
+    let entry = BackupService::backup_database(state.databases(), &db, &backup_dir, label).await?;
 
     if let Some(keep) = state.backup_retention() {
         let _ = BackupService::enforce_retention(&db, &backup_dir, keep);
@@ -118,8 +123,16 @@ pub async fn restore_backup(
     auth.check_admin()?;
     let backup_dir = require_backup_dir(&state)?;
 
-    // Validate both params — axum percent-decodes path segments
-    for param in [&db, &req.backup] {
+    // Source database defaults to the target for same-db restores. When
+    // the client provides source_db, this is a cross-database restore and
+    // the backup file lives under {backup_dir}/{source_db}/ rather than
+    // {backup_dir}/{target}/.
+    let source_db = req.source_db.as_deref().unwrap_or(db.as_str());
+
+    // Validate all three path components — axum percent-decodes URL
+    // segments and the JSON body arrives as arbitrary strings, so both
+    // paths need explicit traversal checks before they're joined.
+    for param in [db.as_str(), source_db, req.backup.as_str()] {
         if param.contains('/') || param.contains('\\') || param.contains("..") {
             return Err(grafeo_service::error::ServiceError::BadRequest(
                 "invalid path parameter".to_string(),
@@ -128,7 +141,7 @@ pub async fn restore_backup(
         }
     }
 
-    let backup_path = backup_dir.join(&db).join(&req.backup);
+    let backup_path = backup_dir.join(source_db).join(&req.backup);
 
     BackupService::restore_database(state.databases(), &db, &backup_path, &backup_dir).await?;
 

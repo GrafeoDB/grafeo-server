@@ -1,107 +1,89 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, GrafeoApiError } from "../../api/client";
+import { Link } from "react-router-dom";
+import { api } from "../../api/client";
 import type { DatabaseSummary } from "../../types/api";
 import CreateDatabaseDialog from "./CreateDatabaseDialog";
 import styles from "./DatabasePanel.module.css";
-
-const TYPE_BADGES: Record<string, string> = {
-  lpg: "LPG",
-  rdf: "RDF",
-  "owl-schema": "OWL",
-  "rdfs-schema": "RDFS",
-  "json-schema": "JSON",
-};
 
 interface DatabasePanelProps {
   currentDatabase: string;
   onSelectDatabase: (name: string, dbType?: string) => void;
 }
 
+/**
+ * Narrow-width database picker for the Studio sidebar. A `<select>` is
+ * used (instead of a scrollable list) so the control stays a constant
+ * height regardless of how many databases the server has. The "Manage"
+ * link opens the currently-selected db's details page, bridging the
+ * query-context and db-management surfaces.
+ */
 export default function DatabasePanel({
   currentDatabase,
   onSelectDatabase,
 }: DatabasePanelProps) {
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    api.db.list().then((res) => {
-      setDatabases(res.databases);
-      // Resolve type for the currently selected database
-      const current = res.databases.find((d) => d.name === currentDatabase);
-      if (current?.database_type) {
-        onSelectDatabase(currentDatabase, current.database_type);
-      }
-    }).catch(() => {});
+    api.db
+      .list()
+      .then((res) => {
+        setDatabases(res.databases);
+        const current = res.databases.find((d) => d.name === currentDatabase);
+        if (current?.database_type) {
+          onSelectDatabase(currentDatabase, current.database_type);
+        }
+      })
+      .catch(() => {});
   }, [currentDatabase, onSelectDatabase]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  const handleDelete = async (name: string) => {
-    if (!window.confirm(`Delete database "${name}"? This cannot be undone.`)) {
-      return;
-    }
-    setError(null);
-    try {
-      await api.db.delete(name);
-      if (currentDatabase === name) {
-        onSelectDatabase("default", "lpg");
-      }
-      refresh();
-    } catch (err) {
-      if (err instanceof GrafeoApiError) {
-        setError(err.detail);
-      } else {
-        setError(String(err));
-      }
-    }
+  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const name = e.target.value;
+    const db = databases.find((d) => d.name === name);
+    onSelectDatabase(name, db?.database_type);
   };
+
+  const hasCurrent = databases.some((d) => d.name === currentDatabase);
 
   return (
     <>
-      <ul className={styles.dbList}>
-        {databases.map((db) => (
-          <li key={db.name} className={styles.dbItem}>
-            <button
-              className={`${styles.dbButton} ${db.name === currentDatabase ? styles.active : ""}`}
-              onClick={() => onSelectDatabase(db.name, db.database_type)}
-              title={`${db.node_count} nodes, ${db.edge_count} edges`}
-            >
-              <span className={styles.dbName}>{db.name}</span>
-              <span className={styles.dbMeta}>
-                {db.database_type && db.database_type !== "lpg" && (
-                  <span className={styles.typeBadge}>
-                    {TYPE_BADGES[db.database_type] ?? db.database_type}
-                  </span>
-                )}
-                <span className={styles.dbCounts}>
-                  {db.node_count}n/{db.edge_count}e
-                </span>
-              </span>
-            </button>
-            <button
-              className={styles.deleteButton}
-              onClick={() => handleDelete(db.name)}
-              disabled={db.name === "default"}
-              title={db.name === "default" ? "Cannot delete default" : `Delete ${db.name}`}
-            >
-              x
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      <button
-        className={styles.newDbButton}
-        onClick={() => setDialogOpen(true)}
+      <select
+        className={styles.select}
+        value={hasCurrent ? currentDatabase : ""}
+        onChange={handleChange}
+        aria-label="Active database"
+        disabled={databases.length === 0}
       >
-        + New Database
-      </button>
+        {databases.length === 0 && <option value="">No databases</option>}
+        {databases.map((db) => (
+          <option key={db.name} value={db.name}>
+            {db.name} ({db.node_count.toLocaleString()}n · {db.edge_count.toLocaleString()}e)
+          </option>
+        ))}
+      </select>
 
-      {error && <div className={styles.error}>{error}</div>}
+      <div className={styles.actions}>
+        <button
+          type="button"
+          className={styles.actionButton}
+          onClick={() => setDialogOpen(true)}
+        >
+          + New database
+        </button>
+        {hasCurrent && (
+          <Link
+            to={`/databases/${encodeURIComponent(currentDatabase)}`}
+            className={styles.actionLink}
+            title={`Manage ${currentDatabase}`}
+          >
+            Manage →
+          </Link>
+        )}
+      </div>
 
       <CreateDatabaseDialog
         open={dialogOpen}

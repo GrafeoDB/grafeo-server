@@ -445,14 +445,34 @@ pub struct BackupEntry {
     pub end_epoch: u64,
     /// CRC-32 checksum of the backup file.
     pub checksum: u32,
+    /// Optional user-supplied label (stored in a sidecar file, not the filename).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Request body for creating a backup.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateBackupRequest {
+    /// Optional label for the backup. Must match `^[A-Za-z0-9_-]{1,32}$` when set.
+    /// Stored in a sidecar file alongside the backup so filenames stay
+    /// engine-controlled.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Request to restore a database from a backup.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreRequest {
-    /// Backup filename (within the configured backup directory).
+    /// Backup filename (within the source database's backup subdirectory).
     pub backup: String,
+    /// Source database whose backup subdirectory holds the file.
+    /// Defaults to the target database path parameter, which is the
+    /// same-database restore case. Set to a different value for cross-
+    /// database restores (e.g. restore prod's snapshot into staging).
+    #[serde(default)]
+    pub source_db: Option<String>,
 }
 
 /// Request to restore a database to a specific epoch.
