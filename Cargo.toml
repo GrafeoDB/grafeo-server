@@ -76,6 +76,8 @@ single_match_else = "allow"
 unnecessary_wraps = "allow"
 unused_self = "allow"
 manual_let_else = "allow"
+# `Duration::from_mins` requires Rust 1.94+; MSRV is 1.91.1.
+duration_suboptimal_units = "allow"
 
 # --- Binary crate ---
 

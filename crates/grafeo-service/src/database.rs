@@ -59,9 +59,7 @@ pub struct DatabaseMetadata {
 
 impl Default for DatabaseMetadata {
     fn default() -> Self {
-        let num_cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let num_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         Self {
             database_type: "lpg".to_string(),
             storage_mode: "in-memory".to_string(),
@@ -258,8 +256,7 @@ impl DatabaseManager {
                                         storage_mode: "persistent".to_string(),
                                         backward_edges: true,
                                         threads: std::thread::available_parallelism()
-                                            .map(|n| n.get())
-                                            .unwrap_or(1),
+                                            .map_or(1, |n| n.get()),
                                     };
                                     mgr.databases.insert(
                                         name,
@@ -405,9 +402,7 @@ impl DatabaseManager {
             .unwrap_or(DEFAULT_MEMORY_LIMIT);
         let backward_edges = req.options.backward_edges.unwrap_or(true);
         let threads = req.options.threads.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
+            std::thread::available_parallelism().map_or(1, |n| n.get())
         });
 
         let mut config = match req.storage_mode {
