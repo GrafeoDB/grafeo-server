@@ -401,9 +401,10 @@ impl DatabaseManager {
             .memory_limit_bytes
             .unwrap_or(DEFAULT_MEMORY_LIMIT);
         let backward_edges = req.options.backward_edges.unwrap_or(true);
-        let threads = req.options.threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |n| n.get())
-        });
+        let threads = req
+            .options
+            .threads
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
 
         let mut config = match req.storage_mode {
             StorageMode::InMemory => Config::in_memory(),
