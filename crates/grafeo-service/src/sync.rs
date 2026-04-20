@@ -590,12 +590,10 @@ fn server_is_newer(
     entity_id: grafeo_engine::cdc::EntityId,
     client_timestamp: u64,
 ) -> bool {
-    db.history(entity_id)
-        .map(|events| {
-            let client_ts = grafeo_common::types::HlcTimestamp::from_u64(client_timestamp);
-            events.iter().any(|e| e.timestamp > client_ts)
-        })
-        .unwrap_or(false)
+    db.history(entity_id).is_ok_and(|events| {
+        let client_ts = grafeo_common::types::HlcTimestamp::from_u64(client_timestamp);
+        events.iter().any(|e| e.timestamp > client_ts)
+    })
 }
 
 /// Computes a stable schema version string for `db`.

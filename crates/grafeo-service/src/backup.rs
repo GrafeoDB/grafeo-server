@@ -179,9 +179,7 @@ impl BackupService {
                 .map_err(|e| ServiceError::Internal(e.to_string()))?
                 .map_err(|e| ServiceError::Internal(format!("backup failed: {e}")))?;
 
-            let size_bytes = std::fs::metadata(dir.join(&filename))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size_bytes = std::fs::metadata(dir.join(&filename)).map_or(0, |m| m.len());
 
             tracing::info!(
                 database = %db_name_owned,
@@ -878,7 +876,7 @@ impl BackupService {
                     .collect();
                 // Keep the newest `keep` untracked files too
                 if untracked.len() > keep {
-                    untracked.sort_by(|a, b| b.1.cmp(&a.1));
+                    untracked.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (fname, _) in untracked.into_iter().skip(keep) {
                         if std::fs::remove_file(dir.join(&fname)).is_ok() {
                             tracing::info!(filename = %fname, "Removed untracked backup (retention)");
@@ -912,7 +910,7 @@ impl BackupService {
         }
 
         // Sort newest first
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut deleted = Vec::new();
         for (filename, _) in files.into_iter().skip(keep) {

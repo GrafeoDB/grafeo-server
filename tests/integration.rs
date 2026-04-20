@@ -3390,6 +3390,56 @@ async fn schema_namespace_database_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
+#[tokio::test]
+async fn create_graph_rejects_slash_in_name() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/graphs"))
+        .json(&json!({ "name": "ana/lytics" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "bad_request");
+
+    let resp = client
+        .get(format!("{base}/db/default/graphs"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let graphs = body["graphs"].as_array().unwrap();
+    assert!(graphs.iter().all(|g| g.as_str() != Some("ana/lytics")));
+}
+
+#[tokio::test]
+async fn create_schema_rejects_slash_in_name() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/schemas"))
+        .json(&json!({ "name": "ana/lytics" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "bad_request");
+
+    let resp = client
+        .get(format!("{base}/db/default/schemas"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let schemas = body["schemas"].as_array().unwrap();
+    assert!(schemas.iter().all(|s| s.as_str() != Some("ana/lytics")));
+}
+
 // ---------------------------------------------------------------------------
 // Bulk import endpoints
 // ---------------------------------------------------------------------------

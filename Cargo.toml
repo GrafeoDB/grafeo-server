@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.38"
+version = "0.5.40"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -19,8 +19,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.38", default-features = false }
-grafeo-common = { version = "0.5.38" }
+grafeo-engine = { version = "0.5.40", default-features = false }
+grafeo-common = { version = "0.5.40" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -76,6 +76,8 @@ single_match_else = "allow"
 unnecessary_wraps = "allow"
 unused_self = "allow"
 manual_let_else = "allow"
+# `Duration::from_mins` requires Rust 1.94+; MSRV is 1.91.1.
+duration_suboptimal_units = "allow"
 
 # --- Binary crate ---
 
