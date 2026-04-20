@@ -31,8 +31,7 @@ async fn cluster_is_up() -> bool {
     c.get(format!("{PRIMARY}/health"))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .is_ok_and(|r| r.status().is_success())
 }
 
 async fn query(base: &str, gql: &str) -> Value {
