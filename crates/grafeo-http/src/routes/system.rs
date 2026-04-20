@@ -107,9 +107,7 @@ pub async fn system_resources(State(state): State<AppState>) -> impl IntoRespons
         available_types.push("JsonSchema".to_string());
     }
 
-    let num_cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let num_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
 
     Json(SystemResources {
         total_memory_bytes,
