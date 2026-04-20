@@ -5,6 +5,19 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.40] - Unreleased
+
+Engine 0.5.40 alignment: catalog name validation, stats simplification.
+
+### Added
+
+- **Catalog name validation**: `POST /db/{name}/graphs` and `POST /db/{name}/schemas` now return 400 `bad_request` when the supplied name contains `/`, matching engine 0.5.40's compound `schema/graph` storage-key rule. Previously surfaced as a scrubbed 500.
+
+### Changed
+
+- **grafeo-engine 0.5.40**: unified hybrid queries (`text_score()` / `text_match()` filter pushdown, BM25 top-K operator), native Float64 / Float32Vector codecs in CompactStore, `Session::execute_streaming` (experimental, not yet exposed by server), commit-failure auto-rollback, multi-schema transaction atomicity fix, MERGE index lookup, LayeredStore new-node visibility and post-`compact()` index fixes.
+- **`DatabaseStats.memory_bytes` override removed**: engine 0.5.40 now sets `memory_bytes` to the full heap breakdown itself, so `AdminService::database_stats` no longer recomputes it via `memory_usage().total_bytes`. `disk_bytes` override stays until the engine grows a proper accessor.
+
 ## [0.5.38] - 2026-04-13
 
 Security hardening, operational maturity, auth improvements, Bolt protocol compliance, and engine 0.5.38 alignment.

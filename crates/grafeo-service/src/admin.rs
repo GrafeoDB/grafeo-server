@@ -17,18 +17,10 @@ pub struct AdminService;
 impl AdminService {
     /// Get detailed database statistics.
     ///
-    /// `memory_bytes` and `disk_bytes` come from the engine's
-    /// `detailed_stats()` path, which currently has two blind spots:
-    ///
-    /// - `memory_bytes` is just `buffer_manager.allocated()`, which is
-    ///   ~0 for most databases. We override it with
-    ///   `memory_usage().total_bytes` which walks every structure.
-    /// - `disk_bytes` feeds a file path to a directory-walker, so it
-    ///   always returns `None`. We compute it from the db's on-disk
-    ///   directory under `data_dir`.
-    ///
-    /// Both overrides should go away if the engine grows proper
-    /// accessors.
+    /// `disk_bytes` is computed from the per-db directory under `data_dir`
+    /// because the engine's `detailed_stats()` feeds a file path to a
+    /// directory-walker and always returns `None`. This override should go
+    /// away if the engine grows a proper accessor.
     pub async fn database_stats(
         databases: &DatabaseManager,
         db_name: &str,
@@ -36,14 +28,9 @@ impl AdminService {
         let entry = databases.get_available(db_name)?;
         let per_db_dir = databases.data_dir().map(|root| root.join(db_name));
 
-        let (stats, memory_total) = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            let stats = db.detailed_stats();
-            let memory_total = db.memory_usage().total_bytes;
-            (stats, memory_total)
-        })
-        .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        let stats = tokio::task::spawn_blocking(move || entry.db().detailed_stats())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
         let disk_bytes = per_db_dir.and_then(|p| calculate_db_disk_usage(&p));
 
@@ -55,7 +42,7 @@ impl AdminService {
             edge_type_count: stats.edge_type_count,
             property_key_count: stats.property_key_count,
             index_count: stats.index_count,
-            memory_bytes: memory_total,
+            memory_bytes: stats.memory_bytes,
             disk_bytes,
         })
     }
@@ -286,6 +273,8 @@ impl AdminService {
             return Err(ServiceError::ReadOnly);
         }
 
+        validate_catalog_name("graph", &graph_name)?;
+
         let entry = databases.get_available(db_name)?;
 
         tokio::task::spawn_blocking(move || entry.db().create_graph(&graph_name))
@@ -500,6 +489,8 @@ impl AdminService {
             return Err(ServiceError::ReadOnly);
         }
 
+        validate_catalog_name("schema", schema_name)?;
+
         let result = crate::query::QueryService::execute(
             databases,
             metrics,
@@ -706,6 +697,18 @@ impl AdminService {
             "shacl feature not enabled".to_owned(),
         ))
     }
+}
+
+/// Reject names containing `/`, which grafeo-engine uses internally as the
+/// `schema/graph` compound storage-key separator. Catching this at the service
+/// layer surfaces as a clean 400 instead of a scrubbed 500 from the engine.
+fn validate_catalog_name(kind: &'static str, name: &str) -> Result<(), ServiceError> {
+    if name.contains('/') {
+        return Err(ServiceError::BadRequest(format!(
+            "{kind} name must not contain '/'"
+        )));
+    }
+    Ok(())
 }
 
 /// Recursively sum the size of every regular file under `dir`.
