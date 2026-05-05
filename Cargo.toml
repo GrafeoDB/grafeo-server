@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.40"
+version = "0.5.42"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -19,8 +19,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.40", default-features = false }
-grafeo-common = { version = "0.5.40" }
+grafeo-engine = { version = "0.5.42", default-features = false }
+grafeo-common = { version = "0.5.42" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }

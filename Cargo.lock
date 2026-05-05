@@ -83,7 +83,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -94,7 +94,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -826,6 +826,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "daachorse"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2"
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -989,7 +995,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1061,7 +1067,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1340,9 +1346,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.40"
+version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dedf4583331f454075c556eecd10189118455e7c7c4c16da4731c3b1c58f6556"
+checksum = "38cf1373a739aeaa070430588c4026b3c1aa11cd0ad6e6673bda22a390aacda4"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -1358,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1374,9 +1380,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.40"
+version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a13e9fc1765fc04fc9ff79ded166aa1f83c320ae20c25f0b38dbc059a76e6c3"
+checksum = "b5f446c25eeedab9cccaabc85060dfa08dac2d1041974244864f36436b81ca5a"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1396,10 +1402,11 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.40"
+version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40f3479fe37b2a0a4565d950ba2c74df2d620242ad53b84e5d59088e33cce26b"
+checksum = "9e185dd750843637a2d99e56100c08ef4cc34ce4a7b5f9cb9566f873bbf54c90"
 dependencies = [
+ "arc-swap",
  "arcstr",
  "bincode",
  "byteorder",
@@ -1426,15 +1433,16 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.40"
+version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d67a587ba7505f9743a1d03014c0ab1afc8dbba20ba018831fc103136d599cb4"
+checksum = "ede967e6b0a16396c91752febdf037ab04ca69b851f6fb43565ee5f30586ee0d"
 dependencies = [
  "arcstr",
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
  "bincode",
+ "bytes",
  "crc32fast",
  "crossbeam",
  "grafeo-adapters",
@@ -1445,6 +1453,7 @@ dependencies = [
  "hf-hub",
  "indexmap",
  "md5",
+ "memmap2",
  "ort",
  "parking_lot",
  "rayon",
@@ -1461,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1477,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "async-stream",
  "axum",
@@ -1508,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "serde",
  "serde_json",
@@ -1516,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-server"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1541,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1570,9 +1579,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.5.40"
+version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21670e106a7d314086b3190483fdda0004649922aa271906577edcb2e1868f8b"
+checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1590,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1599,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.5.40"
+version = "0.5.42"
 dependencies = [
  "axum",
  "grafeo-service",
@@ -2475,7 +2484,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3398,7 +3407,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3457,7 +3466,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3709,7 +3718,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3899,7 +3908,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4029,13 +4038,13 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenizers"
-version = "0.22.2"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b238e22d44a15349529690fb07bd645cf58149a1b1e44d6cb5bd1641ff1a6223"
+checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
 dependencies = [
  "ahash",
- "aho-corasick",
  "compact_str",
+ "daachorse",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
@@ -4873,7 +4882,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
