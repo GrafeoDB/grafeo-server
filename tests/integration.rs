@@ -7599,3 +7599,96 @@ async fn rate_limit_xff_trusted_from_loopback() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 }
+
+// ===========================================================================
+// Search procedures (engine 0.5.41 - CALL grafeo.search.*)
+// ===========================================================================
+
+#[cfg(feature = "text-index")]
+#[tokio::test]
+async fn call_grafeo_search_text_via_http() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed two nodes with a text-indexed property.
+    let seed = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    // Create a text index on Doc.body.
+    let idx = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure.
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().expect("rows array");
+    assert!(!rows.is_empty(), "expected at least one match for 'fox'");
+}
+
+#[cfg(feature = "vector-index")]
+#[tokio::test]
+async fn call_grafeo_search_vector_via_http() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed nodes with vector-typed embeddings (vector() coerces the list literal
+    // to Value::Vector so the HNSW index can pick it up).
+    let seed = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Item {emb: vector([1.0, 0.0, 0.0])}), (:Item {emb: vector([0.0, 1.0, 0.0])})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    let idx = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({
+            "type": "vector", "label": "Item", "property": "emb",
+            "dimensions": 3, "metric": "cosine"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CALL grafeo.search.vector('Item', 'emb', [1.0, 0.0, 0.0], 2) YIELD node_id, distance RETURN node_id, distance"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected 2 nearest neighbours, got {}",
+        rows.len()
+    );
+}
