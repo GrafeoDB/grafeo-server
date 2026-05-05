@@ -3240,6 +3240,167 @@ async fn admin_memory_usage_not_found() {
 }
 
 // ===========================================================================
+// Storage tiers endpoint (engine 0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn admin_storage_tiers_returns_tier_list() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let tiers = body["tiers"].as_array().expect("tiers is array");
+    assert!(!tiers.is_empty(), "expected at least one section");
+    for entry in tiers {
+        assert!(entry["section"].is_string());
+        let tier = entry["tier"].as_str().unwrap();
+        assert!(
+            tier == "in_memory" || tier == "uninitialized",
+            "in-memory db must not report on_disk; got {tier}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_storage_tiers_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/nonexistent/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ===========================================================================
+// Reload eligible endpoint (engine 0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn admin_reload_eligible_in_memory_returns_zero() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_accepts_explicit_fraction() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .json(&json!({ "target_fraction": 0.5 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["reloaded"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/nonexistent/reload-eligible"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ===========================================================================
+// Storage tiers round-trip (section_tiers, v0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn create_database_with_section_tiers_roundtrips_via_storage_tiers() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create a db with section_tiers set to auto (exercises the parser
+    // and Config plumbing without forcing a tier transition).
+    let create = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "tiered_http",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "section_tiers": {
+                    "VectorStore": "auto",
+                    "LpgStore": "auto"
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200, "{}", create.text().await.unwrap());
+
+    // Confirm the new endpoint reports a tier list for the new db.
+    let resp = client
+        .get(format!("{base}/admin/tiered_http/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["tiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["section"] == "LpgStore")
+    );
+}
+
+#[tokio::test]
+async fn create_database_rejects_invalid_section_tier_value() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "bad_tier",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "section_tiers": { "VectorStore": "frozen" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+// ===========================================================================
 // Named graphs (v0.4.7)
 // ===========================================================================
 

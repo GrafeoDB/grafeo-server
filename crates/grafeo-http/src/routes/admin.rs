@@ -173,6 +173,49 @@ pub async fn admin_memory_usage(
     Ok(Json(usage))
 }
 
+/// Get the current storage tier of every section in a database (engine 0.5.42).
+#[utoipa::path(
+    get, path = "/admin/{db}/storage-tiers",
+    params(("db" = String, Path, description = "Database name")),
+    responses(
+        (status = 200, description = "Storage tiers", body = types::StorageTiersResponse),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_storage_tiers(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+) -> Result<Json<types::StorageTiersResponse>, ApiError> {
+    auth.check_admin()?;
+    let resp = AdminService::storage_tiers(state.databases(), &db).await?;
+    Ok(Json(resp))
+}
+
+/// Reload spilled sections back into RAM (engine 0.5.42).
+#[utoipa::path(
+    post, path = "/admin/{db}/reload-eligible",
+    params(("db" = String, Path, description = "Database name")),
+    request_body = types::ReloadEligibleRequest,
+    responses(
+        (status = 200, description = "Number of sections reloaded", body = types::ReloadEligibleResponse),
+        (status = 404, description = "Database not found", body = crate::error::ErrorBody),
+    ),
+    tag = "Admin"
+)]
+pub async fn admin_reload_eligible(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(db): Path<String>,
+    Json(req): Json<types::ReloadEligibleRequest>,
+) -> Result<Json<types::ReloadEligibleResponse>, ApiError> {
+    auth.check_admin()?;
+    let reloaded =
+        AdminService::reload_eligible(state.databases(), &db, req.target_fraction).await?;
+    Ok(Json(types::ReloadEligibleResponse { reloaded }))
+}
+
 /// Drop an index from a database.
 #[utoipa::path(
     delete, path = "/admin/{db}/index",

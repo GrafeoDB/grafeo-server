@@ -116,6 +116,14 @@ pub struct DatabaseOptions {
     /// Optional path for out-of-core spill processing.
     #[serde(default)]
     pub spill_path: Option<String>,
+    /// Per-section storage tier overrides applied at db open (engine 0.5.42).
+    ///
+    /// Map of section name to tier override string. Recognised section names:
+    /// `LpgStore`, `RdfStore`, `CompactStore`, `VectorStore`, `TextIndex`,
+    /// `RdfRing`, `PropertyIndex`, `Catalog`. Recognised tier values:
+    /// `auto` (default), `force_ram`, `force_disk`.
+    #[serde(default)]
+    pub section_tiers: Option<std::collections::HashMap<String, String>>,
 }
 
 // --- Output types ---
@@ -705,6 +713,45 @@ pub struct ShaclViolation {
     pub message: Option<String>,
 }
 
+// ============================================================================
+// Storage tier types (engine 0.5.42)
+// ============================================================================
+
+/// One section's current storage tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SectionTierInfo {
+    /// Section name (e.g. `"LpgStore"`, `"VectorStore"`, `"CompactStore"`).
+    pub section: String,
+    /// Current tier (`"in_memory"`, `"on_disk"`, `"uninitialized"`).
+    pub tier: String,
+}
+
+/// Response for `GET /admin/{db}/storage-tiers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StorageTiersResponse {
+    pub tiers: Vec<SectionTierInfo>,
+}
+
+/// Request for `POST /admin/{db}/reload-eligible`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReloadEligibleRequest {
+    /// Target fraction of memory budget to occupy after reload, in `[0.0, 1.0]`.
+    /// Default: `0.7`.
+    #[serde(default)]
+    pub target_fraction: Option<f64>,
+}
+
+/// Response for `POST /admin/{db}/reload-eligible`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReloadEligibleResponse {
+    /// Number of sections that were reloaded from disk into RAM.
+    pub reloaded: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,5 +883,35 @@ mod tests {
     fn storage_mode_as_str() {
         assert_eq!(StorageMode::InMemory.as_str(), "in-memory");
         assert_eq!(StorageMode::Persistent.as_str(), "persistent");
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage tier types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn storage_tiers_response_serializes_section_keys_as_strings() {
+        let resp = StorageTiersResponse {
+            tiers: vec![
+                SectionTierInfo {
+                    section: "VectorStore".to_string(),
+                    tier: "in_memory".to_string(),
+                },
+                SectionTierInfo {
+                    section: "CompactStore".to_string(),
+                    tier: "on_disk".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["tiers"][0]["section"], "VectorStore");
+        assert_eq!(json["tiers"][0]["tier"], "in_memory");
+        assert_eq!(json["tiers"][1]["tier"], "on_disk");
+    }
+
+    #[test]
+    fn reload_eligible_request_default_target_fraction() {
+        let req: ReloadEligibleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!((req.target_fraction.unwrap_or(0.7) - 0.7).abs() < 1e-9);
     }
 }

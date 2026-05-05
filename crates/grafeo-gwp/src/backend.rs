@@ -551,6 +551,7 @@ impl GqlBackend for GrafeoBackend {
                 wal_enabled: config.wal_enabled,
                 wal_durability: config.wal_durability,
                 spill_path: None,
+                section_tiers: None,
             },
             schema_file: None,
             schema_filename: None,

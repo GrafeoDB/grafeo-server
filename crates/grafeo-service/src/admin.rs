@@ -11,6 +11,19 @@ use crate::error::ServiceError;
 use crate::metrics::Metrics;
 use crate::types;
 
+/// Convert a `StorageTier` to its string representation.
+///
+/// `StorageTier` is `#[non_exhaustive]`, so we must include a wildcard arm.
+fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str {
+    use grafeo_common::memory::buffer::StorageTier;
+    match tier {
+        StorageTier::InMemory => "in_memory",
+        StorageTier::OnDisk => "on_disk",
+        StorageTier::Uninitialized => "uninitialized",
+        _ => "unknown",
+    }
+}
+
 /// Stateless admin operations.
 pub struct AdminService;
 
@@ -247,6 +260,45 @@ impl AdminService {
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
         serde_json::to_value(&usage).map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Get current storage tier for every section consumer in a database.
+    pub async fn storage_tiers(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<types::StorageTiersResponse, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+
+        let raw = tokio::task::spawn_blocking(move || entry.db().storage_tiers())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+        let mut tiers: Vec<types::SectionTierInfo> = raw
+            .into_iter()
+            .map(|(section, tier)| types::SectionTierInfo {
+                section: format!("{:?}", section),
+                tier: tier_to_str(tier).to_string(),
+            })
+            .collect();
+        tiers.sort_by(|a, b| a.section.cmp(&b.section));
+
+        Ok(types::StorageTiersResponse { tiers })
+    }
+
+    /// Reload spilled sections back into RAM until projected memory usage
+    /// reaches `target_fraction * memory_limit`. `target_fraction` is clamped
+    /// to `[0.0, 1.0]` by the engine; default is `0.7`.
+    pub async fn reload_eligible(
+        databases: &DatabaseManager,
+        db_name: &str,
+        target_fraction: Option<f64>,
+    ) -> Result<usize, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+        let target = target_fraction.unwrap_or(0.7);
+
+        tokio::task::spawn_blocking(move || entry.db().reload_eligible(target))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
     /// List named graphs within a database.
@@ -1144,6 +1196,61 @@ mod tests {
     async fn test_write_snapshot_not_found() {
         let state = ServiceState::new_in_memory(300);
         let err = AdminService::write_snapshot(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_storage_tiers_default_db_returns_section_list() {
+        let state = ServiceState::new_in_memory(300);
+        let resp = AdminService::storage_tiers(state.databases(), "default")
+            .await
+            .unwrap();
+        // In-memory DB: at least one consumer (LpgStore) is present and reports InMemory.
+        assert!(!resp.tiers.is_empty(), "expected non-empty tier list");
+        assert!(
+            resp.tiers
+                .iter()
+                .all(|t| t.tier == "in_memory" || t.tier == "uninitialized"),
+            "in-memory db should never report on_disk tiers, got {:?}",
+            resp.tiers
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_tiers_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::storage_tiers(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_in_memory_returns_zero() {
+        // No on-disk consumers in an in-memory db, so reload_eligible reports 0.
+        let state = ServiceState::new_in_memory(300);
+        let n = AdminService::reload_eligible(state.databases(), "default", Some(0.7))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_clamps_target_fraction() {
+        // Engine clamps to [0.0, 1.0]; we should not error on out-of-range input.
+        let state = ServiceState::new_in_memory(300);
+        let n = AdminService::reload_eligible(state.databases(), "default", Some(2.5))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::reload_eligible(state.databases(), "nonexistent", None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));

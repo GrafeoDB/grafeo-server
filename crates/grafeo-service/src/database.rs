@@ -48,6 +48,39 @@ fn parse_durability(s: &str) -> Result<DurabilityMode, ServiceError> {
     }
 }
 
+fn parse_section_type(name: &str) -> Result<grafeo_common::storage::SectionType, ServiceError> {
+    use grafeo_common::storage::SectionType;
+    Ok(match name {
+        "LpgStore" => SectionType::LpgStore,
+        "RdfStore" => SectionType::RdfStore,
+        "CompactStore" => SectionType::CompactStore,
+        "VectorStore" => SectionType::VectorStore,
+        "TextIndex" => SectionType::TextIndex,
+        "RdfRing" => SectionType::RdfRing,
+        "PropertyIndex" => SectionType::PropertyIndex,
+        "Catalog" => SectionType::Catalog,
+        other => {
+            return Err(ServiceError::BadRequest(format!(
+                "unknown section type '{other}': expected one of \
+                 LpgStore, RdfStore, CompactStore, VectorStore, TextIndex, \
+                 RdfRing, PropertyIndex, Catalog"
+            )));
+        }
+    })
+}
+
+fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, ServiceError> {
+    use grafeo_common::storage::TierOverride;
+    match s.to_lowercase().as_str() {
+        "auto" => Ok(TierOverride::Auto),
+        "force_ram" | "forceram" => Ok(TierOverride::ForceRam),
+        "force_disk" | "forcedisk" => Ok(TierOverride::ForceDisk),
+        other => Err(ServiceError::BadRequest(format!(
+            "invalid tier '{other}': expected \"auto\", \"force_ram\", or \"force_disk\""
+        ))),
+    }
+}
+
 /// Creation-time metadata stored alongside each database.
 #[derive(Clone)]
 pub struct DatabaseMetadata {
@@ -450,6 +483,15 @@ impl DatabaseManager {
 
         if let Some(ref spill_path) = req.options.spill_path {
             config = config.with_spill_path(spill_path);
+        }
+
+        // Apply per-section storage tier overrides (engine 0.5.42).
+        if let Some(ref section_tiers) = req.options.section_tiers {
+            for (section_name, tier_str) in section_tiers {
+                let section_type = parse_section_type(section_name)?;
+                let tier = parse_tier_override(tier_str)?;
+                config = config.with_section_tier(section_type, tier);
+            }
         }
 
         tracing::info!(
@@ -1100,5 +1142,81 @@ mod tests {
 
         // Cleanup
         entry.set_available();
+    }
+
+    #[test]
+    fn create_database_with_section_tier_overrides() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "force_disk".to_string());
+        section_tiers.insert("CompactStore".to_string(), "auto".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "tiered".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        mgr.create(&req).expect("create succeeds");
+        assert!(mgr.get("tiered").is_some());
+    }
+
+    #[test]
+    fn create_database_rejects_unknown_section_tier_name() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("NotASection".to_string(), "auto".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "bad".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        let err = mgr.create(&req).expect_err("invalid section");
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[test]
+    fn create_database_rejects_unknown_tier_value() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "frozen".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "bad2".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        let err = mgr.create(&req).expect_err("invalid tier");
+        assert!(matches!(err, ServiceError::BadRequest(_)));
     }
 }
