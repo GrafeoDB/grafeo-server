@@ -8142,3 +8142,29 @@ async fn upsert_rejects_non_object_rows() {
     assert_eq!(status, 400);
     assert!(body.to_string().contains("row 1"), "{body}");
 }
+
+#[tokio::test]
+async fn upsert_rejects_integer_keys_beyond_i64() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/upsert/nodes"))
+        .json(&json!({
+            "labels": ["Item"],
+            "key": "id",
+            "rows": [
+                {"id": 1},
+                {"id": 2},
+                {"id": 3},
+                {"id": 18_446_744_073_709_551_615_u64}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("row 3"), "body: {text}");
+    assert!(text.contains("out of range"), "body: {text}");
+}

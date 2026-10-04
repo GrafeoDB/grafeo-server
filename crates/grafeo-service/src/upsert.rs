@@ -103,10 +103,15 @@ fn rows_from_json(
     rows.into_iter()
         .enumerate()
         .map(|(index, row)| match row {
-            serde_json::Value::Object(fields) => Ok(fields
+            serde_json::Value::Object(fields) => fields
                 .into_iter()
-                .map(|(key, value)| (PropertyKey::new(key.as_str()), json_to_value(value)))
-                .collect()),
+                .map(|(key, value)| {
+                    let converted = json_to_value(value).map_err(|reason| {
+                        ServiceError::BadRequest(format!("row {index}, property '{key}': {reason}"))
+                    })?;
+                    Ok((PropertyKey::new(key.as_str()), converted))
+                })
+                .collect(),
             other => Err(ServiceError::BadRequest(format!(
                 "row {index} is not a JSON object: {other}"
             ))),
@@ -115,30 +120,39 @@ fn rows_from_json(
 }
 
 /// Converts plain JSON (`42`, `"Alix"`, `[1, 2]`, `{"a": 1}`) to an engine
-/// value. Integers beyond `i64` become `Float64`.
-fn json_to_value(json: serde_json::Value) -> Value {
-    match json {
+/// value. Integers must fit `i64`: rounding a larger one to `Float64` would
+/// make distinct keys collide, so it is rejected with a reason instead.
+fn json_to_value(json: serde_json::Value) -> Result<Value, String> {
+    Ok(match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => n.as_i64().map_or_else(
-            || Value::Float64(n.as_f64().unwrap_or_default()),
-            Value::Int64,
-        ),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else if let Some(u) = n.as_u64() {
+                return Err(format!("integer {u} is out of range (max {})", i64::MAX));
+            } else {
+                match n.as_f64() {
+                    Some(f) if f.is_finite() => Value::Float64(f),
+                    _ => return Err(format!("number {n} is not representable")),
+                }
+            }
+        }
         serde_json::Value::String(s) => Value::from(s),
         serde_json::Value::Array(items) => Value::List(
             items
                 .into_iter()
                 .map(json_to_value)
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()?
                 .into(),
         ),
         serde_json::Value::Object(fields) => Value::Map(Arc::new(
             fields
                 .into_iter()
-                .map(|(key, value)| (PropertyKey::new(key.as_str()), json_to_value(value)))
-                .collect::<BTreeMap<_, _>>(),
+                .map(|(key, value)| Ok((PropertyKey::new(key.as_str()), json_to_value(value)?)))
+                .collect::<Result<BTreeMap<_, _>, String>>()?,
         )),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -146,19 +160,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn integers_beyond_i64_are_rejected_with_row_and_property() {
+        let rows = vec![
+            serde_json::json!({"id": 1}),
+            serde_json::json!({"id": 2}),
+            serde_json::json!({"id": 3}),
+            serde_json::json!({"id": 18_446_744_073_709_551_615_u64}),
+        ];
+        let err = rows_from_json(rows).unwrap_err();
+        let ServiceError::BadRequest(msg) = err else {
+            panic!("expected BadRequest");
+        };
+        assert_eq!(
+            msg,
+            "row 3, property 'id': integer 18446744073709551615 is out of range \
+             (max 9223372036854775807)"
+        );
+    }
+
+    #[test]
+    fn nested_out_of_range_integers_are_rejected() {
+        let in_list = vec![serde_json::json!({"ids": [1, 9_223_372_036_854_775_808_u64]})];
+        assert!(rows_from_json(in_list).is_err());
+        let in_map = vec![serde_json::json!({"m": {"k": 18_446_744_073_709_551_614_u64}})];
+        assert!(rows_from_json(in_map).is_err());
+        let max = vec![serde_json::json!({"id": i64::MAX})];
+        assert!(rows_from_json(max).is_ok());
+    }
+
+    #[test]
     fn json_rows_convert_to_engine_values() {
         let rows = rows_from_json(vec![serde_json::json!({
-            "i": 7, "big": 18_446_744_073_709_551_615_u64, "f": 1.5, "s": "Alix",
+            "i": 7, "neg": -3, "f": 1.5, "s": "Alix",
             "b": true, "n": null, "list": [1, "two"], "map": {"k": 1}
         })])
         .unwrap();
         let row = &rows[0];
         let get = |k: &str| row[&PropertyKey::new(k)].clone();
         assert_eq!(get("i"), Value::Int64(7));
-        assert_eq!(
-            get("big"),
-            Value::Float64(18_446_744_073_709_551_615_u64 as f64)
-        );
+        assert_eq!(get("neg"), Value::Int64(-3));
         assert_eq!(get("f"), Value::Float64(1.5));
         assert_eq!(get("s"), Value::from("Alix"));
         assert_eq!(get("b"), Value::Bool(true));
