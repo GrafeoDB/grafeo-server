@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use grafeo_common::types::{EdgeId, NodeId};
 use serde::{Deserialize, Serialize};
 
+use crate::admin::validate_catalog_name;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 
@@ -331,6 +332,9 @@ impl SyncService {
         db_name: &str,
         request: SyncRequest,
     ) -> Result<SyncResponse, ServiceError> {
+        if databases.is_read_only() {
+            return Err(ServiceError::ReadOnly);
+        }
         let entry = databases.get_available(db_name)?;
 
         let db_handle = entry.db();
@@ -633,7 +637,8 @@ impl SyncService {
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if the server has a CDC event for `entity_id` with a
-/// `timestamp` strictly greater than `client_timestamp`.
+/// `timestamp` strictly greater than `client_timestamp`, reading the history of
+/// the session's current graph.
 ///
 /// When there is no CDC history for the entity (e.g., it was created via a
 /// GQL session, which does not record to the CDC log), the function returns
@@ -694,6 +699,11 @@ fn open_graph_session(
         Some((schema, name)) => (Some(schema), name),
         None => (None, storage_key),
     };
+    let unavailable = |e: &dyn std::fmt::Display| format!("graph_unavailable:{storage_key}: {e}");
+    if let Some(schema) = schema {
+        validate_catalog_name("schema", schema).map_err(|e| unavailable(&e))?;
+    }
+    validate_catalog_name("graph", name).map_err(|e| unavailable(&e))?;
     if schema.is_none() && db.graph_in(None, name).is_err() {
         db.create_graph(name)
             .map_err(|e| format!("graph_unavailable:{storage_key}: {e}"))?;
@@ -1593,5 +1603,69 @@ mod tests {
             "reason: {}",
             resp.conflicts[0].reason
         );
+    }
+
+    #[test]
+    fn apply_is_rejected_on_a_read_only_server() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        drop(DatabaseManager::new(Some(&path), false));
+        let mgr = DatabaseManager::new(Some(&path), true);
+        let before = mgr.get("default").unwrap().db().list_graphs();
+        let req = SyncRequest {
+            client_id: "device-1".to_string(),
+            last_seen_epoch: 0,
+            changes: vec![SyncChangeRequest {
+                kind: "create".to_string(),
+                entity_type: "node".to_string(),
+                id: None,
+                timestamp: 0,
+                labels: Some(vec!["X".to_string()]),
+                edge_type: None,
+                src_id: None,
+                dst_id: None,
+                after: None,
+                crdt_op: None,
+                crdt_property: None,
+                graph: Some("newgraph".to_string()),
+            }],
+            schema_version: None,
+        };
+        let result = SyncService::apply(&mgr, "default", req);
+        assert!(matches!(result, Err(ServiceError::ReadOnly)));
+        assert_eq!(mgr.get("default").unwrap().db().list_graphs(), before);
+    }
+
+    #[test]
+    fn apply_rejects_an_invalid_graph_name() {
+        let mgr = make_manager();
+        let before = mgr.get("default").unwrap().db().list_graphs();
+        let req = SyncRequest {
+            client_id: "device-1".to_string(),
+            last_seen_epoch: 0,
+            changes: vec![SyncChangeRequest {
+                kind: "create".to_string(),
+                entity_type: "node".to_string(),
+                id: None,
+                timestamp: 0,
+                labels: Some(vec!["X".to_string()]),
+                edge_type: None,
+                src_id: None,
+                dst_id: None,
+                after: None,
+                crdt_op: None,
+                crdt_property: None,
+                graph: Some("s1/a/b".to_string()),
+            }],
+            schema_version: None,
+        };
+        let resp = SyncService::apply(&mgr, "default", req).unwrap();
+        assert_eq!(resp.applied, 0);
+        assert!(
+            resp.conflicts[0].reason.starts_with("graph_unavailable:"),
+            "reason: {}",
+            resp.conflicts[0].reason
+        );
+        assert_eq!(mgr.get("default").unwrap().db().list_graphs(), before);
     }
 }

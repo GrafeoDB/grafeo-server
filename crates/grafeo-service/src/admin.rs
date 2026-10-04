@@ -759,7 +759,7 @@ impl AdminService {
 /// Reject names containing `/`, which grafeo-engine uses internally as the
 /// `schema/graph` compound storage-key separator. Catching this at the service
 /// layer surfaces as a clean 400 instead of a scrubbed 500 from the engine.
-fn validate_catalog_name(kind: &'static str, name: &str) -> Result<(), ServiceError> {
+pub(crate) fn validate_catalog_name(kind: &'static str, name: &str) -> Result<(), ServiceError> {
     if name.contains('/') {
         return Err(ServiceError::BadRequest(format!(
             "{kind} name must not contain '/'"
