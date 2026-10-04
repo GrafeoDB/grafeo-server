@@ -21,8 +21,9 @@ use crate::types;
 /// labels but not backups.
 const LABELS_FILENAME: &str = "labels.json";
 
-/// The engine's message when no full backup reaches the requested epoch.
-const UNCOVERED_EPOCH_MESSAGE: &str = "no full backup covers epoch";
+/// How the engine's message starts when no full backup reaches the requested
+/// epoch.
+const UNCOVERED_EPOCH_PREFIX: &str = "no full backup covers epoch";
 
 /// Returns the per-database backup subdirectory.
 fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceError> {
@@ -104,21 +105,35 @@ fn move_db_files(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// True when anything exists at `path`, a dangling symbolic link included.
+/// A path that cannot be checked counts as present.
+pub(crate) fn path_present(path: &Path) -> bool {
+    !matches!(
+        std::fs::symlink_metadata(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 /// Startup recovery for a crash between the two renames of an epoch restore:
 /// the original sits at `data.grafeo.pre-restore` and there is no
-/// `data.grafeo`. Moves it back so the database opens with its data instead
-/// of being recreated empty. When a live database exists too, or the
-/// directory is read-only, nothing moves and an operator decides.
+/// `data.grafeo`. Moves it back, with its WAL, so the database opens with its
+/// data instead of being recreated empty. A lone WAL at the live path is not
+/// a live database: the move reunites the file with it. Nothing moves, and an
+/// operator decides, when `data.grafeo` exists, when the directory is
+/// read-only, or when both sides have a WAL (the move would overwrite one).
 pub(crate) fn recover_orphaned_pre_restore(db_dir: &Path, read_only: bool) {
     let live = db_dir.join("data.grafeo");
     let previous = db_dir.join("data.grafeo.pre-restore");
-    if !db_files_exist(&previous) {
+    let live_wal = sidecar_wal(&live);
+    let previous_wal = sidecar_wal(&previous);
+    if !path_present(&previous) && !path_present(&previous_wal) {
         return;
     }
-    if db_files_exist(&live) {
+    if path_present(&live) {
         tracing::error!(
             path = %previous.display(),
-            "Found a pre-restore copy next to a live database; leaving both in place. It may be the original from an epoch restore: verify it, then remove it"
+            live = %live.display(),
+            "Found a pre-restore copy and a data.grafeo (or one that cannot be checked); leaving both in place. The pre-restore copy may be the original from an epoch restore: verify it, then remove it"
         );
         return;
     }
@@ -129,10 +144,19 @@ pub(crate) fn recover_orphaned_pre_restore(db_dir: &Path, read_only: bool) {
         );
         return;
     }
-    if !previous.try_exists().unwrap_or(false) {
+    if !matches!(previous.try_exists(), Ok(true)) {
         tracing::error!(
             path = %previous.display(),
-            "Found a pre-restore WAL without its database file; leaving it in place for an operator"
+            wal = %previous_wal.display(),
+            "Found a pre-restore WAL, but the pre-restore database file is missing or cannot be checked; leaving everything in place for an operator"
+        );
+        return;
+    }
+    if path_present(&live_wal) && path_present(&previous_wal) {
+        tracing::error!(
+            live_wal = %live_wal.display(),
+            pre_restore_wal = %previous_wal.display(),
+            "Both the live path and the pre-restore copy have a WAL; moving the copy back would overwrite one of them. Leaving everything in place for an operator"
         );
         return;
     }
@@ -431,7 +455,15 @@ impl BackupService {
         let db_file = db_dir.join("data.grafeo");
         let staged = db_dir.join("data.grafeo.restoring");
         let previous = db_dir.join("data.grafeo.pre-restore");
-        let (reopen_config, _) = databases.reopen_config(&db_file);
+        // A stored config the engine cannot fully honour keeps the database
+        // as it is: refuse before anything moves.
+        let (reopen_config, _) = match databases.reopen_config(&db_file) {
+            Ok(pair) => pair,
+            Err(e) => {
+                entry.set_available();
+                return Err(e);
+            }
+        };
 
         // Engine 0.5.43+ never restores over an existing database, so the
         // chain is replayed into a staging file before the live handle
@@ -457,15 +489,17 @@ impl BackupService {
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))
         .and_then(|r| {
-            r.map_err(|e| {
-                let message = format!("restore to epoch failed: {e}");
+            r.map_err(|e| match e {
                 // The engine reports an epoch no full backup reaches as an
                 // internal error; to the caller it is a bad request.
-                if e.to_string().contains(UNCOVERED_EPOCH_MESSAGE) {
-                    ServiceError::BadRequest(message)
-                } else {
-                    ServiceError::Internal(message)
+                grafeo_common::Error::Internal(ref msg)
+                    if msg.starts_with(UNCOVERED_EPOCH_PREFIX) =>
+                {
+                    ServiceError::BadRequest(format!(
+                        "epoch {target_epoch} is not covered by the backup chain: no full backup covers it"
+                    ))
                 }
+                e => ServiceError::Internal(format!("restore to epoch failed: {e}")),
             })
         });
         if let Err(e) = restore_result {
@@ -699,7 +733,7 @@ impl BackupService {
         let db_dir = db_backup_dir(backup_dir, db_name)?;
 
         let (reopen_config, _) =
-            databases.reopen_config(&data_dir.join(db_name).join("data.grafeo"));
+            databases.reopen_config(&data_dir.join(db_name).join("data.grafeo"))?;
 
         if !entry.set_restoring() {
             return Err(ServiceError::Conflict(
@@ -1694,6 +1728,20 @@ mod tests {
         assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
+    #[tokio::test]
+    async fn restore_to_epoch_without_a_manifest_is_still_an_internal_error() {
+        // Only the uncovered-epoch message is a client error.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        let err = BackupService::restore_to_epoch(&mgr, "default", 1, backup_dir.path())
+            .await
+            .expect_err("no backups exist");
+        assert!(matches!(err, ServiceError::Internal(_)), "got: {err:?}");
+        assert!(!mgr.get("default").unwrap().is_restoring());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn restore_to_epoch_unwritable_dir_keeps_database_online() {
@@ -1929,7 +1977,7 @@ mod tests {
             "an uncovered epoch is a client error, got: {err:?}"
         );
         assert!(
-            err.to_string().contains("no full backup covers epoch"),
+            err.to_string().contains("not covered by the backup chain"),
             "unexpected error: {err}"
         );
 

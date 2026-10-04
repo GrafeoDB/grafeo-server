@@ -3589,18 +3589,18 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
     assert!(!data_dir.path().join("nospill").exists());
 }
 
-/// A non-auto tier override on a persistent database is stored with the
-/// database and applied again after a restart.
+/// Survival smoke test: a persistent database created with a non-auto tier
+/// override is stored with it and still serves requests after a restart.
+/// The override itself is pinned by the unit test
+/// `section_tier_override_is_applied_on_reopen`.
 ///
 /// Engine 0.5.44 does not report overrides: `/admin/{db}/storage-tiers` lists
 /// only the sections that hold data, and a `force_disk` spill at open finds
 /// them empty. So this checks what the server controls: the override is
 /// accepted, kept in `options.json`, and the database serves requests from
-/// a second manager on the same directory. The unit test
-/// `section_tier_override_is_applied_on_reopen` pins that the reopened engine
-/// config carries the override.
+/// a second manager on the same directory.
 #[tokio::test]
-async fn force_disk_section_tier_survives_a_manager_restart() {
+async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
     let data_dir = TempDir::new().unwrap();
     let make_state = || {
         let config = grafeo_service::ServiceConfig {
@@ -3701,13 +3701,6 @@ async fn force_disk_section_tier_survives_a_manager_restart() {
     assert_eq!(rows.status(), 200);
     let rows: Value = rows.json().await.unwrap();
     assert_eq!(rows["rows"][0][0], "kept", "{rows}");
-
-    let stored: Value =
-        serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
-    assert_eq!(
-        stored["options"]["section_tiers"]["VectorStore"],
-        "force_disk"
-    );
 }
 
 // ===========================================================================
