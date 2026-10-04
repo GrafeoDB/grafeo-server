@@ -3589,6 +3589,127 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
     assert!(!data_dir.path().join("nospill").exists());
 }
 
+/// A non-auto tier override on a persistent database is stored with the
+/// database and applied again after a restart.
+///
+/// Engine 0.5.44 does not report overrides: `/admin/{db}/storage-tiers` lists
+/// only the sections that hold data, and a `force_disk` spill at open finds
+/// them empty. So this checks what the server controls: the override is
+/// accepted, kept in `options.json`, and the database serves requests from
+/// a second manager on the same directory. The unit test
+/// `section_tier_override_is_applied_on_reopen` pins that the reopened engine
+/// config carries the override.
+#[tokio::test]
+async fn force_disk_section_tier_survives_a_manager_restart() {
+    let data_dir = TempDir::new().unwrap();
+    let make_state = || {
+        let config = grafeo_service::ServiceConfig {
+            data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
+            read_only: false,
+            session_ttl: 300,
+            query_timeout: 30,
+            rate_limit: 0,
+            rate_limit_window: 60,
+            #[cfg(feature = "auth")]
+            auth_token: None,
+            #[cfg(feature = "auth")]
+            auth_user: None,
+            #[cfg(feature = "auth")]
+            auth_password: None,
+            #[cfg(feature = "auth")]
+            token_store_path: None,
+            #[cfg(feature = "replication")]
+            replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
+            backup_dir: None,
+            backup_retention: None,
+        };
+        grafeo_service::ServiceState::new(&config)
+    };
+    let client = Client::new();
+
+    let first = make_state();
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
+        first.clone(),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    ))
+    .await;
+    let create = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "spilled",
+            "database_type": "Lpg",
+            "storage_mode": "Persistent",
+            "options": { "section_tiers": { "VectorStore": "force_disk" } }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200, "{}", create.text().await.unwrap());
+    let seed = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "database": "spilled",
+            "query": "INSERT (:Item {name: 'kept'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    let options_file = data_dir.path().join("spilled").join("options.json");
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
+    assert_eq!(
+        stored["options"]["section_tiers"]["VectorStore"],
+        "force_disk"
+    );
+
+    // Release the first manager's files, then open a second manager on the
+    // same directory.
+    for summary in first.databases().list() {
+        first
+            .databases()
+            .get(&summary.name)
+            .unwrap()
+            .db()
+            .close()
+            .unwrap();
+    }
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
+        make_state(),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    ))
+    .await;
+
+    let tiers = client
+        .get(format!("{base}/admin/spilled/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tiers.status(), 200);
+    let rows = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "database": "spilled",
+            "query": "MATCH (i:Item) RETURN i.name"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rows.status(), 200);
+    let rows: Value = rows.json().await.unwrap();
+    assert_eq!(rows["rows"][0][0], "kept", "{rows}");
+
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
+    assert_eq!(
+        stored["options"]["section_tiers"]["VectorStore"],
+        "force_disk"
+    );
+}
+
 // ===========================================================================
 // Named graphs (v0.4.7)
 // ===========================================================================

@@ -119,12 +119,12 @@ fn read_stored_options(db_dir: &Path) -> Result<Option<StoredOptions>, String> {
     }
 }
 
-/// Writes a database's [`OPTIONS_FILE`] through a temp file and a rename, so
-/// a crash never leaves half a file.
+/// Writes a database's [`OPTIONS_FILE`] through a temp file and a rename,
+/// so a crash never leaves half a file.
 fn write_stored_options(db_dir: &Path, stored: &StoredOptions) -> Result<(), ServiceError> {
     let json = serde_json::to_string_pretty(stored)
         .map_err(|e| ServiceError::Internal(format!("failed to encode database options: {e}")))?;
-    let tmp = db_dir.join("options.json.tmp");
+    let tmp = db_dir.join(format!("{OPTIONS_FILE}.tmp"));
     std::fs::write(&tmp, json)
         .and_then(|()| std::fs::rename(&tmp, db_dir.join(OPTIONS_FILE)))
         .map_err(|e| ServiceError::Internal(format!("failed to write options.json: {e}")))
@@ -590,14 +590,22 @@ impl DatabaseManager {
             Ok(None) => return (base, None),
             Err(e) => {
                 tracing::warn!(
-                    path = %db_dir.display(),
+                    path = %db_dir.join(OPTIONS_FILE).display(),
                     error = %e,
                     "Ignoring unreadable options.json; opening with engine defaults"
                 );
                 return (base, None);
             }
         };
-        match configure(base.clone(), stored.database_type, &stored.options) {
+        // `configure` only checks names; the engine checks the values (zero
+        // threads, zero memory, an RDF type without the triple store). A file
+        // that fails either check falls back to the base config.
+        match configure(base.clone(), stored.database_type, &stored.options).and_then(|config| {
+            config
+                .validate()
+                .map(|()| config)
+                .map_err(|e| ServiceError::BadRequest(e.to_string()))
+        }) {
             Ok(config) => {
                 let metadata = metadata_for(
                     stored.database_type,
@@ -608,7 +616,7 @@ impl DatabaseManager {
             }
             Err(e) => {
                 tracing::warn!(
-                    path = %db_dir.display(),
+                    path = %db_dir.join(OPTIONS_FILE).display(),
                     error = %e,
                     "Ignoring invalid options.json; opening with engine defaults"
                 );
@@ -1884,6 +1892,98 @@ mod tests {
         assert!(db_dir.join("data.grafeo.pre-restore").exists());
     }
 
+    #[test]
+    fn options_that_fail_engine_validation_open_with_engine_defaults() {
+        // `configure` accepts zero threads; the engine's validation does not.
+        // The database must still open.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("zero", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("zero").join(OPTIONS_FILE);
+        let stored = std::fs::read_to_string(&file).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        json["options"]["threads"] = serde_json::json!(0);
+        json["options"]["memory_limit_bytes"] = serde_json::json!(0);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("zero")
+            .expect("a stored file that fails validation must not keep the database closed");
+        assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[test]
+    fn options_with_an_unknown_tier_name_open_with_engine_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("tiers", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("tiers").join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["options"]["section_tiers"] = serde_json::json!({ "NoSuchSection": "force_ram" });
+        json["options"]["memory_limit_bytes"] = serde_json::json!(64 * 1024 * 1024);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("tiers")
+            .expect("valid JSON that fails configure must not keep the database closed");
+        // The whole file is ignored, not applied in part.
+        assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn json_schema_database_type_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let mut req = persistent_request("typed", DatabaseOptions::default());
+            req.database_type = DatabaseType::JsonSchema;
+            req.schema_file = Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                br#"{"definitions":{"Person":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+            ));
+            mgr.create(&req).unwrap();
+            assert_eq!(
+                mgr.get("typed").unwrap().metadata.database_type,
+                "json-schema"
+            );
+        }
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert_eq!(
+            mgr.get("typed").unwrap().metadata.database_type,
+            "json-schema"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn create_with_an_invalid_schema_leaves_no_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("badschema", DatabaseOptions::default());
+        req.database_type = DatabaseType::JsonSchema;
+        req.schema_file = Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"this is not json",
+        ));
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+        assert!(!dir.path().join("badschema").exists());
+        assert!(mgr.get("badschema").is_none());
+    }
+
     #[cfg(feature = "cdc")]
     #[test]
     fn reopen_config_keeps_cdc_on_a_primary() {
@@ -1893,5 +1993,32 @@ mod tests {
         assert!(!mgr.reopen_config(&db_file).0.cdc_enabled);
         mgr.set_cdc_enabled(true);
         assert!(mgr.reopen_config(&db_file).0.cdc_enabled);
+    }
+
+    #[test]
+    fn section_tier_override_is_applied_on_reopen() {
+        use grafeo_common::storage::{SectionType, TierOverride};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut section_tiers = std::collections::HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "force_disk".to_string());
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let options = DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            };
+            mgr.create(&persistent_request("spilled", options)).unwrap();
+        }
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let db_file = dir.path().join("spilled").join("data.grafeo");
+        let (config, _) = mgr.reopen_config(&db_file);
+        let tier = config
+            .section_configs
+            .get(&SectionType::VectorStore)
+            .map(|c| c.tier);
+        assert_eq!(tier, Some(TierOverride::ForceDisk));
+        assert!(mgr.get("spilled").is_some());
     }
 }
