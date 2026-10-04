@@ -120,8 +120,12 @@ fn rows_from_json(
 }
 
 /// Converts plain JSON (`42`, `"Alix"`, `[1, 2]`, `{"a": 1}`) to an engine
-/// value. Integers must fit `i64`: rounding a larger one to `Float64` would
-/// make distinct keys collide, so it is rejected with a reason instead.
+/// value. Accepted: integers in `i64` range (`Int64`) and other finite
+/// numbers (`Float64`). Rejected: integers from `i64::MAX + 1` to `u64::MAX`,
+/// because rounding them to `Float64` would make distinct keys collide.
+/// Limitation: `serde_json` (without `arbitrary_precision`, which is not
+/// enabled) parses integers below `i64::MIN` or above `u64::MAX` as floats,
+/// so those cannot be told apart from real floats and still become `Float64`.
 fn json_to_value(json: serde_json::Value) -> Result<Value, String> {
     Ok(match json {
         serde_json::Value::Null => Value::Null,
@@ -134,6 +138,7 @@ fn json_to_value(json: serde_json::Value) -> Result<Value, String> {
             } else {
                 match n.as_f64() {
                     Some(f) if f.is_finite() => Value::Float64(f),
+                    // Defensive: only reachable with serde_json's `arbitrary_precision`.
                     _ => return Err(format!("number {n} is not representable")),
                 }
             }
@@ -180,10 +185,20 @@ mod tests {
 
     #[test]
     fn nested_out_of_range_integers_are_rejected() {
-        let in_list = vec![serde_json::json!({"ids": [1, 9_223_372_036_854_775_808_u64]})];
-        assert!(rows_from_json(in_list).is_err());
-        let in_map = vec![serde_json::json!({"m": {"k": 18_446_744_073_709_551_614_u64}})];
-        assert!(rows_from_json(in_map).is_err());
+        let message = |row: serde_json::Value| match rows_from_json(vec![row]) {
+            Err(ServiceError::BadRequest(msg)) => msg,
+            other => panic!("expected BadRequest, got {other:?}"),
+        };
+        let in_list = message(serde_json::json!({"ids": [1, 9_223_372_036_854_775_808_u64]}));
+        assert!(
+            in_list.starts_with("row 0, property 'ids': integer 9223372036854775808"),
+            "got: {in_list}"
+        );
+        let in_map = message(serde_json::json!({"m": {"k": 18_446_744_073_709_551_614_u64}}));
+        assert!(
+            in_map.starts_with("row 0, property 'm': integer 18446744073709551614"),
+            "got: {in_map}"
+        );
         let max = vec![serde_json::json!({"id": i64::MAX})];
         assert!(rows_from_json(max).is_ok());
     }
