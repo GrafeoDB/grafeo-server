@@ -5722,6 +5722,47 @@ async fn websocket_subscription_sends_history_from_since_then_live() {
     assert_eq!(body["type"], "pong", "a change arrived twice: {body}");
 }
 
+/// WebSocket: a subscribe that reuses a live `sub_id` and fails still
+/// replaces the old subscription: it ends, and no change arrives for it.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_failed_resubscribe_ends_the_subscription_it_replaces() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    for (target, reply) in [("default", "subscribed"), ("nope", "error")] {
+        ws.send(tungstenite::Message::Text(
+            json!({"type": "subscribe", "sub_id": "s1", "db": target, "since": 0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            next_ws_json(&mut ws).await["type"],
+            reply,
+            "subscribe to {target}"
+        );
+    }
+
+    db.create_node(&["Unseen"]).unwrap();
+    // Give a change time to arrive, then check the next message is the pong.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(
+        body["type"], "pong",
+        "the old subscription still runs: {body}"
+    );
+}
+
 /// WebSocket: a subscribe to a database that does not exist is an error, not
 /// a subscription.
 #[cfg(feature = "push-changefeed")]

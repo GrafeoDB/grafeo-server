@@ -241,7 +241,15 @@ async fn handle_with_subscriptions<S, R>(
                                     }
                                     WsServerMessage::Subscribed { sub_id }
                                 }
-                                Err(e) => error_message(Some(sub_id), &e.0),
+                                Err(e) => {
+                                    // A sub_id in use is replaced even when
+                                    // the new subscribe fails: the old one
+                                    // ends here too.
+                                    if let Some(previous) = sub_tasks.remove(&sub_id) {
+                                        previous.abort();
+                                    }
+                                    error_message(Some(sub_id), &e.0)
+                                }
                             }
                         }
                     }
