@@ -274,10 +274,16 @@ impl SyncService {
         let since_id = grafeo_common::types::EpochId(since);
         let until_id = grafeo_common::types::EpochId(server_epoch);
 
-        let raw = entry
+        let mut raw = entry
             .db()
             .changes_between(since_id, until_id)
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        // Engine 0.5.44 keeps the log per (graph, entity) and sorts only by
+        // epoch, so events of one transaction come back in hash order. Their
+        // HLC timestamps strictly increase, so (epoch, timestamp) restores
+        // the order they happened in: an edge after its endpoints, a node's
+        // delete after its edges'.
+        raw.sort_by_key(|e| (e.epoch, e.timestamp.as_u64()));
 
         let changes = raw.into_iter().take(limit).map(to_dto).collect();
 
@@ -1290,5 +1296,61 @@ mod tests {
         assert_eq!(resp.applied, 0);
         assert_eq!(resp.id_mappings.len(), 0);
         assert!(resp.conflicts[0].reason.starts_with("write_failed:"));
+    }
+
+    #[test]
+    fn pull_returns_events_in_the_order_they_happened() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        let session = db.session();
+        // One statement, one epoch: four nodes chained by three edges.
+        session
+            .execute("INSERT (:C {i: 0})-[:N]->(:C {i: 1})-[:N]->(:C {i: 2})-[:N]->(:C {i: 3})")
+            .unwrap();
+        // Next epoch: DETACH DELETE removes two edges, then the node.
+        session
+            .execute("MATCH (c:C {i: 1}) DETACH DELETE c")
+            .unwrap();
+
+        let changes = SyncService::pull(&mgr, "default", 0, 1000).unwrap().changes;
+
+        let order: Vec<(u64, u64)> = changes.iter().map(|e| (e.epoch, e.timestamp)).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            order, sorted,
+            "events must be ordered by (epoch, timestamp)"
+        );
+
+        let mut live_nodes = std::collections::HashSet::new();
+        let mut live_edges = std::collections::HashMap::new();
+        for e in &changes {
+            match (e.kind.as_str(), e.entity_type.as_str()) {
+                ("create", "node") => {
+                    live_nodes.insert(e.id);
+                }
+                ("create", "edge") => {
+                    let (src, dst) = (e.src_id.unwrap(), e.dst_id.unwrap());
+                    assert!(
+                        live_nodes.contains(&src) && live_nodes.contains(&dst),
+                        "edge {} came before its endpoints",
+                        e.id
+                    );
+                    live_edges.insert(e.id, (src, dst));
+                }
+                ("delete", "edge") => {
+                    live_edges.remove(&e.id);
+                }
+                ("delete", "node") => {
+                    assert!(
+                        !live_edges.values().any(|&(s, d)| s == e.id || d == e.id),
+                        "node {} deleted before its edges",
+                        e.id
+                    );
+                    live_nodes.remove(&e.id);
+                }
+                _ => {}
+            }
+        }
     }
 }
