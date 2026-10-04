@@ -4,8 +4,9 @@
 //! storage return `503 Service Unavailable` with
 //! `{"error": "replica_mode", "message": "..."}`: a local write would make
 //! the replica diverge from its primary and shift the IDs that replicated
-//! changes refer to. GET and HEAD requests are always allowed, and so are the
-//! requests [`write_allowed_on_replica`] lists.
+//! changes refer to. GET and HEAD requests are always allowed (the
+//! changefeed `GET /db/{name}/changes` and its stream among them), and so are
+//! the requests [`write_allowed_on_replica`] lists.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -58,29 +59,38 @@ fn rejected_on_replica(method: &Method, path: &str) -> bool {
 ///   read-only session flag rejects the writes among them
 ///   (`/db/{name}/sparql` is the SPARQL Protocol form of `/sparql`);
 /// - search (POST);
-/// - `POST /db/{name}/sync`: replication itself;
 /// - admin operations that keep or inspect the current state without
 ///   changing it (POST): WAL checkpoint, snapshot, backups, reloading
 ///   spilled sections, clearing the plan cache, SHACL validation;
-/// - token management (`POST /admin/tokens`, `DELETE /admin/tokens/{id}`):
-///   tokens live in the instance's own token store, not in replicated data.
+/// - token management (`POST /admin/tokens`, `DELETE /admin/tokens/{id}`),
+///   on builds with `auth` only: tokens live in the instance's own token
+///   store, not in replicated data. Without `auth` these routes do not
+///   exist, and `DELETE /admin/tokens/index` is the index drop of a
+///   database named `tokens`.
+///
+/// `POST /db/{name}/sync` is not listed: on a replica it would be a client
+/// write. The replica applies its primary's changes through
+/// `SyncService::apply` directly, not over HTTP.
 fn write_allowed_on_replica(method: &Method, path: &str) -> bool {
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let tokens = cfg!(feature = "auth");
     match *method {
-        Method::POST => matches!(
-            segments.as_slice(),
-            ["query" | "cypher" | "graphql" | "gremlin" | "sparql" | "sql" | "batch"]
-                | ["tx", "begin" | "query" | "commit" | "rollback"]
-                | ["search", "vector" | "text" | "hybrid"]
-                | ["db", _, "sparql" | "sync"]
-                | ["admin", _, "wal", "checkpoint"]
-                | ["admin", _, "snapshot" | "backup" | "reload-eligible"]
-                | ["admin", _, "backup", "incremental"]
-                | ["admin", _, "cache", "clear"]
-                | ["admin", _, "validate", "shacl"]
-                | ["admin", "tokens"]
-        ),
-        Method::DELETE => matches!(segments.as_slice(), ["admin", "tokens", _]),
+        Method::POST => match segments.as_slice() {
+            ["admin", "tokens"] => tokens,
+            other => matches!(
+                other,
+                ["query" | "cypher" | "graphql" | "gremlin" | "sparql" | "sql" | "batch"]
+                    | ["tx", "begin" | "query" | "commit" | "rollback"]
+                    | ["search", "vector" | "text" | "hybrid"]
+                    | ["db", _, "sparql"]
+                    | ["admin", _, "wal", "checkpoint"]
+                    | ["admin", _, "snapshot" | "backup" | "reload-eligible"]
+                    | ["admin", _, "backup", "incremental"]
+                    | ["admin", _, "cache", "clear"]
+                    | ["admin", _, "validate", "shacl"]
+            ),
+        },
+        Method::DELETE => tokens && matches!(segments.as_slice(), ["admin", "tokens", _]),
         _ => false,
     }
 }
@@ -116,7 +126,7 @@ mod tests {
         ("PUT", "/db/default/graph-store", false),
         ("POST", "/db/default/graph-store", false),
         ("DELETE", "/db/default/graph-store", false),
-        ("POST", "/db/default/sync", true),
+        ("POST", "/db/default/sync", false),
         ("POST", "/admin/default/wal/checkpoint", true),
         ("POST", "/admin/default/index", false),
         ("DELETE", "/admin/default/index", false),
@@ -135,8 +145,11 @@ mod tests {
         ("POST", "/search/vector", true),
         ("POST", "/search/text", true),
         ("POST", "/search/hybrid", true),
-        ("POST", "/admin/tokens", true),
-        ("DELETE", "/admin/tokens/tok-1", true),
+        // Token routes exist only with `auth`. Without it, the DELETE is the
+        // index drop of a database named `tokens`.
+        ("POST", "/admin/tokens", cfg!(feature = "auth")),
+        ("DELETE", "/admin/tokens/tok-1", cfg!(feature = "auth")),
+        ("DELETE", "/admin/tokens/index", cfg!(feature = "auth")),
     ];
 
     #[test]
@@ -153,7 +166,12 @@ mod tests {
 
     #[test]
     fn reads_pass_and_other_writes_are_rejected() {
-        for path in ["/db/default", "/db/default/changes", "/health"] {
+        for path in [
+            "/db/default",
+            "/db/default/changes",
+            "/db/default/changes/stream",
+            "/health",
+        ] {
             assert!(!rejected_on_replica(&Method::GET, path), "GET {path}");
             assert!(!rejected_on_replica(&Method::HEAD, path), "HEAD {path}");
         }
