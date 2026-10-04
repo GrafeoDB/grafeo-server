@@ -438,15 +438,19 @@ mod sse {
             let warmup_epoch = db.current_epoch().0;
             assert_eq!(change_label(next_item(&mut stream).await), "Warmup");
 
-            // One epoch with more events than the hub's channel holds.
+            // One epoch of 5 000 events, several times what the hub's
+            // channel holds. The hub sends a whole epoch in one poll without
+            // yielding, and this runtime has one thread, so the stream reads
+            // nothing until the burst is in the channel and lags for certain.
+            // Only a loss is asserted, not how many.
             db.batch_create_nodes_with_labels(
                 &["Burst"],
-                vec![std::collections::HashMap::new(); 2_000],
+                vec![std::collections::HashMap::new(); 5_000],
             )
             .unwrap();
             let since = match next_item(&mut stream).await {
                 StreamItem::Lagged(notice) => {
-                    assert!(notice.skipped >= 2_000 - 1_024, "{notice:?}");
+                    assert!(notice.skipped > 0, "{notice:?}");
                     // The warm-up came with the history: the live part
                     // starts after it.
                     assert_eq!(notice.since, warmup_epoch + 1);
@@ -458,7 +462,7 @@ mod sse {
 
             // Resuming at `since` gets the whole burst.
             let resumed = SyncService::pull(state.databases(), "default", since, 10_000).unwrap();
-            assert_eq!(resumed.changes.len(), 2_000);
+            assert_eq!(resumed.changes.len(), 5_000);
         }
 
         #[tokio::test]

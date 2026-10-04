@@ -5534,12 +5534,18 @@ async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
     let warmup = next_sse_data(&mut resp, &mut pending).await;
     assert_eq!(warmup["labels"], json!(["Warmup"]));
 
-    // One epoch with more events than the hub's channel holds.
-    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 2_000])
+    // One epoch of 5 000 events, several times what the hub's channel holds.
+    // The hub sends a whole epoch in one poll, without yielding, and
+    // `#[tokio::test]` runs the server, the hub and this client on one
+    // thread, so nothing reads the channel until the burst is in it and the
+    // subscriber lags for certain. How many it loses depends on the channel
+    // size and, on a multi-threaded runtime, on how much it drains meanwhile:
+    // only a loss is asserted.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 5_000])
         .unwrap();
     let (name, data) = next_sse_message(&mut resp, &mut pending).await;
     assert_eq!(name.as_deref(), Some("lagged"), "{data}");
-    assert!(data["skipped"].as_u64().unwrap() >= 2_000 - 1_024, "{data}");
+    assert!(data["skipped"].as_u64().unwrap() > 0, "{data}");
     // The first epoch not delivered in full: the warm-up's (sent live) or
     // the one after it (sent with the history).
     let since = data["since"].as_u64().unwrap();
@@ -5567,7 +5573,7 @@ async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
         .iter()
         .filter(|e| e["labels"] == json!(["Burst"]))
         .count();
-    assert_eq!(bursts, 2_000);
+    assert_eq!(bursts, 5_000);
 }
 
 /// WebSocket: a subscription that falls behind ends with a `lagged` error,
@@ -5599,8 +5605,14 @@ async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open
     assert_eq!(body["type"], "change", "{body}");
     assert_eq!(body["event"]["labels"], json!(["Warmup"]));
 
-    // One epoch with more events than the hub's channel holds.
-    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 2_000])
+    // One epoch of 5 000 events, several times what the hub's channel holds.
+    // The hub sends a whole epoch in one poll, without yielding, and
+    // `#[tokio::test]` runs the server, the hub and this client on one
+    // thread, so nothing reads the channel until the burst is in it and the
+    // subscriber lags for certain. How many it loses depends on the channel
+    // size and, on a multi-threaded runtime, on how much it drains meanwhile:
+    // only a loss is asserted.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 5_000])
         .unwrap();
     let reply = ws.next().await.unwrap().unwrap();
     let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
@@ -5608,10 +5620,7 @@ async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open
     assert_eq!(body["error"], "lagged");
     assert_eq!(body["id"], "s1");
     let detail: Value = serde_json::from_str(body["detail"].as_str().unwrap()).unwrap();
-    assert!(
-        detail["skipped"].as_u64().unwrap() >= 2_000 - 1_024,
-        "{detail}"
-    );
+    assert!(detail["skipped"].as_u64().unwrap() > 0, "{detail}");
     // The warm-up's epoch was the last sent: it may not be complete.
     assert!(
         detail["since"].as_u64().unwrap() <= warmup_epoch,
