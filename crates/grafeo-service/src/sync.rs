@@ -508,6 +508,10 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
+                                // Properties first, then labels (adds before removes).
+                                // Nothing is rolled back if a later step fails, so a
+                                // failed change can be partly applied (a superset of
+                                // the target labels, never a loss).
                                 let props = match &change.after {
                                     Some(after) => {
                                         json_to_props(after).try_for_each(|(key, val)| {
@@ -529,6 +533,10 @@ impl SyncService {
                         "edge" => {
                             let edge_id = EdgeId::new(raw_id);
                             let Some(after) = &change.after else {
+                                conflicts.push(ConflictRecord {
+                                    request_index: idx,
+                                    reason: "update_missing_after".to_string(),
+                                });
                                 continue;
                             };
                             if server_is_newer(
@@ -650,13 +658,6 @@ impl SyncService {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the server has a CDC event for `entity_id` with a
-/// `timestamp` strictly greater than `client_timestamp`, reading the history of
-/// the session's current graph.
-///
-/// When there is no CDC history for the entity (e.g., it was created via a
-/// GQL session, which does not record to the CDC log), the function returns
-/// `false` — the client change is applied unconditionally.
 /// Make the node's labels exactly `wanted`: add missing, remove extra.
 fn sync_node_labels(
     target: &grafeo_engine::Session,
@@ -679,6 +680,13 @@ fn sync_node_labels(
     Ok(())
 }
 
+/// Returns `true` if the server has a CDC event for `entity_id` with a
+/// `timestamp` strictly greater than `client_timestamp`, reading the history of
+/// the session's current graph.
+///
+/// When there is no CDC history for the entity (e.g., it was created via a
+/// GQL session, which does not record to the CDC log), the function returns
+/// `false` — the client change is applied unconditionally.
 fn server_is_newer(
     session: &grafeo_engine::Session,
     entity_id: grafeo_engine::cdc::EntityId,
