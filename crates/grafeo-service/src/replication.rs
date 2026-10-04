@@ -148,11 +148,13 @@ impl ReplicationState {
     ///
     /// If persistence is enabled, writes the updated state to disk.
     pub fn advance_epoch(&self, db: &str, epoch: u64) {
-        let entry = self
-            .epochs
+        // The entry guard write-locks a map shard. It must be gone before
+        // save_epochs iterates the map, or that iteration waits on this
+        // thread forever.
+        self.epochs
             .entry(db.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
-        entry.fetch_max(epoch, Ordering::Relaxed);
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .fetch_max(epoch, Ordering::Relaxed);
         self.save_epochs();
     }
 
@@ -305,5 +307,23 @@ mod tests {
                 .mode,
             "replica"
         );
+    }
+
+    #[test]
+    fn advance_epoch_with_persistence_does_not_deadlock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = Arc::new(ReplicationState::with_persistence(dir.path().to_path_buf()));
+        let worker = Arc::clone(&state);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            worker.advance_epoch("default", 7);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("advance_epoch deadlocked: the entry guard was held across save_epochs");
+        assert_eq!(state.last_epoch("default"), 7);
+        let saved = std::fs::read_to_string(dir.path().join(".replica-epochs")).unwrap();
+        assert!(saved.contains("\"default\":7"), "epochs file: {saved}");
     }
 }
