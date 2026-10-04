@@ -213,12 +213,12 @@ impl LiveCursor {
 
     /// The notice for this subscriber after `skipped` events were dropped.
     /// The epoch of the last event sent may have lost events of its own, so
-    /// it does not count as delivered in full.
+    /// it does not count as delivered in full: the resume point is that
+    /// epoch, or the subscriber's own `since` before any event was sent.
     fn lagged(&self, skipped: u64) -> LaggedNotice {
-        let first_open = self.last_sent.unwrap_or(self.since);
         LaggedNotice {
             skipped,
-            last_epoch: first_open.saturating_sub(1),
+            since: self.last_sent.unwrap_or(self.since),
         }
     }
 }
@@ -237,14 +237,15 @@ pub enum LiveItem {
 
 /// Ends a live subscription that fell behind the hub.
 ///
-/// Resume with a pull or a new subscription at `since = last_epoch + 1`.
-/// Events of that epoch already received may arrive again.
+/// Resume with a pull or a new subscription at `since` (`?since=<since>`):
+/// it is inclusive, so epoch 0 is never skipped. Events of that epoch
+/// already received may arrive again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaggedNotice {
     /// Events the subscriber lost.
     pub skipped: u64,
-    /// The newest epoch whose events were all delivered.
-    pub last_epoch: u64,
+    /// The first epoch not delivered in full: every event before it was.
+    pub since: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +795,7 @@ mod tests {
                 LaggedNotice {
                     skipped: 6,
                     // Epoch 5 may have had more events: it is not complete.
-                    last_epoch: 4,
+                    since: 5,
                 }
             ),
             other => panic!("expected a lag, got {other:?}"),
@@ -811,12 +812,38 @@ mod tests {
         match cursor.next(&mut rx).await {
             LiveItem::Lagged(notice) => {
                 assert_eq!(notice.skipped, 3);
-                assert_eq!(notice.last_epoch, 6);
+                assert_eq!(notice.since, 7);
                 assert_eq!(
                     serde_json::to_value(&notice).unwrap(),
-                    serde_json::json!({"skipped": 3, "last_epoch": 6})
+                    serde_json::json!({"skipped": 3, "since": 7})
                 );
             }
+            other => panic!("expected a lag, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lag_at_epoch_zero_resumes_at_epoch_zero() {
+        let (sender, mut rx) = broadcast::channel(2);
+        let mut cursor = LiveCursor::new(0);
+        for _ in 0..5 {
+            sender.send(event_at(0)).unwrap();
+        }
+        match cursor.next(&mut rx).await {
+            LiveItem::Lagged(notice) => assert_eq!(notice.since, 0),
+            other => panic!("expected a lag, got {other:?}"),
+        }
+
+        // The same after events of epoch 0 were sent.
+        let (sender, mut rx) = broadcast::channel(2);
+        let mut cursor = LiveCursor::new(0);
+        sender.send(event_at(0)).unwrap();
+        assert!(matches!(cursor.next(&mut rx).await, LiveItem::Change(_)));
+        for _ in 0..5 {
+            sender.send(event_at(0)).unwrap();
+        }
+        match cursor.next(&mut rx).await {
+            LiveItem::Lagged(notice) => assert_eq!(notice.since, 0),
             other => panic!("expected a lag, got {other:?}"),
         }
     }

@@ -14,8 +14,9 @@
 //! stays open:
 //!
 //! - `error` is `"lagged"`: the subscription fell too far behind and lost
-//!   events. `detail` is `{"skipped": n, "last_epoch": e}`: subscribe again
-//!   with `since = e + 1`.
+//!   events. `detail` is `{"skipped": n, "since": e}`: subscribe again with
+//!   `since = e` (the first epoch not delivered in full; inclusive, so epoch
+//!   0 is resumed too).
 //! - `error` is `"closed"`: the database's change feed stopped (the database
 //!   was dropped or restored, or its CDC turned off).
 
@@ -291,7 +292,7 @@ async fn forward_subscription(
                 tracing::warn!(
                     sub_id = %sub_id,
                     skipped = notice.skipped,
-                    last_epoch = notice.last_epoch,
+                    since = notice.since,
                     "WebSocket change subscription fell behind; ending it"
                 );
                 let _ = tx.send((sub_id, SubscriptionItem::Lagged(notice)));
@@ -468,7 +469,7 @@ mod tests {
                 "type": "error",
                 "id": "s1",
                 "error": "lagged",
-                "detail": "{\"skipped\":7,\"last_epoch\":2}",
+                "detail": "{\"skipped\":7,\"since\":3}",
             })
         );
         assert!(rx.recv().await.is_none(), "the subscription has ended");

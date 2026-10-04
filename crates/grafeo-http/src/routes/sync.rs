@@ -136,7 +136,9 @@ mod sse {
     /// the stream:
     ///
     /// - `lagged`: the client fell too far behind and lost events. The data
-    ///   is `{"skipped": n, "last_epoch": e}`: reconnect with `since = e + 1`.
+    ///   is `{"skipped": n, "since": e}`: reconnect with `?since=<e>` (the
+    ///   first epoch not delivered in full; inclusive, so epoch 0 is resumed
+    ///   too).
     /// - `error`: a history pull failed, or the live feed stopped (the
     ///   database was dropped or restored, or its CDC turned off). The data
     ///   is `{"message": "..."}`; an internal failure reads "internal error",
@@ -254,7 +256,7 @@ mod sse {
                         tracing::warn!(
                             db = %name,
                             skipped = notice.skipped,
-                            last_epoch = notice.last_epoch,
+                            since = notice.since,
                             "SSE change stream fell behind; ending it"
                         );
                         yield StreamItem::Lagged(notice);
@@ -442,18 +444,20 @@ mod sse {
                 vec![std::collections::HashMap::new(); 2_000],
             )
             .unwrap();
-            match next_item(&mut stream).await {
+            let since = match next_item(&mut stream).await {
                 StreamItem::Lagged(notice) => {
                     assert!(notice.skipped >= 2_000 - 1_024, "{notice:?}");
-                    assert_eq!(notice.last_epoch, warmup_epoch);
+                    // The warm-up came with the history: the live part
+                    // starts after it.
+                    assert_eq!(notice.since, warmup_epoch + 1);
+                    notice.since
                 }
                 other => panic!("expected a lag, got {other:?}"),
-            }
+            };
             assert!(stream.next().await.is_none(), "the lag ends the stream");
 
-            // Resuming at last_epoch + 1 gets the whole burst.
-            let resumed =
-                SyncService::pull(state.databases(), "default", warmup_epoch + 1, 10_000).unwrap();
+            // Resuming at `since` gets the whole burst.
+            let resumed = SyncService::pull(state.databases(), "default", since, 10_000).unwrap();
             assert_eq!(resumed.changes.len(), 2_000);
         }
 

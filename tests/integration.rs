@@ -5540,19 +5540,20 @@ async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
     let (name, data) = next_sse_message(&mut resp, &mut pending).await;
     assert_eq!(name.as_deref(), Some("lagged"), "{data}");
     assert!(data["skipped"].as_u64().unwrap() >= 2_000 - 1_024, "{data}");
-    let last_epoch = data["last_epoch"].as_u64().unwrap();
-    assert!(last_epoch <= warmup_epoch, "{data}");
+    // The first epoch not delivered in full: the warm-up's (sent live) or
+    // the one after it (sent with the history).
+    let since = data["since"].as_u64().unwrap();
+    assert!(since <= warmup_epoch + 1, "{data}");
     let end = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
         .await
         .unwrap()
         .unwrap();
     assert!(end.is_none(), "the lag ends the stream");
 
-    // Resuming at last_epoch + 1 gets the whole burst.
+    // Resuming at `since` gets the whole burst.
     let resumed: Value = client
         .get(format!(
-            "{base}/db/default/changes?since={}&limit=10000",
-            last_epoch + 1
+            "{base}/db/default/changes?since={since}&limit=10000"
         ))
         .send()
         .await
@@ -5611,8 +5612,9 @@ async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open
         detail["skipped"].as_u64().unwrap() >= 2_000 - 1_024,
         "{detail}"
     );
+    // The warm-up's epoch was the last sent: it may not be complete.
     assert!(
-        detail["last_epoch"].as_u64().unwrap() < warmup_epoch,
+        detail["since"].as_u64().unwrap() <= warmup_epoch,
         "{detail}"
     );
 
