@@ -147,7 +147,9 @@ impl SyncClient {
     /// `advance_epoch(response.server_epoch)` and pull again.
     pub async fn pull(&self, limit: usize) -> Result<ChangesResponse, SyncError> {
         let last = self.last_epoch();
-        let since = if last > 0 { last + 1 } else { 0 };
+        // Saturating: a cursor at u64::MAX asks for u64::MAX again rather
+        // than wrapping to the full history.
+        let since = if last > 0 { last.saturating_add(1) } else { 0 };
 
         let mut url = self.changes_url.clone();
         url.query_pairs_mut()
@@ -400,6 +402,16 @@ mod tests {
         assert_eq!(client.pull(100).await.unwrap().server_epoch, 0);
         client.advance_epoch(41);
         assert_eq!(client.pull(100).await.unwrap().server_epoch, 42);
+    }
+
+    #[tokio::test]
+    async fn pull_at_the_last_epoch_does_not_wrap_to_the_full_history() {
+        let base = spawn_echo_since_server().await;
+        let client = SyncClient::new(&base, "default", "dev-1")
+            .unwrap()
+            .with_epoch(u64::MAX);
+
+        assert_eq!(client.pull(100).await.unwrap().server_epoch, u64::MAX);
     }
 
     #[tokio::test]
