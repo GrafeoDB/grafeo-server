@@ -1275,7 +1275,7 @@ mod tests {
         assert_eq!(backup.start_epoch, 0);
         assert_eq!(backup.end_epoch, 0);
         assert_eq!(backup.checksum, 0);
-        assert!(!backup.created_at.is_empty());
+        assert_ne!(backup.created_at, "");
     }
 
     #[tokio::test]
@@ -1602,7 +1602,7 @@ mod tests {
             .unwrap();
 
         let deleted = BackupService::enforce_retention("default", backup_dir.path(), 5).unwrap();
-        assert!(deleted.is_empty());
+        assert_eq!(deleted, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]

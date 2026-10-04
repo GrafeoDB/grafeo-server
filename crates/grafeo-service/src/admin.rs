@@ -393,72 +393,77 @@ impl AdminService {
     ///
     /// Requires exclusive access to the database (no active sessions or
     /// concurrent requests holding a reference).
-    #[allow(clippy::unused_async)] // async needed when compact-store is enabled
+    #[cfg(feature = "compact-store")]
     pub async fn compact(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
         if databases.is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
 
-        #[cfg(feature = "compact-store")]
-        {
-            use std::panic::{AssertUnwindSafe, catch_unwind};
-            use std::sync::Arc;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::Arc;
 
-            let db_entry = databases.take_exclusive(db_name)?;
-            let name = db_name.to_owned();
+        let db_entry = databases.take_exclusive(db_name)?;
+        let name = db_name.to_owned();
 
-            let result = tokio::task::spawn_blocking(move || {
-                let (mut db_arc, mut metadata) = db_entry.into_parts();
-                let db = match Arc::get_mut(&mut db_arc) {
-                    Some(db) => db,
-                    None => {
-                        let entry = DatabaseEntry::new(db_arc, metadata);
-                        return Err((
-                            entry,
-                            ServiceError::Conflict(
-                                "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
-                            ),
-                        ));
-                    }
-                };
-
-                match catch_unwind(AssertUnwindSafe(|| db.compact())) {
-                    Ok(Ok(())) => {
-                        metadata.storage_mode = "compact".to_string();
-                        Ok(DatabaseEntry::new(db_arc, metadata))
-                    }
-                    Ok(Err(e)) => Err((
-                        DatabaseEntry::new(db_arc, metadata),
-                        ServiceError::Internal(format!("compaction failed: {e}")),
-                    )),
-                    Err(_panic) => Err((
-                        DatabaseEntry::new(db_arc, metadata),
-                        ServiceError::Internal("compaction panicked".to_string()),
-                    )),
+        let result = tokio::task::spawn_blocking(move || {
+            let (mut db_arc, mut metadata) = db_entry.into_parts();
+            let db = match Arc::get_mut(&mut db_arc) {
+                Some(db) => db,
+                None => {
+                    let entry = DatabaseEntry::new(db_arc, metadata);
+                    return Err((
+                        entry,
+                        ServiceError::Conflict(
+                            "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
+                        ),
+                    ));
                 }
-            })
-            .await
-            .expect("compact: spawn_blocking task should not be cancelled");
+            };
 
-            match result {
-                Ok(compacted) => {
-                    databases.reinsert(name.clone(), compacted);
-                    tracing::info!(name = %name, "Database compacted to columnar read-only store");
-                    Ok(())
+            match catch_unwind(AssertUnwindSafe(|| db.compact())) {
+                Ok(Ok(())) => {
+                    metadata.storage_mode = "compact".to_string();
+                    Ok(DatabaseEntry::new(db_arc, metadata))
                 }
-                Err((original, err)) => {
-                    databases.reinsert(name, original);
-                    Err(err)
-                }
+                Ok(Err(e)) => Err((
+                    DatabaseEntry::new(db_arc, metadata),
+                    ServiceError::Internal(format!("compaction failed: {e}")),
+                )),
+                Err(_panic) => Err((
+                    DatabaseEntry::new(db_arc, metadata),
+                    ServiceError::Internal("compaction panicked".to_string()),
+                )),
+            }
+        })
+        .await
+        .expect("compact: spawn_blocking task should not be cancelled");
+
+        match result {
+            Ok(compacted) => {
+                databases.reinsert(name.clone(), compacted);
+                tracing::info!(name = %name, "Database compacted to columnar read-only store");
+                Ok(())
+            }
+            Err((original, err)) => {
+                databases.reinsert(name, original);
+                Err(err)
             }
         }
-        #[cfg(not(feature = "compact-store"))]
-        {
-            let _ = db_name;
+    }
+
+    /// Compact stub when the `compact-store` feature is disabled.
+    #[cfg(not(feature = "compact-store"))]
+    pub fn compact(
+        databases: &DatabaseManager,
+        _db_name: &str,
+    ) -> impl Future<Output = Result<(), ServiceError>> {
+        std::future::ready(if databases.is_read_only() {
+            Err(ServiceError::ReadOnly)
+        } else {
             Err(ServiceError::BadRequest(
                 "compact-store feature not enabled".to_string(),
             ))
-        }
+        })
     }
 
     /// Bulk-import a TSV edge list into a database.
@@ -660,10 +665,7 @@ impl AdminService {
     ///
     /// Requires the `async-storage` and `grafeo-file` features. Returns an
     /// error explaining the missing features when they are not enabled.
-    // The await lives inside the cfg(async-storage, grafeo-file) branch;
-    // without those features the function body is sync, but the signature
-    // must remain async for the HTTP handler.
-    #[allow(clippy::unused_async)]
+    #[cfg(all(feature = "async-storage", feature = "grafeo-file"))]
     pub async fn write_snapshot(
         databases: &DatabaseManager,
         db_name: &str,
@@ -671,24 +673,29 @@ impl AdminService {
         if databases.is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
-
         let entry = databases.get_available(db_name)?;
+        entry
+            .db()
+            .async_write_snapshot()
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
 
-        #[cfg(all(feature = "async-storage", feature = "grafeo-file"))]
-        {
-            entry
-                .db()
-                .async_write_snapshot()
-                .await
-                .map_err(|e| ServiceError::Internal(e.to_string()))
-        }
-        #[cfg(not(all(feature = "async-storage", feature = "grafeo-file")))]
-        {
-            let _ = entry;
-            Err(ServiceError::BadRequest(
-                "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
-            ))
-        }
+    /// Snapshot stub without the `async-storage` and `grafeo-file` features.
+    #[cfg(not(all(feature = "async-storage", feature = "grafeo-file")))]
+    pub fn write_snapshot(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> impl Future<Output = Result<(), ServiceError>> {
+        std::future::ready(if databases.is_read_only() {
+            Err(ServiceError::ReadOnly)
+        } else {
+            databases.get_available(db_name).and_then(|_| {
+                Err(ServiceError::BadRequest(
+                    "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
+                ))
+            })
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -697,7 +704,6 @@ impl AdminService {
 
     /// Validate RDF data against SHACL shapes.
     #[cfg(feature = "shacl")]
-    #[allow(clippy::unused_async)]
     pub async fn validate_shacl(
         databases: &DatabaseManager,
         db_name: &str,
@@ -739,15 +745,14 @@ impl AdminService {
 
     /// Validate RDF data against SHACL shapes (stub when feature disabled).
     #[cfg(not(feature = "shacl"))]
-    #[allow(clippy::unused_async)]
-    pub async fn validate_shacl(
+    pub fn validate_shacl(
         _databases: &DatabaseManager,
         _db_name: &str,
         _req: &types::ShaclValidateRequest,
-    ) -> Result<types::ShaclValidationReport, ServiceError> {
-        Err(ServiceError::BadRequest(
+    ) -> impl Future<Output = Result<types::ShaclValidationReport, ServiceError>> {
+        std::future::ready(Err(ServiceError::BadRequest(
             "shacl feature not enabled".to_owned(),
-        ))
+        )))
     }
 }
 
@@ -1044,7 +1049,7 @@ mod tests {
         let graphs = AdminService::list_graphs(state.databases(), "default")
             .await
             .unwrap();
-        assert!(graphs.is_empty());
+        assert_eq!(graphs, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]
@@ -1139,7 +1144,7 @@ mod tests {
         let list = AdminService::list_projections(state.databases(), "default")
             .await
             .unwrap();
-        assert!(list.is_empty());
+        assert_eq!(list, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]

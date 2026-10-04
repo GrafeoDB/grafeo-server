@@ -832,7 +832,7 @@ mod tests {
     fn token_scope_request_default_fields() {
         let req = TokenScopeRequest::default();
         assert_eq!(req.role, "read-only");
-        assert!(req.databases.is_empty());
+        assert_eq!(req.databases, [] as [std::string::String; 0]);
     }
 
     #[test]

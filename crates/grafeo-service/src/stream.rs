@@ -87,7 +87,7 @@ mod tests {
     fn empty_result_yields_no_batches() {
         let result = make_result(0);
         let batches: Vec<_> = result.row_batches(100).collect();
-        assert!(batches.is_empty());
+        assert_eq!(batches, [] as [&[std::vec::Vec<grafeo_common::Value>]; 0]);
     }
 
     #[test]

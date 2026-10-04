@@ -121,7 +121,10 @@ async fn query_create_and_match() {
     assert_eq!(resp.status(), 200);
 
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["columns"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["columns"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Match it back
     let resp = client
@@ -174,7 +177,7 @@ async fn cypher_endpoint_works() {
 
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(!rows.is_empty());
+    assert_ne!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +281,7 @@ async fn transaction_rollback() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(rows.is_empty());
+    assert_eq!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +508,10 @@ async fn readme_examples_cypher() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -606,7 +612,10 @@ async fn sidebar_examples() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // "Count nodes": MATCH (n) RETURN count(n)
     let resp = client
@@ -637,7 +646,10 @@ async fn sidebar_examples() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +800,10 @@ async fn query_on_specific_database() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["rows"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -897,7 +912,10 @@ async fn transaction_on_specific_database() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert!(body["rows"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1856,7 +1874,7 @@ async fn sql_endpoint_call_procedures() {
 
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(!rows.is_empty());
+    assert_ne!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]
@@ -1877,7 +1895,10 @@ async fn sql_pgq_via_query_language_field() {
     assert_eq!(resp.status(), 200);
 
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -2596,7 +2617,10 @@ async fn admin_validate_clean_database() {
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["valid"], true);
-    assert!(body["errors"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["errors"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -2815,7 +2839,7 @@ async fn gwp_admin_validate() {
         .into_inner();
 
     assert!(resp.valid);
-    assert!(resp.errors.is_empty());
+    assert_eq!(resp.errors, [] as [gwp::proto::ValidationError; 0]);
 }
 
 #[cfg(feature = "gwp")]
@@ -3536,7 +3560,10 @@ async fn named_graphs_crud() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["graphs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["graphs"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Create a named graph
     let resp = client
@@ -4000,7 +4027,7 @@ async fn read_only_list_databases_works() {
 
     let body: Value = resp.json().await.unwrap();
     let dbs = body["databases"].as_array().unwrap();
-    assert!(!dbs.is_empty());
+    assert_ne!(dbs.as_slice(), [] as [serde_json::Value; 0]);
     assert!(dbs.iter().any(|d| d["name"] == "default"));
 }
 
@@ -4304,7 +4331,10 @@ async fn e2e_named_graphs_full_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["graphs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["graphs"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // 2. Create two named graphs
     let resp = client
@@ -4818,7 +4848,10 @@ async fn sync_round_trip_two_databases() {
     // All 3 creates applied, no conflicts
     assert_eq!(apply_body["applied"], 3);
     assert_eq!(apply_body["skipped"], 0);
-    assert!(apply_body["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        apply_body["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Server B assigned a new ID for each create
     let mappings = apply_body["id_mappings"].as_array().unwrap();
@@ -4940,7 +4973,10 @@ async fn sync_with_edge_creates() {
         .unwrap();
 
     assert_eq!(edge_resp["applied"], 1);
-    assert!(edge_resp["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        edge_resp["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     let edge_mappings = edge_resp["id_mappings"].as_array().unwrap();
     assert_eq!(edge_mappings.len(), 1);
     assert!(edge_mappings[0]["server_id"].as_u64().is_some());
@@ -4998,9 +5034,15 @@ async fn sync_updates_and_deletes() {
 
     assert_eq!(resp["applied"], 2);
     assert_eq!(resp["skipped"], 0);
-    assert!(resp["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        resp["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     // No creates, so no id_mappings.
-    assert!(resp["id_mappings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        resp["id_mappings"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 /// Sync: LWW conflict detection — stale client update is rejected.
@@ -5101,7 +5143,10 @@ async fn sync_limit_truncation() {
         .json()
         .await
         .unwrap();
-    assert!(caught_up["changes"].as_array().unwrap().is_empty());
+    assert_eq!(
+        caught_up["changes"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 /// Sync: missing required fields produce descriptive conflict reasons.
@@ -5624,7 +5669,7 @@ async fn backup_delete() {
         .await
         .unwrap();
     let backups: Vec<Value> = resp.json().await.unwrap();
-    assert!(backups.is_empty());
+    assert_eq!(backups, [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]
@@ -6364,7 +6409,7 @@ async fn gwp_auth_bearer_token_allows_query() {
         .expect("handshake with valid token should succeed");
 
     let session_id = resp.into_inner().session_id;
-    assert!(!session_id.is_empty());
+    assert_ne!(session_id, "");
 
     // Execute a query (admin token can write)
     let stream = gql_client

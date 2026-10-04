@@ -65,12 +65,15 @@ where
 {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let info = parts
             .extensions
             .get::<grafeo_service::auth::TokenInfo>()
             .cloned();
-        Ok(AuthContext(info))
+        std::future::ready(Ok(AuthContext(info)))
     }
 }
 

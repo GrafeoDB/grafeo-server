@@ -956,7 +956,7 @@ mod tests {
         };
         let resp = SyncService::apply(&mgr, "default", req).unwrap();
         // A version is always returned (non-empty hex string).
-        assert!(!resp.server_schema_version.is_empty());
+        assert_ne!(resp.server_schema_version, "");
         assert!(!resp.schema_mismatch);
     }
 
@@ -973,7 +973,7 @@ mod tests {
         let resp = SyncService::apply(&mgr, "default", req).unwrap();
         // An empty DB may actually hash to the stale value, so we just check
         // that the server echoes its own version regardless.
-        assert!(!resp.server_schema_version.is_empty());
+        assert_ne!(resp.server_schema_version, "");
         // If the version we sent matches the server, mismatch is false; any
         // real mismatch should set it true. We can't assert a specific outcome
         // for "0000000000000000" since a truly empty schema may equal it —
