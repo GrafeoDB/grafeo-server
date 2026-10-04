@@ -13,6 +13,8 @@ import type {
   WalStatusInfo,
   ValidationInfo,
   BackupEntry,
+  StorageTiersResponse,
+  ReloadEligibleResponse,
   TokenResponse,
   CreateTokenRequest,
 } from "../types/api";
@@ -162,6 +164,22 @@ export const api = {
       request<{ success: boolean }>(`/admin/${encodeURIComponent(db)}/wal/checkpoint`, {
         method: "POST",
       }),
+
+    storageTiers: (db: string) =>
+      request<StorageTiersResponse>(
+        `/admin/${encodeURIComponent(db)}/storage-tiers`,
+      ),
+
+    reloadEligible: (db: string, targetFraction?: number) =>
+      request<ReloadEligibleResponse>(
+        `/admin/${encodeURIComponent(db)}/reload-eligible`,
+        {
+          method: "POST",
+          body: JSON.stringify(
+            targetFraction === undefined ? {} : { target_fraction: targetFraction },
+          ),
+        },
+      ),
   },
 
   backup: {

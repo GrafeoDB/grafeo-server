@@ -51,6 +51,34 @@ export interface DatabaseOptions {
   backward_edges?: boolean;
   threads?: number;
   spill_path?: string;
+  /** Per-section storage tier overrides; omitted sections stay "auto". */
+  section_tiers?: Partial<Record<SectionName, TierOverride>>;
+}
+
+/** Storage sections a tier override can target. */
+export type SectionName =
+  | "LpgStore"
+  | "RdfStore"
+  | "CompactStore"
+  | "VectorStore"
+  | "TextIndex"
+  | "RdfRing"
+  | "PropertyIndex"
+  | "Catalog";
+
+export type TierOverride = "auto" | "force_ram" | "force_disk";
+
+export interface SectionTierInfo {
+  section: string;
+  tier: "in_memory" | "on_disk" | "uninitialized" | "unknown";
+}
+
+export interface StorageTiersResponse {
+  tiers: SectionTierInfo[];
+}
+
+export interface ReloadEligibleResponse {
+  reloaded: number;
 }
 
 export interface CreateDatabaseRequest {

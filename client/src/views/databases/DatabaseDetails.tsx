@@ -7,6 +7,7 @@ import type {
   WalStatusInfo,
 } from "../../types/api";
 import BackupsSection from "../../components/Databases/BackupsSection";
+import StorageTiersSection from "../../components/Databases/StorageTiersSection";
 import DangerZone from "../../components/Databases/DangerZone";
 import styles from "./DatabaseDetails.module.css";
 
@@ -196,6 +197,10 @@ export default function DatabaseDetails() {
           </div>
         )}
       </header>
+
+      {summary?.persistent && (
+        <StorageTiersSection database={name} onMutated={refresh} />
+      )}
 
       <BackupsSection database={name} onMutated={refresh} />
 
