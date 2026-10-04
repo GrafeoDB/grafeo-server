@@ -170,15 +170,21 @@ async fn replicate(
         })
         .collect();
 
-    // Apply to replica
+    // Apply to replica, on a blocking thread as the replication task does:
+    // `apply` writes to the engine synchronously.
     let request: grafeo_service::sync::SyncRequest = serde_json::from_value(json!({
         "client_id": "test-replicator",
         "last_seen_epoch": since,
         "changes": sync_changes,
     }))
     .unwrap();
-    let apply_resp =
-        grafeo_service::sync::SyncService::apply(replica.databases(), "default", request).unwrap();
+    let replica = replica.clone();
+    let apply_resp = tokio::task::spawn_blocking(move || {
+        grafeo_service::sync::SyncService::apply(replica.databases(), "default", request)
+    })
+    .await
+    .expect("the apply task panicked")
+    .expect("the replica rejected the batch");
 
     assert!(
         apply_resp.conflicts.is_empty(),
