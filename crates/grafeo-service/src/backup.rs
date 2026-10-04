@@ -1210,6 +1210,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn move_db_files_rolls_back_when_the_sidecar_cannot_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.grafeo");
+        let to = dir.path().join("b.grafeo");
+        std::fs::write(&from, "main").unwrap();
+        std::fs::write(sidecar_wal(&from), "wal").unwrap();
+        // Renaming a file onto a non-empty directory fails on Unix and Windows.
+        let blocker = sidecar_wal(&to);
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("occupied"), "x").unwrap();
+
+        move_db_files(&from, &to).expect_err("the sidecar move must fail");
+
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "main");
+        assert_eq!(std::fs::read_to_string(sidecar_wal(&from)).unwrap(), "wal");
+        assert!(!to.exists(), "the database file must be moved back");
+    }
+
+    #[test]
+    fn swap_db_files_puts_the_live_database_back_when_staging_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("data.grafeo");
+        let staged = dir.path().join("data.grafeo.restoring");
+        let previous = dir.path().join("data.grafeo.pre-restore");
+        std::fs::write(&live, "live").unwrap();
+        std::fs::write(sidecar_wal(&live), "live-wal").unwrap();
+
+        swap_db_files(&live, &staged, &previous).expect_err("the staged move must fail");
+
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "live");
+        assert_eq!(
+            std::fs::read_to_string(sidecar_wal(&live)).unwrap(),
+            "live-wal"
+        );
+        assert!(!previous.exists());
+        assert!(!sidecar_wal(&previous).exists());
+    }
+
+    #[test]
     fn millis_to_iso_formats_correctly() {
         assert_eq!(millis_to_iso(1_705_282_245_123), "2024-01-15T01:30:45.123Z");
     }
