@@ -372,12 +372,13 @@ export default function CreateDatabaseDialog({
               type="button"
               className={styles.disclosure}
               aria-expanded={showTiers}
+              aria-controls="tier-grid"
               onClick={() => setShowTiers((v) => !v)}
             >
-              {showTiers ? "▾" : "▸"} Storage tiers (advanced)
+              <span aria-hidden="true">{showTiers ? "▾" : "▸"}</span> Storage tiers (advanced)
             </button>
             {showTiers && (
-              <div className={styles.tierGrid}>
+              <div id="tier-grid" className={styles.tierGrid}>
                 {SECTION_NAMES.map((section) => (
                   <label key={section} className={styles.tierRow}>
                     <span>{section}</span>

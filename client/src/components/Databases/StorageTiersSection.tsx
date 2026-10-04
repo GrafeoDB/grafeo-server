@@ -24,18 +24,30 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(() => {
-    setLoading(true);
-    api.admin
-      .storageTiers(database)
-      .then((res) => setTiers(res.tiers))
-      .catch(() => setTiers([]))
-      .finally(() => setLoading(false));
-  }, [database]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let cancelled = false;
+    api.admin
+      .storageTiers(database)
+      .then((res) => {
+        if (cancelled) return;
+        setTiers(res.tiers);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLoadError(err instanceof GrafeoApiError ? err.detail : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [database, refreshKey]);
 
   useEffect(() => {
     if (!toast) return;
@@ -76,7 +88,7 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
           title={
             spilled === 0
               ? "No section is on disk"
-              : "Bring spilled sections back into RAM, up to 70% of the memory limit"
+              : "Bring spilled sections back into RAM, up to the server's default memory target"
           }
         >
           {reloading ? "Reloading…" : "Reload spilled sections"}
@@ -85,11 +97,14 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
 
       {toast && <div className={styles.toast}>{toast}</div>}
       {error && <div className={styles.error}>{error}</div>}
+      {loadError && <div className={styles.error}>{loadError}</div>}
 
       {loading ? (
         <div className={styles.empty}>Loading…</div>
       ) : tiers.length === 0 ? (
-        <div className={styles.empty}>No storage sections reported.</div>
+        loadError ? null : (
+          <div className={styles.empty}>No storage sections reported.</div>
+        )
       ) : (
         <div className={styles.tableWrap}>
           <table className={styles.table}>

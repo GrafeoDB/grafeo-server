@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, GrafeoApiError } from "../../api/client";
 import type {
@@ -28,14 +28,20 @@ export default function DatabaseDetails() {
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const loadedName = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setNotFound(false);
     setLoadError(null);
-    setSummary(null);
-    setStats(null);
-    setWal(null);
+    // Clear details only when switching databases; on a refresh of the same
+    // database keep them so mounted sections (and their toasts) survive.
+    if (loadedName.current !== name) {
+      loadedName.current = name;
+      setSummary(null);
+      setStats(null);
+      setWal(null);
+    }
 
     // Only the db list decides not-found. Stats + WAL are best-effort
     // details that swallow their own errors so a missing stats endpoint
@@ -199,7 +205,7 @@ export default function DatabaseDetails() {
       </header>
 
       {summary?.persistent && (
-        <StorageTiersSection database={name} onMutated={refresh} />
+        <StorageTiersSection key={name} database={name} onMutated={refresh} />
       )}
 
       <BackupsSection database={name} onMutated={refresh} />
