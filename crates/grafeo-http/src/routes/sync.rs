@@ -15,6 +15,7 @@ use serde::Deserialize;
 use grafeo_service::sync::{ChangesResponse, SyncRequest, SyncResponse, SyncService};
 
 use crate::error::ApiError;
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 
 const MAX_LIMIT: usize = 10_000;
@@ -44,11 +45,15 @@ pub struct ChangesQuery {
 /// of the epoch of the `limit`-th one, and `server_epoch` is the epoch of its
 /// last event. If `changes.len() >= limit`, more events may be waiting: poll
 /// again straight away.
+///
+/// With auth on, the token must be allowed on the database.
 pub async fn db_changes(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
     Query(params): Query<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiError> {
+    auth.check_db_access(&name)?;
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let since = params.since;
 
@@ -71,11 +76,16 @@ pub async fn db_changes(
 /// Returns `{ server_epoch, applied, skipped, conflicts, id_mappings }`.
 /// The `id_mappings` array maps each create request (by index) to the
 /// server-assigned entity ID.
+///
+/// With auth on, the token must be allowed on the database and may write.
 pub async fn db_apply(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(name): Path<String>,
     Json(request): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
     let result =
         tokio::task::spawn_blocking(move || SyncService::apply(state.databases(), &name, request))
             .await
@@ -99,6 +109,7 @@ mod sse {
     use grafeo_service::sync::{ChangeEventDto, ChangesResponse, SyncService};
 
     use crate::error::ApiError;
+    use crate::middleware::auth_context::AuthContext;
     use crate::routes::sync::ChangesQuery;
     use crate::state::AppState;
 
@@ -116,11 +127,15 @@ mod sse {
     /// SSE event, matching the `ChangeEventDto` schema.
     ///
     /// The `limit` query parameter is ignored for the streaming endpoint.
+    ///
+    /// With auth on, the token must be allowed on the database.
     pub async fn db_changes_stream(
         State(state): State<AppState>,
+        auth: AuthContext,
         Path(name): Path<String>,
         Query(params): Query<ChangesQuery>,
     ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+        auth.check_db_access(&name)?;
         // The first page is pulled up front so a missing database, or one
         // without CDC, is an HTTP error rather than an empty stream.
         let first = history_page(&state, &name, params.since).await?;

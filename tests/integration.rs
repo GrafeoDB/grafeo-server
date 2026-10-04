@@ -6850,6 +6850,24 @@ async fn spawn_server_with_token_store(
     admin_token: &str,
     scoped_tokens: Vec<(&str, &str, grafeo_service::auth::TokenScope)>,
 ) -> (String, String, Vec<(String, String)>) {
+    let (service, token_infos) = token_store_service(admin_token, scoped_tokens);
+    let state = grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
+    let base = spawn_server_from_state(state).await;
+    (base, admin_token.to_string(), token_infos)
+}
+
+/// Helper: an in-memory service whose token store holds a legacy admin token
+/// and the given managed scoped tokens. Returns the service and
+/// Vec<(token_plaintext, token_id)>.
+#[cfg(feature = "auth")]
+fn token_store_service(
+    admin_token: &str,
+    scoped_tokens: Vec<(&str, &str, grafeo_service::auth::TokenScope)>,
+) -> (grafeo_service::ServiceState, Vec<(String, String)>) {
     use grafeo_service::auth::TokenRecord;
 
     let dir = tempfile::tempdir().unwrap();
@@ -6883,13 +6901,94 @@ async fn spawn_server_with_token_store(
     .unwrap();
 
     let service = grafeo_service::ServiceState::new_in_memory_with_auth_provider(300, provider);
-    let state = grafeo_server::AppState::new(
+    (service, token_infos)
+}
+
+/// Sync endpoints check the token: a read-only token cannot push changes,
+/// a token scoped to another database cannot read this one's change feed,
+/// and an admin token can do both.
+#[cfg(all(feature = "auth", feature = "sync"))]
+#[tokio::test]
+async fn auth_sync_endpoints_check_role_and_database_scope() {
+    use grafeo_service::auth::{Role, TokenScope};
+
+    let (service, tokens) = token_store_service(
+        "admin-sync-tok",
+        vec![
+            (
+                "reader-sync-tok",
+                "sync-reader",
+                TokenScope {
+                    role: Role::ReadOnly,
+                    databases: vec![],
+                },
+            ),
+            (
+                "other-db-sync-tok",
+                "sync-other-db",
+                TokenScope {
+                    role: Role::ReadWrite,
+                    databases: vec!["otherdb".to_string()],
+                },
+            ),
+        ],
+    );
+    service
+        .databases()
+        .get("default")
+        .unwrap()
+        .db()
+        .set_cdc_enabled(true);
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
         service,
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
-    );
-    let base = spawn_server_from_state(state).await;
-    (base, admin_token.to_string(), token_infos)
+    ))
+    .await;
+    let client = Client::new();
+    let (reader, other_db) = (&tokens[0].0, &tokens[1].0);
+    let push = json!({
+        "client_id": "auth-test",
+        "changes": [{"kind": "create", "entity_type": "node", "labels": ["Pushed"]}],
+    });
+    let push_as = |token: &str| {
+        client
+            .post(format!("{base}/db/default/sync"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&push)
+            .send()
+    };
+    let changes_as = |token: &str| {
+        client
+            .get(format!("{base}/db/default/changes?since=0"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+    };
+
+    assert_eq!(push_as(reader).await.unwrap().status(), 403);
+    assert_eq!(push_as(other_db).await.unwrap().status(), 403);
+    assert_eq!(changes_as(other_db).await.unwrap().status(), 403);
+    #[cfg(feature = "push-changefeed")]
+    {
+        let stream = client
+            .get(format!("{base}/db/default/changes/stream?since=0"))
+            .header("Authorization", format!("Bearer {other_db}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), 403);
+    }
+
+    let pushed = push_as("admin-sync-tok").await.unwrap();
+    assert_eq!(pushed.status(), 200);
+    let pushed: Value = pushed.json().await.unwrap();
+    assert_eq!(pushed["applied"], 1, "{pushed}");
+    let read = changes_as("admin-sync-tok").await.unwrap();
+    assert_eq!(read.status(), 200);
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read["changes"].as_array().unwrap().len(), 1, "{read}");
+    // A read-only token may still read the change feed.
+    assert_eq!(changes_as(reader).await.unwrap().status(), 200);
 }
 
 /// Database list filtering: a scoped token sees only its databases.
