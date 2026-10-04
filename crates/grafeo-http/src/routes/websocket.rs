@@ -8,11 +8,16 @@
 //!   stream live change events for a named database.
 //!
 //! Multiple subscriptions may be active on the same connection simultaneously.
-//! Each subscription is identified by a client-assigned `sub_id`. A
-//! subscription that falls too far behind loses events: it ends with an
-//! `error` message whose `id` is the `sub_id`, `error` is `"lagged"` and
-//! `detail` is `{"skipped": n, "last_epoch": e}` (subscribe again with
-//! `since = e + 1`). The connection stays open.
+//! Each subscription is identified by a client-assigned `sub_id`; subscribing
+//! again with a `sub_id` in use replaces that subscription. Two `error`
+//! messages whose `id` is the `sub_id` end a subscription, and the connection
+//! stays open:
+//!
+//! - `error` is `"lagged"`: the subscription fell too far behind and lost
+//!   events. `detail` is `{"skipped": n, "last_epoch": e}`: subscribe again
+//!   with `since = e + 1`.
+//! - `error` is `"closed"`: the database's change feed stopped (the database
+//!   was dropped or restored, or its CDC turned off).
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -217,7 +222,10 @@ async fn handle_with_subscriptions<S, R>(
                                 LiveCursor::new(since),
                                 event_tx.clone(),
                             ));
-                            sub_tasks.insert(sub_id.clone(), handle);
+                            // A sub_id in use: the new subscription replaces the old.
+                            if let Some(previous) = sub_tasks.insert(sub_id.clone(), handle) {
+                                previous.abort();
+                            }
                             WsServerMessage::Subscribed { sub_id }
                         }
                     }
@@ -259,11 +267,14 @@ enum SubscriptionItem {
     Change(Box<grafeo_service::sync::ChangeEventDto>),
     /// The subscription fell behind and ended.
     Lagged(grafeo_service::changefeed::LaggedNotice),
+    /// The database's change feed stopped, which ended the subscription.
+    Closed,
 }
 
 /// Forwards the events of subscription `sub_id` to `tx` until the hub
 /// closes or the connection goes away. A subscription that falls behind
-/// ends with a lag notice; the connection stays open.
+/// ends with a lag notice, one whose feed stopped with a closed notice; the
+/// connection stays open.
 #[cfg(feature = "push-changefeed")]
 async fn forward_subscription(
     sub_id: String,
@@ -286,7 +297,11 @@ async fn forward_subscription(
                 let _ = tx.send((sub_id, SubscriptionItem::Lagged(notice)));
                 return;
             }
-            LiveItem::Closed => return,
+            LiveItem::Closed => {
+                tracing::debug!(sub_id = %sub_id, "change feed stopped; ending the WebSocket subscription");
+                let _ = tx.send((sub_id, SubscriptionItem::Closed));
+                return;
+            }
         };
         if tx.send((sub_id.clone(), item)).is_err() {
             return;
@@ -305,6 +320,11 @@ fn subscription_message(sub_id: String, item: SubscriptionItem) -> WsServerMessa
             detail: Some(
                 serde_json::to_string(&notice).expect("a lag notice is always serializable"),
             ),
+        },
+        SubscriptionItem::Closed => WsServerMessage::Error {
+            id: Some(sub_id),
+            error: "closed".to_string(),
+            detail: Some("change feed closed".to_string()),
         },
     }
 }
@@ -424,6 +444,34 @@ mod tests {
                 "id": "s1",
                 "error": "lagged",
                 "detail": "{\"skipped\":7,\"last_epoch\":2}",
+            })
+        );
+        assert!(rx.recv().await.is_none(), "the subscription has ended");
+    }
+
+    #[tokio::test]
+    async fn a_closed_feed_ends_the_subscription_with_a_closed_error() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(4);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(sender);
+
+        forward_subscription(
+            "s1".to_string(),
+            receiver,
+            grafeo_service::changefeed::LiveCursor::new(0),
+            tx,
+        )
+        .await;
+
+        let (sub_id, item) = rx.recv().await.expect("a closed message");
+        let message = serde_json::to_value(subscription_message(sub_id, item)).unwrap();
+        assert_eq!(
+            message,
+            serde_json::json!({
+                "type": "error",
+                "id": "s1",
+                "error": "closed",
+                "detail": "change feed closed",
             })
         );
         assert!(rx.recv().await.is_none(), "the subscription has ended");

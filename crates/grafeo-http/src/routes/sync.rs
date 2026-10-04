@@ -119,12 +119,16 @@ mod sse {
     /// Events per pull of history.
     const HISTORY_PAGE: usize = 10_000;
 
+    /// The `error` message of a stream whose live feed stopped: the database
+    /// was dropped or restored, or its CDC turned off. Reconnecting tells why.
+    const FEED_CLOSED: &str = "change feed closed";
+
     /// Server-Sent Events stream of change events for the named database.
     ///
     /// The client receives all historical events from epoch `since` on
     /// first (0 for the full history, else one past the last epoch it saw),
     /// then live events as they are committed. The stream stays open until
-    /// the client disconnects.
+    /// the client disconnects or one of the named events below ends it.
     ///
     /// Events are newline-delimited JSON objects in the `data:` field of each
     /// SSE event, matching the `ChangeEventDto` schema. Two named events end
@@ -132,7 +136,9 @@ mod sse {
     ///
     /// - `lagged`: the client fell too far behind and lost events. The data
     ///   is `{"skipped": n, "last_epoch": e}`: reconnect with `since = e + 1`.
-    /// - `error`: a history pull failed. The data is `{"message": "..."}`.
+    /// - `error`: a history pull failed, or the live feed stopped (the
+    ///   database was dropped or restored, or its CDC turned off). The data
+    ///   is `{"message": "..."}`.
     ///
     /// The `limit` query parameter is ignored for the streaming endpoint.
     ///
@@ -157,7 +163,8 @@ mod sse {
     enum StreamItem {
         Change(Box<ChangeEventDto>),
         Lagged(LaggedNotice),
-        HistoryFailed(String),
+        /// A history pull failed, or the live feed stopped.
+        Error(String),
     }
 
     impl StreamItem {
@@ -165,7 +172,7 @@ mod sse {
             match self {
                 Self::Change(event) => Event::default().data(to_json(&event)),
                 Self::Lagged(notice) => Event::default().event("lagged").data(to_json(&notice)),
-                Self::HistoryFailed(message) => Event::default()
+                Self::Error(message) => Event::default()
                     .event("error")
                     .data(to_json(&serde_json::json!({ "message": message }))),
             }
@@ -246,7 +253,11 @@ mod sse {
                         yield StreamItem::Lagged(notice);
                         break;
                     }
-                    LiveItem::Closed => break,
+                    LiveItem::Closed => {
+                        tracing::warn!(db = %name, "change feed stopped; ending the SSE stream");
+                        yield StreamItem::Error(FEED_CLOSED.to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -266,7 +277,7 @@ mod sse {
 
     fn history_failed(name: &str, error: &ApiError) -> StreamItem {
         tracing::warn!(db = %name, error = %error, "SSE history pull failed; ending the stream");
-        StreamItem::HistoryFailed(error.to_string())
+        StreamItem::Error(error.to_string())
     }
 
     /// Pulls the history of `name` from epoch `since` on, one page.
@@ -437,12 +448,50 @@ mod sse {
             // The pull after the last page fails: CDC is off now.
             db.set_cdc_enabled(false);
             match next_item(&mut stream).await {
-                StreamItem::HistoryFailed(message) => {
+                StreamItem::Error(message) => {
                     assert!(message.contains("CDC is not enabled"), "{message}");
                 }
                 other => panic!("expected a failure, got {other:?}"),
             }
             assert!(stream.next().await.is_none(), "the failure ends the stream");
+        }
+
+        #[tokio::test]
+        async fn a_dropped_database_ends_the_live_stream_with_an_error() {
+            let state = cdc_state();
+            state
+                .databases()
+                .create(&grafeo_service::types::CreateDatabaseRequest {
+                    name: "gone".to_string(),
+                    database_type: grafeo_service::types::DatabaseType::Lpg,
+                    storage_mode: grafeo_service::types::StorageMode::InMemory,
+                    options: grafeo_service::types::DatabaseOptions::default(),
+                    schema_file: None,
+                    schema_filename: None,
+                })
+                .unwrap();
+            let db = state.databases().get("gone").unwrap().db();
+            db.set_cdc_enabled(true);
+            db.create_node(&["Old"]).unwrap();
+
+            let first = history_page(&state, "gone", 0).await.unwrap();
+            let mut stream = Box::pin(change_stream(state.clone(), "gone".to_string(), first, 0));
+            assert_eq!(change_label(next_item(&mut stream).await), "Old");
+            // Once this has arrived the stream pulls no more history.
+            db.create_node(&["Live"]).unwrap();
+            assert_eq!(change_label(next_item(&mut stream).await), "Live");
+            drop(db);
+
+            // The hub's next poll fails and closes the feed.
+            state.databases().delete("gone").unwrap();
+            match next_item(&mut stream).await {
+                StreamItem::Error(message) => assert_eq!(message, FEED_CLOSED),
+                other => panic!("expected the end of the feed, got {other:?}"),
+            }
+            assert!(
+                stream.next().await.is_none(),
+                "the closed feed ends the stream"
+            );
         }
     }
 }

@@ -5561,6 +5561,108 @@ async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open
     assert_eq!(body["type"], "pong");
 }
 
+/// Reads the next WebSocket text message as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_ws_json<S>(ws: &mut S) -> Value
+where
+    S: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>> + Unpin,
+{
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), ws.next())
+        .await
+        .expect("no WebSocket message within 30 s")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(reply.to_text().unwrap()).unwrap()
+}
+
+/// WebSocket: dropping a database ends its subscriptions with a `closed`
+/// error, and the connection stays open.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_ends_when_its_database_is_dropped() {
+    let state = sync_state();
+    state
+        .databases()
+        .create(&grafeo_service::types::CreateDatabaseRequest {
+            name: "gone".to_string(),
+            database_type: grafeo_service::types::DatabaseType::Lpg,
+            storage_mode: grafeo_service::types::StorageMode::InMemory,
+            options: grafeo_service::types::DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        })
+        .unwrap();
+    let db = state.databases().get("gone").unwrap().db();
+    db.set_cdc_enabled(true);
+    let base = spawn_server_from_state(state.clone()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "gone", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    db.create_node(&["Live"]).unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "change");
+    drop(db);
+
+    state.databases().delete("gone").unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["id"], "s1");
+    assert_eq!(body["error"], "closed");
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "pong");
+}
+
+/// WebSocket: subscribing again with a `sub_id` in use replaces the old
+/// subscription, so each change arrives once.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_resubscribe_with_the_same_sub_id_replaces_the_subscription() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    for _ in 0..2 {
+        ws.send(tungstenite::Message::Text(
+            json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": 0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    }
+
+    db.create_node(&["Once"]).unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "change", "{body}");
+    assert_eq!(body["event"]["labels"], json!(["Once"]));
+
+    // Give a second copy time to arrive, then check the next message is
+    // the answer to a ping.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "pong", "a change arrived twice: {body}");
+}
+
 /// SSE: when the history fills its last page exactly, the empty pull after
 /// it does not move the live cursor back onto events already sent.
 #[cfg(feature = "push-changefeed")]

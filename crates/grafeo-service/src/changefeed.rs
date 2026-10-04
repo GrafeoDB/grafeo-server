@@ -24,7 +24,6 @@
 //! silent gap.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -54,11 +53,9 @@ const POLL_LIMIT: usize = 500;
 
 struct ChannelState {
     sender: broadcast::Sender<ChangeEventDto>,
-    /// The `since` of the next poll: one past the resume cursor
-    /// (`server_epoch`) of the last pull that returned events.
-    next_since: Arc<AtomicU64>,
-    /// Handle to the background poll task. `None` means no task is running.
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The background poll task. Locked by a subscribe and by the task's
+    /// decision to stop, so no subscriber is left on a channel nobody polls.
+    poller: Mutex<Poller>,
 }
 
 impl ChannelState {
@@ -66,10 +63,20 @@ impl ChannelState {
         let (sender, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             sender,
-            next_since: Arc::new(AtomicU64::new(0)),
-            task: Mutex::new(None),
+            poller: Mutex::new(Poller::Starting),
         }
     }
+}
+
+/// Where a channel's poll task stands.
+enum Poller {
+    /// The channel is new: its first subscriber starts the task.
+    Starting,
+    Running(tokio::task::JoinHandle<()>),
+    /// The task stopped and the channel left the hub: a subscriber that
+    /// still finds it takes a fresh one. Once the last handle on it goes,
+    /// its sender drops and its receivers see `Closed`.
+    Retired,
 }
 
 /// Manages real-time push channels for all active databases.
@@ -93,49 +100,66 @@ impl ChangeHub {
     ///
     /// `since_epoch` is the first epoch the subscriber has not seen: the
     /// `since` of its next pull (`server_epoch + 1` after a pull, 0 for the
-    /// full history). The hub's polls move up to it, never back. Historical
-    /// events before it must be fetched separately via `SyncService::pull()`:
-    /// the receiver only yields events broadcast after the subscription.
+    /// full history). Filter what the receiver yields with a [`LiveCursor`]
+    /// at the same epoch. The receiver only yields events broadcast after
+    /// the subscription: fetch the ones before it with `SyncService::pull()`.
     ///
-    /// A background poll task is started (or restarted) automatically if none
-    /// is currently running for this database.
+    /// The first subscriber of a database starts its poll task at
+    /// `since_epoch`, but never past the database's next epoch, so a client
+    /// that asks for a far epoch cannot hold the feed back for everyone.
+    /// Later subscribers leave the polls where they are: moving them ahead
+    /// would skip events the subscribers already listening still wait for.
+    ///
+    /// When the poll task stops on an error (the database was dropped, its
+    /// CDC turned off, a restore began), the receiver yields `Closed`.
     pub fn subscribe(
         &self,
         db_name: &str,
         since_epoch: u64,
         state: ServiceState,
     ) -> broadcast::Receiver<ChangeEventDto> {
-        let channel = self
-            .channels
-            .entry(db_name.to_string())
-            .or_insert_with(|| Arc::new(ChannelState::new()))
-            .clone();
-
-        // Move the next poll up to `since_epoch` so the poll task starts from here.
-        channel.next_since.fetch_max(since_epoch, Ordering::Relaxed);
-
-        self.ensure_task_running(db_name, &channel, state);
-
-        channel.sender.subscribe()
+        let start = state.databases().get(db_name).map_or(0, |entry| {
+            since_epoch.min(entry.db().current_epoch().0.saturating_add(1))
+        });
+        loop {
+            let channel = Arc::clone(
+                &self
+                    .channels
+                    .entry(db_name.to_string())
+                    .or_insert_with(|| Arc::new(ChannelState::new())),
+            );
+            let mut poller = channel.poller.lock();
+            match &*poller {
+                Poller::Retired => continue,
+                Poller::Running(task) if task.is_finished() => {
+                    // The task ended without retiring the channel (it
+                    // panicked): retire it, so its subscribers see the end
+                    // instead of waiting on a feed nobody polls.
+                    self.retire(db_name, &channel, &mut poller);
+                    continue;
+                }
+                Poller::Starting | Poller::Running(_) => {}
+            }
+            // Subscribe before the task can look for subscribers.
+            let receiver = channel.sender.subscribe();
+            if matches!(*poller, Poller::Starting) {
+                *poller = Poller::Running(tokio::spawn(poll_task(
+                    self.clone(),
+                    db_name.to_string(),
+                    Arc::clone(&channel),
+                    start,
+                    state,
+                )));
+            }
+            return receiver;
+        }
     }
 
-    /// Ensures a background poll task is running for `db_name`.
-    fn ensure_task_running(&self, db_name: &str, channel: &Arc<ChannelState>, state: ServiceState) {
-        let mut guard = channel.task.lock();
-
-        // Check if the existing task is still alive.
-        let needs_restart = match guard.as_ref() {
-            Some(handle) => handle.is_finished(),
-            None => true,
-        };
-
-        if needs_restart {
-            let db = db_name.to_string();
-            let sender = channel.sender.clone();
-            let next_since = Arc::clone(&channel.next_since);
-            let handle = tokio::spawn(poll_task(db, sender, next_since, state));
-            *guard = Some(handle);
-        }
+    /// Takes `channel` out of the hub. The caller holds its poller lock.
+    fn retire(&self, db_name: &str, channel: &Arc<ChannelState>, poller: &mut Poller) {
+        *poller = Poller::Retired;
+        self.channels
+            .remove_if(db_name, |_, current| Arc::ptr_eq(current, channel));
     }
 }
 
@@ -227,10 +251,15 @@ pub struct LaggedNotice {
 // Background poll task
 // ---------------------------------------------------------------------------
 
+/// Polls the CDC log of `db_name` from `next_since` on and broadcasts what it
+/// finds on `channel`, until the channel has no subscribers or a poll fails.
+/// Either way it retires the channel; after a failure that closes the
+/// subscribers still on it.
 async fn poll_task(
+    hub: ChangeHub,
     db_name: String,
-    sender: broadcast::Sender<ChangeEventDto>,
-    next_since: Arc<AtomicU64>,
+    channel: Arc<ChannelState>,
+    mut next_since: u64,
     state: ServiceState,
 ) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -239,15 +268,27 @@ async fn poll_task(
     loop {
         interval.tick().await;
 
-        // Stop when there are no subscribers.
-        if sender.receiver_count() == 0 {
-            debug!("changefeed poll task: no subscribers for '{db_name}', stopping");
-            break;
+        // Stop when there are no subscribers. Decided under the poller lock:
+        // a subscriber either is counted here or finds the channel retired
+        // and starts a fresh one.
+        if channel.sender.receiver_count() == 0 {
+            let mut poller = channel.poller.lock();
+            if channel.sender.receiver_count() == 0 {
+                debug!("changefeed poll task: no subscribers for '{db_name}', stopping");
+                hub.retire(&db_name, &channel, &mut poller);
+                return;
+            }
         }
 
-        if let Err(e) = poll_once(state.databases(), &db_name, &sender, &next_since) {
-            debug!("changefeed poll error for '{db_name}': {e}");
-            break;
+        if let Err(e) = poll_once(
+            state.databases(),
+            &db_name,
+            &channel.sender,
+            &mut next_since,
+        ) {
+            debug!("changefeed poll error for '{db_name}': {e}; closing its subscribers");
+            hub.retire(&db_name, &channel, &mut channel.poller.lock());
+            return;
         }
     }
 }
@@ -262,12 +303,11 @@ fn poll_once(
     databases: &DatabaseManager,
     db_name: &str,
     sender: &broadcast::Sender<ChangeEventDto>,
-    next_since: &AtomicU64,
+    next_since: &mut u64,
 ) -> Result<(), ServiceError> {
-    let since = next_since.load(Ordering::Relaxed);
-    let resp = SyncService::pull(databases, db_name, since, POLL_LIMIT)?;
+    let resp = SyncService::pull(databases, db_name, *next_since, POLL_LIMIT)?;
     if !resp.changes.is_empty() {
-        next_since.fetch_max(resp.server_epoch.saturating_add(1), Ordering::Relaxed);
+        *next_since = (*next_since).max(resp.server_epoch.saturating_add(1));
     }
     for event in resp.changes {
         // Ignore send errors: lagged receivers will get a `RecvError::Lagged`.
@@ -316,17 +356,17 @@ mod tests {
     fn a_second_poll_does_not_redeliver_the_cursor_epoch() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let next_since = AtomicU64::new(0);
+        let mut next_since = 0;
         insert_nodes(&mgr, "A", 2);
 
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         assert_eq!(received(&mut rx).len(), 2);
 
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         assert!(received(&mut rx).is_empty(), "nothing new, nothing sent");
 
         insert_nodes(&mgr, "B", 1);
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         let events = received(&mut rx);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].labels.as_deref(), Some(&["B".to_string()][..]));
@@ -336,18 +376,14 @@ mod tests {
     fn an_empty_poll_leaves_the_cursor_and_the_next_write_arrives() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let next_since = AtomicU64::new(0);
+        let mut next_since = 0;
 
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         assert!(received(&mut rx).is_empty());
-        assert_eq!(
-            next_since.load(Ordering::Relaxed),
-            0,
-            "nothing seen, nothing passed"
-        );
+        assert_eq!(next_since, 0, "nothing seen, nothing passed");
 
         insert_nodes(&mgr, "A", 1);
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         assert_eq!(received(&mut rx).len(), 1);
     }
 
@@ -358,9 +394,9 @@ mod tests {
     fn an_epoch_zero_triple_event_after_an_empty_poll_arrives() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let next_since = AtomicU64::new(0);
+        let mut next_since = 0;
 
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         assert!(received(&mut rx).is_empty());
 
         mgr.get("default")
@@ -371,10 +407,138 @@ mod tests {
                 "INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }",
             )
             .unwrap();
-        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
         let events = received(&mut rx);
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].entity_type, "triple");
+    }
+
+    /// An in-memory service whose `default` database records CDC.
+    fn cdc_state() -> ServiceState {
+        let state = ServiceState::new_in_memory(300);
+        state
+            .databases()
+            .get("default")
+            .unwrap()
+            .db()
+            .set_cdc_enabled(true);
+        state
+    }
+
+    /// Creates the in-memory database `name` with CDC on.
+    fn create_cdc_database(state: &ServiceState, name: &str) {
+        state
+            .databases()
+            .create(&crate::types::CreateDatabaseRequest {
+                name: name.to_string(),
+                database_type: crate::types::DatabaseType::Lpg,
+                storage_mode: crate::types::StorageMode::InMemory,
+                options: crate::types::DatabaseOptions::default(),
+                schema_file: None,
+                schema_filename: None,
+            })
+            .unwrap();
+        state
+            .databases()
+            .get(name)
+            .unwrap()
+            .db()
+            .set_cdc_enabled(true);
+    }
+
+    async fn recv(
+        rx: &mut broadcast::Receiver<ChangeEventDto>,
+    ) -> Result<ChangeEventDto, RecvError> {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("nothing within 10 s")
+    }
+
+    #[tokio::test]
+    async fn a_far_ahead_subscriber_does_not_hold_back_the_others() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let db = state.databases().get("default").unwrap().db();
+
+        let _far = hub.subscribe("default", u64::MAX, state.clone());
+        let mut rx = hub.subscribe("default", 0, state.clone());
+        let id = db.create_node(&["Live"]).unwrap().as_u64();
+        assert_eq!(recv(&mut rx).await.unwrap().id, id);
+    }
+
+    #[tokio::test]
+    async fn a_later_subscriber_ahead_of_the_hub_does_not_skip_events_for_earlier_ones() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let db = state.databases().get("default").unwrap().db();
+        let first = db.create_node(&["First"]).unwrap().as_u64();
+
+        // The poll task has not run yet (single-threaded runtime): the hub
+        // is still at epoch 0 when the second subscriber asks for the next
+        // epoch on.
+        let mut early = hub.subscribe("default", 0, state.clone());
+        let mut late = hub.subscribe("default", db.current_epoch().0 + 1, state.clone());
+        assert_eq!(recv(&mut early).await.unwrap().id, first);
+
+        let second = db.create_node(&["Second"]).unwrap().as_u64();
+        assert_eq!(recv(&mut early).await.unwrap().id, second);
+        // `late` filters what it already has with its LiveCursor.
+        let mut cursor = LiveCursor::new(db.current_epoch().0);
+        match cursor.next(&mut late).await {
+            LiveItem::Change(event) => assert_eq!(event.id, second),
+            other => panic!("expected the second node, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_database_closes_its_subscribers() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        create_cdc_database(&state, "gone");
+
+        let mut rx = hub.subscribe("gone", 0, state.clone());
+        state.databases().delete("gone").unwrap();
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+        assert!(!hub.channels.contains_key("gone"), "the channel is retired");
+
+        // A subscription to the missing database closes too.
+        let mut again = hub.subscribe("gone", 0, state.clone());
+        assert!(matches!(recv(&mut again).await, Err(RecvError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn turning_cdc_off_closes_the_subscribers() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let mut rx = hub.subscribe("default", 0, state.clone());
+        state
+            .databases()
+            .get("default")
+            .unwrap()
+            .db()
+            .set_cdc_enabled(false);
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_after_the_hub_stopped_gets_a_fresh_feed() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let db = state.databases().get("default").unwrap().db();
+
+        drop(hub.subscribe("default", 0, state.clone()));
+        // With no subscriber left the task retires the channel.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while hub.channels.contains_key("default") {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .expect("the idle hub stops");
+
+        let mut rx = hub.subscribe("default", 0, state.clone());
+        let id = db.create_node(&["Back"]).unwrap().as_u64();
+        assert_eq!(recv(&mut rx).await.unwrap().id, id);
     }
 
     fn event_at(epoch: u64) -> ChangeEventDto {
@@ -464,7 +628,7 @@ mod tests {
     fn polls_deliver_a_burst_larger_than_the_poll_limit_once() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let next_since = AtomicU64::new(0);
+        let mut next_since = 0;
         // Three epochs of 300 events: more than POLL_LIMIT in all.
         for label in ["A", "B", "C"] {
             insert_nodes(&mgr, label, 300);
@@ -472,7 +636,7 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..3 {
-            poll_once(&mgr, "default", &sender, &next_since).unwrap();
+            poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
             ids.extend(received(&mut rx).into_iter().map(|e| e.id));
         }
         assert_eq!(ids.len(), 900, "every event once");
