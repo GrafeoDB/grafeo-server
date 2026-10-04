@@ -110,7 +110,7 @@ pub use state::AppState;
     ),
     components(
         schemas(
-            types::QueryRequest, types::QueryResponse, grafeo_service::types::WriteCountersInfo, types::TxBeginRequest,
+            types::QueryRequest, types::QueryResponse, types::TxBeginRequest,
             types::TransactionResponse, types::HealthResponse, types::EnabledFeatures, ErrorBody,
             types::CreateDatabaseRequest, types::DatabaseType, types::StorageMode,
             types::DatabaseOptions, types::ListDatabasesResponse, DatabaseSummary,
@@ -121,7 +121,7 @@ pub use state::AppState;
             grafeo_service::types::DatabaseStats, grafeo_service::types::WalStatusInfo,
             grafeo_service::types::ValidationInfo, grafeo_service::types::ValidationErrorItem,
             grafeo_service::types::ValidationWarningItem, grafeo_service::types::IndexDef,
-            grafeo_service::types::CacheStatsInfo,
+            grafeo_service::types::CacheStatsInfo, grafeo_service::types::WriteCountersInfo,
             grafeo_service::types::StorageTiersResponse,
             grafeo_service::types::SectionTierInfo,
             grafeo_service::types::ReloadEligibleRequest,

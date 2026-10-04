@@ -930,6 +930,7 @@ pub struct UpsertNodesRequest {
     #[serde(default = "default_upsert_key")]
     pub key: String,
     /// One plain JSON object per node. A row without the key is skipped.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Object>))]
     pub rows: Vec<serde_json::Value>,
     /// Replace a node's properties with the row's instead of merging. Default: false.
     #[serde(default)]
@@ -963,6 +964,7 @@ pub struct UpsertEdgesRequest {
     /// One plain JSON object per edge. Every other field is an edge property.
     /// A row is skipped when it lacks the key or an endpoint field, or when
     /// no node or more than one node has its endpoint key.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Object>))]
     pub rows: Vec<serde_json::Value>,
     /// Replace an edge's properties with the row's instead of merging. Default: false.
     #[serde(default)]

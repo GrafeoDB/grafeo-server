@@ -460,7 +460,10 @@ pub async fn drop_schema(
 /// Create or update many nodes by a key property (engine 0.5.44).
 ///
 /// All rows are written in one statement: a row that breaks a constraint or
-/// the schema fails the whole call and nothing is written.
+/// the schema fails the whole call and nothing is written. One call is one
+/// statement, and the request body is limited to `GRAFEO_MAX_BODY_SIZE`
+/// (2 MiB by default; larger bodies are answered with 413), so send large
+/// sets in several calls.
 #[utoipa::path(
     post,
     path = "/db/{name}/upsert/nodes",
@@ -487,7 +490,10 @@ pub async fn upsert_nodes(
 }
 
 /// Create or update many edges by a key property between nodes found by
-/// their key (engine 0.5.44). Endpoints are never created.
+/// their key (engine 0.5.44). Endpoints are never created. One call is one
+/// statement, and the request body is limited to `GRAFEO_MAX_BODY_SIZE`
+/// (2 MiB by default; larger bodies are answered with 413), so send large
+/// sets in several calls.
 #[utoipa::path(
     post,
     path = "/db/{name}/upsert/edges",
