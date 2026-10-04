@@ -284,10 +284,12 @@ fn first_cursor(databases: &DatabaseManager, db_name: &str, since_epoch: u64) ->
     };
     let db = entry.db();
     let current = db.current_epoch().0;
-    // As in the polls, only a pull with events moves past an epoch: an empty
-    // one can name the current epoch as done (0 before the first write).
-    let open = match SyncService::pull_from(&db, current, 1) {
-        Ok(resp) if !resp.changes.is_empty() => resp.server_epoch.saturating_add(1),
+    // Whether the current epoch has events in the log yet. The engine has
+    // no count or metadata probe for an epoch, so this reads its events, but
+    // only those, unsorted and not converted.
+    let epoch = grafeo_common::types::EpochId(current);
+    let open = match db.changes_between(epoch, epoch) {
+        Ok(events) if !events.is_empty() => current.saturating_add(1),
         _ => current,
     };
     HubCursor::new(since_epoch.min(open), Some(Arc::downgrade(&db)))
