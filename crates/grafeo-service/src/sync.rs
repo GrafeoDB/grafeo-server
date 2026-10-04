@@ -19,7 +19,8 @@
 //! # Protocol
 //!
 //! 1. On first sync, call `GET /changes?since=0` to receive all history.
-//! 2. Store `response.server_epoch` locally once its changes are applied.
+//! 2. Store `response.server_epoch` locally once its changes are applied
+//!    (only from a response that has changes, see `ChangesResponse`).
 //! 3. Poll again with `since=stored_epoch + 1` to receive only new changes.
 //! 4. To push local changes, `POST /sync` with the changeset.
 //! 5. Update local IDs for any creates using the returned `id_mappings`.
@@ -55,8 +56,11 @@ pub struct ChangesResponse {
     /// poll. When the response stops at `limit` this is the epoch of the last
     /// event returned; otherwise it is the server's current epoch, or the one
     /// before it while the current epoch's events are still being recorded.
-    /// With no `changes` it can be below the `since` asked for: never move a
-    /// stored cursor back.
+    /// It is never below `since - 1`, so the next `since` never goes back.
+    ///
+    /// Advance a stored cursor only after a response that has `changes`. An
+    /// empty one has nothing to apply, and on a database without writes yet
+    /// it reports epoch 0, which is still open.
     pub server_epoch: u64,
     /// Change events with epoch >= the requested `since` value, in the order
     /// they happened (by epoch, then timestamp). An epoch is never split
@@ -318,7 +322,7 @@ impl SyncService {
         // delete after its edges'.
         raw.sort_by_key(|e| (e.epoch, e.timestamp.as_u64()));
 
-        let (end, server_epoch) = resume_point(&raw, |e| e.epoch.0, limit, current_epoch);
+        let (end, server_epoch) = resume_point(&raw, |e| e.epoch.0, limit, since, current_epoch);
         raw.truncate(end);
         let changes = raw.into_iter().map(to_dto).collect();
 
@@ -436,7 +440,8 @@ impl SyncService {
 
 /// How many of the `sorted` events (by epoch) a pull returns, and the resume
 /// cursor it returns with them (`server_epoch`): the next pull starts at the
-/// epoch after it. `current_epoch` is the epoch the pull read the log up to.
+/// epoch after it. `since` is the epoch the pull asked to start at, and
+/// `current_epoch` the epoch it read the log up to.
 ///
 /// A pull never splits an epoch: past `limit` events (0 counts as 1) it stops
 /// at the end of the epoch of the `limit`-th one, so a single epoch larger
@@ -451,12 +456,20 @@ impl SyncService {
 /// one batch, at an epoch of its own: once one of them is in the log they
 /// all are. So the cursor is the current epoch when the last event returned
 /// has it, and the epoch before it otherwise.
+///
+/// Either way the cursor is never below `since - 1`: the caller has every
+/// epoch before `since` already. Without that floor, an idle pull after a
+/// cursor at the current epoch would report the epoch before it, and a
+/// client that took `server_epoch + 1` as its next `since` would fetch that
+/// epoch again.
 fn resume_point<T>(
     sorted: &[T],
     epoch_of: impl Fn(&T) -> u64,
     limit: usize,
+    since: u64,
     current_epoch: u64,
 ) -> (usize, u64) {
+    let floor = since.saturating_sub(1);
     let limit = limit.max(1);
     if let Some(last_in_limit) = sorted.get(limit - 1) {
         let boundary = epoch_of(last_in_limit);
@@ -466,14 +479,14 @@ fn resume_point<T>(
                 .take_while(|e| epoch_of(e) == boundary)
                 .count();
         if end < sorted.len() {
-            return (end, boundary);
+            return (end, boundary.max(floor));
         }
     }
     let cursor = match sorted.last() {
         Some(last) if epoch_of(last) == current_epoch => current_epoch,
         _ => current_epoch.saturating_sub(1),
     };
-    (sorted.len(), cursor)
+    (sorted.len(), cursor.max(floor))
 }
 
 /// A node or an edge a change targets.
@@ -982,7 +995,7 @@ mod tests {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
 
-        // Record events at epoch 0 (direct API, fresh DB).
+        // Each direct API write commits at an epoch of its own, from 1 on.
         entry.db().create_node(&["A"]).unwrap();
         entry.db().create_node(&["B"]).unwrap();
 
@@ -1013,18 +1026,19 @@ mod tests {
     #[test]
     fn resume_point_never_splits_an_epoch() {
         let epoch = |e: &u64| *e;
+        // Arguments: events, epoch_of, limit, since, current_epoch.
         // Not cut, the newest epoch has events: the cursor is the current one.
-        assert_eq!(resume_point(&[3, 7], epoch, 10, 7), (2, 7));
+        assert_eq!(resume_point(&[3, 7], epoch, 10, 0, 7), (2, 7));
         // Cut inside epoch 2: the batch runs to the end of epoch 2.
-        assert_eq!(resume_point(&[1, 1, 2, 2, 2, 3], epoch, 3, 3), (5, 2));
+        assert_eq!(resume_point(&[1, 1, 2, 2, 2, 3], epoch, 3, 0, 3), (5, 2));
         // Cut right at an epoch's end: nothing is added.
-        assert_eq!(resume_point(&[1, 1, 2, 3], epoch, 2, 3), (2, 1));
+        assert_eq!(resume_point(&[1, 1, 2, 3], epoch, 2, 0, 3), (2, 1));
         // One epoch larger than the limit comes back whole.
-        assert_eq!(resume_point(&[4, 4, 4, 4, 4], epoch, 2, 4), (5, 4));
+        assert_eq!(resume_point(&[4, 4, 4, 4, 4], epoch, 2, 0, 4), (5, 4));
         // Exactly `limit` events: not cut.
-        assert_eq!(resume_point(&[1, 2, 3], epoch, 3, 3), (3, 3));
+        assert_eq!(resume_point(&[1, 2, 3], epoch, 3, 0, 3), (3, 3));
         // A limit of 0 counts as 1.
-        assert_eq!(resume_point(&[1, 1, 2], epoch, 0, 2), (2, 1));
+        assert_eq!(resume_point(&[1, 1, 2], epoch, 0, 0, 2), (2, 1));
     }
 
     #[test]
@@ -1033,9 +1047,43 @@ mod tests {
         // The engine publishes an epoch before it records that epoch's
         // events: with none of epoch 7 in the log yet, 7 may still fill, so
         // the cursor stops at 6 and the next pull asks for 7 again.
-        assert_eq!(resume_point(&[3, 5], epoch, 10, 7), (2, 6));
-        assert_eq!(resume_point::<u64>(&[], epoch, 10, 7), (0, 6));
-        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0), (0, 0));
+        assert_eq!(resume_point(&[3, 5], epoch, 10, 0, 7), (2, 6));
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0, 7), (0, 6));
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn resume_point_never_reports_less_than_the_caller_has() {
+        let epoch = |e: &u64| *e;
+        // A batch ended at epoch 7, the current one, so its cursor was 7.
+        // The idle pull after it (since 8) still says 7: the open-epoch rule
+        // alone would say 6, and the client would fetch epoch 7 again.
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 8, 7), (0, 7));
+        // The same after a cut batch that the client has caught up on.
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 3, 2), (0, 2));
+        // A newer epoch is still reported when it is past the floor.
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 3, 9), (0, 8));
+        // since = 0 with no events: the open-epoch rule alone.
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0, 5), (0, 4));
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0, 0), (0, 0));
+        // since far beyond the current epoch: the cursor follows the caller.
+        assert_eq!(
+            resume_point::<u64>(&[], epoch, 10, u64::MAX, 5),
+            (0, u64::MAX - 1)
+        );
+    }
+
+    #[test]
+    fn an_idle_pull_does_not_move_server_epoch_back() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.create_node(&["A"]).unwrap();
+
+        let first = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
+        assert_eq!(first.server_epoch, db.current_epoch().0);
+        let idle = SyncService::pull(&mgr, "default", first.server_epoch + 1, 1000).unwrap();
+        assert!(idle.changes.is_empty());
+        assert_eq!(idle.server_epoch, first.server_epoch);
     }
 
     #[test]

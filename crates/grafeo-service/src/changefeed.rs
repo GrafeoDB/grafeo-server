@@ -55,7 +55,7 @@ const POLL_LIMIT: usize = 500;
 struct ChannelState {
     sender: broadcast::Sender<ChangeEventDto>,
     /// The `since` of the next poll: one past the resume cursor
-    /// (`server_epoch`) of the last pull, 0 before any.
+    /// (`server_epoch`) of the last pull that returned events.
     next_since: Arc<AtomicU64>,
     /// Handle to the background poll task. `None` means no task is running.
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -252,9 +252,12 @@ async fn poll_task(
     }
 }
 
-/// Pulls the events from `next_since` on, broadcasts them, and moves
-/// `next_since` past the pull's resume cursor, so the next poll neither
-/// repeats an event nor skips one a cut batch left out.
+/// Pulls the events from `next_since` on and broadcasts them. When there
+/// were any, it moves `next_since` past the pull's resume cursor, so the next
+/// poll neither repeats an event nor skips one a cut batch left out. An empty
+/// pull leaves it where it is: staying put skips nothing, while an empty
+/// pull's cursor can name an epoch that is still open (0 before the first
+/// write).
 fn poll_once(
     databases: &DatabaseManager,
     db_name: &str,
@@ -263,7 +266,9 @@ fn poll_once(
 ) -> Result<(), ServiceError> {
     let since = next_since.load(Ordering::Relaxed);
     let resp = SyncService::pull(databases, db_name, since, POLL_LIMIT)?;
-    next_since.fetch_max(resp.server_epoch.saturating_add(1), Ordering::Relaxed);
+    if !resp.changes.is_empty() {
+        next_since.fetch_max(resp.server_epoch.saturating_add(1), Ordering::Relaxed);
+    }
     for event in resp.changes {
         // Ignore send errors: lagged receivers will get a `RecvError::Lagged`.
         let _ = sender.send(event);
@@ -325,6 +330,51 @@ mod tests {
         let events = received(&mut rx);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].labels.as_deref(), Some(&["B".to_string()][..]));
+    }
+
+    #[test]
+    fn an_empty_poll_leaves_the_cursor_and_the_next_write_arrives() {
+        let mgr = cdc_manager();
+        let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let next_since = AtomicU64::new(0);
+
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        assert!(received(&mut rx).is_empty());
+        assert_eq!(
+            next_since.load(Ordering::Relaxed),
+            0,
+            "nothing seen, nothing passed"
+        );
+
+        insert_nodes(&mgr, "A", 1);
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        assert_eq!(received(&mut rx).len(), 1);
+    }
+
+    /// RDF triple events are recorded at the store's current epoch, which is
+    /// 0 before the first write: an empty first poll must not pass it.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn an_epoch_zero_triple_event_after_an_empty_poll_arrives() {
+        let mgr = cdc_manager();
+        let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let next_since = AtomicU64::new(0);
+
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        assert!(received(&mut rx).is_empty());
+
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute_sparql(
+                "INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }",
+            )
+            .unwrap();
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        let events = received(&mut rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].entity_type, "triple");
     }
 
     fn event_at(epoch: u64) -> ChangeEventDto {

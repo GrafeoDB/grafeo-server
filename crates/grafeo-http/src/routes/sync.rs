@@ -44,8 +44,9 @@ pub struct ChangesQuery {
 /// A response never splits an epoch: past `limit` events it runs to the end
 /// of the epoch of the `limit`-th one, and `server_epoch` is the epoch of its
 /// last event. If `changes.len() >= limit`, more events may be waiting: poll
-/// again straight away. A response without changes can report a lower
-/// `server_epoch` than the cursor already held: keep the larger one.
+/// again straight away. `server_epoch` is never below `since - 1`. Advance a
+/// stored cursor only after a response that has changes: on a database
+/// without writes yet an empty response reports epoch 0, which is still open.
 ///
 /// With auth on, the token must be allowed on the database.
 pub async fn db_changes(
@@ -184,13 +185,12 @@ mod sse {
         since: u64,
     ) -> impl Stream<Item = StreamItem> {
         async_stream::stream! {
-            // Each pull resumes after the previous one's cursor. The cursor
-            // never moves back: a pull that finds nothing new can report a
-            // lower epoch.
+            // Each pull resumes after the cursor of the last one that
+            // returned events (see `resume_after`).
             let mut page = first;
             let mut next_since = since;
             while page.changes.len() >= HISTORY_PAGE {
-                next_since = next_since.max(page.server_epoch.saturating_add(1));
+                next_since = resume_after(next_since, &page);
                 for event in page.changes {
                     yield StreamItem::Change(Box::new(event));
                 }
@@ -205,7 +205,7 @@ mod sse {
 
             // The last page: subscribe before sending it, so the hub cannot
             // move past an event while this stream is still in its history.
-            next_since = next_since.max(page.server_epoch.saturating_add(1));
+            next_since = resume_after(next_since, &page);
             let mut receiver = state
                 .change_hub()
                 .subscribe(&name, next_since, state.service().clone());
@@ -222,7 +222,7 @@ mod sse {
                         return;
                     }
                 };
-                next_since = next_since.max(page.server_epoch.saturating_add(1));
+                next_since = resume_after(next_since, &page);
                 let full = page.changes.len() >= HISTORY_PAGE;
                 for event in page.changes {
                     yield StreamItem::Change(Box::new(event));
@@ -249,6 +249,18 @@ mod sse {
                     LiveItem::Closed => break,
                 }
             }
+        }
+    }
+
+    /// Where the pull after `page` starts: past its cursor when it returned
+    /// events, still at `next_since` when it was empty. An empty page has
+    /// nothing to move past, and its cursor can name an epoch that is still
+    /// open (0 before the first write).
+    fn resume_after(next_since: u64, page: &ChangesResponse) -> u64 {
+        if page.changes.is_empty() {
+            next_since
+        } else {
+            next_since.max(page.server_epoch.saturating_add(1))
         }
     }
 
@@ -306,6 +318,27 @@ mod sse {
                 StreamItem::Change(event) => event.labels.unwrap().remove(0),
                 other => panic!("expected a change, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn only_a_page_with_events_moves_the_history_cursor() {
+            let empty = ChangesResponse {
+                server_epoch: 0,
+                changes: Vec::new(),
+            };
+            assert_eq!(resume_after(0, &empty), 0, "epoch 0 may still fill");
+            assert_eq!(resume_after(5, &empty), 5);
+
+            let page: ChangesResponse = serde_json::from_value(serde_json::json!({
+                "server_epoch": 4,
+                "changes": [{
+                    "id": 1, "entity_type": "node", "kind": "create",
+                    "epoch": 4, "timestamp": 1,
+                }],
+            }))
+            .unwrap();
+            assert_eq!(resume_after(0, &page), 5);
+            assert_eq!(resume_after(9, &page), 9, "never back");
         }
 
         #[tokio::test]
