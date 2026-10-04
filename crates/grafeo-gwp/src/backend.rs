@@ -994,8 +994,9 @@ mod tests {
         let rows = (0..num_rows)
             .map(|i| vec![Value::Int64(i as i64)])
             .collect();
-        let mut result =
-            QueryResult::from_rows(vec!["x".to_string()], rows).with_metrics(1.0, num_rows as u64);
+        let mut result = QueryResult::from_rows(vec!["x".to_string()], rows)
+            .unwrap()
+            .with_metrics(1.0, num_rows as u64);
         result.column_types = vec![LogicalType::Int64];
         result
     }

@@ -335,7 +335,7 @@ impl SyncService {
                             .iter()
                             .map(String::as_str)
                             .collect();
-                        let new_id = if let Some(after) = &change.after {
+                        let created = if let Some(after) = &change.after {
                             let props: Vec<(String, grafeo_common::types::Value)> =
                                 json_to_props(after).collect();
                             let props_refs: Vec<(&str, grafeo_common::types::Value)> =
@@ -344,15 +344,20 @@ impl SyncService {
                         } else {
                             db.create_node(&labels)
                         };
-                        id_mappings.push(IdMapping {
-                            request_index: idx,
-                            server_id: new_id.as_u64(),
-                        });
-                        applied += 1;
+                        match created {
+                            Ok(new_id) => {
+                                id_mappings.push(IdMapping {
+                                    request_index: idx,
+                                    server_id: new_id.as_u64(),
+                                });
+                                applied += 1;
+                            }
+                            Err(e) => conflicts.push(write_failed(idx, &e)),
+                        }
                     }
                     "edge" => match (change.src_id, change.dst_id, &change.edge_type) {
                         (Some(src), Some(dst), Some(et)) => {
-                            let new_id = if let Some(after) = &change.after {
+                            let created = if let Some(after) = &change.after {
                                 let props: Vec<(String, grafeo_common::types::Value)> =
                                     json_to_props(after).collect();
                                 let props_refs: Vec<(&str, grafeo_common::types::Value)> =
@@ -366,11 +371,16 @@ impl SyncService {
                             } else {
                                 db.create_edge(NodeId::new(src), NodeId::new(dst), et)
                             };
-                            id_mappings.push(IdMapping {
-                                request_index: idx,
-                                server_id: new_id.as_u64(),
-                            });
-                            applied += 1;
+                            match created {
+                                Ok(new_id) => {
+                                    id_mappings.push(IdMapping {
+                                        request_index: idx,
+                                        server_id: new_id.as_u64(),
+                                    });
+                                    applied += 1;
+                                }
+                                Err(e) => conflicts.push(write_failed(idx, &e)),
+                            }
                         }
                         _ => {
                             conflicts.push(ConflictRecord {
@@ -409,8 +419,10 @@ impl SyncService {
                                     .and_then(|n| n.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                db.set_node_property(node_id, prop_key, merged);
-                                applied += 1;
+                                match db.set_node_property(node_id, prop_key, merged) {
+                                    Ok(()) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
+                                }
                             }
                             "edge" => {
                                 let edge_id = EdgeId::new(raw_id);
@@ -419,8 +431,10 @@ impl SyncService {
                                     .and_then(|e| e.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                db.set_edge_property(edge_id, prop_key, merged);
-                                applied += 1;
+                                match db.set_edge_property(edge_id, prop_key, merged) {
+                                    Ok(()) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
+                                }
                             }
                             _ => {
                                 conflicts.push(ConflictRecord {
@@ -458,10 +472,12 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                for (key, val) in json_to_props(after) {
-                                    db.set_node_property(node_id, &key, val);
+                                match json_to_props(after).try_for_each(|(key, val)| {
+                                    db.set_node_property(node_id, &key, val)
+                                }) {
+                                    Ok(()) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
-                                applied += 1;
                             }
                         }
                         "edge" => {
@@ -477,10 +493,12 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                for (key, val) in json_to_props(after) {
-                                    db.set_edge_property(edge_id, &key, val);
+                                match json_to_props(after).try_for_each(|(key, val)| {
+                                    db.set_edge_property(edge_id, &key, val)
+                                }) {
+                                    Ok(()) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
-                                applied += 1;
                             }
                         }
                         _ => {
@@ -518,8 +536,10 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                db.delete_node(node_id);
-                                applied += 1;
+                                match db.delete_node(node_id) {
+                                    Ok(_) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
+                                }
                             }
                         }
                         "edge" => {
@@ -535,8 +555,10 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                db.delete_edge(edge_id);
-                                applied += 1;
+                                match db.delete_edge(edge_id) {
+                                    Ok(_) => applied += 1,
+                                    Err(e) => conflicts.push(write_failed(idx, &e)),
+                                }
                             }
                         }
                         _ => {
@@ -594,6 +616,16 @@ fn server_is_newer(
         let client_ts = grafeo_common::types::HlcTimestamp::from_u64(client_timestamp);
         events.iter().any(|e| e.timestamp > client_ts)
     })
+}
+
+/// Records an engine write error as a conflict. Since engine 0.5.44 direct
+/// writes return `Result`: a missing entity or endpoint, a node that still
+/// has edges, or a schema violation fails instead of being ignored.
+fn write_failed(request_index: usize, error: &dyn std::fmt::Display) -> ConflictRecord {
+    ConflictRecord {
+        request_index,
+        reason: format!("write_failed: {error}"),
+    }
 }
 
 /// Computes a stable schema version string for `db`.
@@ -722,9 +754,9 @@ mod tests {
         let entry = mgr.get("default").unwrap();
 
         // Direct API calls record to the shared CDC log.
-        entry.db().create_node(&["Thing"]);
-        entry.db().create_node(&["Thing"]);
-        entry.db().create_node(&["Thing"]);
+        entry.db().create_node(&["Thing"]).unwrap();
+        entry.db().create_node(&["Thing"]).unwrap();
+        entry.db().create_node(&["Thing"]).unwrap();
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(resp.changes.len(), 3);
@@ -737,7 +769,7 @@ mod tests {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
         for _ in 0..5 {
-            entry.db().create_node(&["Thing"]);
+            entry.db().create_node(&["Thing"]).unwrap();
         }
         let resp = SyncService::pull(&mgr, "default", 0, 3).unwrap();
         assert_eq!(resp.changes.len(), 3);
@@ -749,8 +781,8 @@ mod tests {
         let entry = mgr.get("default").unwrap();
 
         // Record events at epoch 0 (direct API, fresh DB).
-        entry.db().create_node(&["A"]);
-        entry.db().create_node(&["B"]);
+        entry.db().create_node(&["A"]).unwrap();
+        entry.db().create_node(&["B"]).unwrap();
 
         let full = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(full.changes.len(), 2);
@@ -767,7 +799,7 @@ mod tests {
     fn change_event_dto_serializes_cleanly() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        entry.db().create_node(&["Person"]);
+        entry.db().create_node(&["Person"]).unwrap();
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(resp.changes.len(), 1);
@@ -828,7 +860,7 @@ mod tests {
     fn apply_update_node_applies_properties() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db().create_node(&["Person"]);
+        let node = entry.db().create_node(&["Person"]).unwrap();
 
         let req = SyncRequest {
             client_id: "device-1".to_string(),
@@ -864,7 +896,7 @@ mod tests {
     fn apply_delete_node_removes_entity() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db().create_node(&["Thing"]);
+        let node = entry.db().create_node(&["Thing"]).unwrap();
 
         let req = SyncRequest {
             client_id: "device-1".to_string(),
@@ -894,11 +926,12 @@ mod tests {
     fn apply_lww_conflict_skips_stale_update() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let node = entry.db().create_node(&["Person"]);
+        let node = entry.db().create_node(&["Person"]).unwrap();
         // Write a property — this records a CDC event with a recent timestamp.
         entry
             .db()
-            .set_node_property(node, "name", grafeo_common::types::Value::from("Gus"));
+            .set_node_property(node, "name", grafeo_common::types::Value::from("Gus"))
+            .unwrap();
 
         // Client sends an update with timestamp 0 (very old).
         let req = SyncRequest {
@@ -936,7 +969,7 @@ mod tests {
     fn pull_creates_carry_labels() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        entry.db().create_node(&["Company", "Startup"]);
+        entry.db().create_node(&["Company", "Startup"]).unwrap();
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         let event = &resp.changes[0];
@@ -998,7 +1031,7 @@ mod tests {
         let version_before = empty_resp.server_schema_version.clone();
 
         // Add a node to introduce a new label.
-        entry.db().create_node(&["NewLabel"]);
+        entry.db().create_node(&["NewLabel"]).unwrap();
 
         // Send the old (now stale) schema version.
         let stale_req = SyncRequest {
@@ -1018,9 +1051,9 @@ mod tests {
     fn pull_edge_creates_carry_src_dst_type() {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
-        let alix = entry.db().create_node(&["Person"]);
-        let gus = entry.db().create_node(&["Person"]);
-        entry.db().create_edge(alix, gus, "KNOWS");
+        let alix = entry.db().create_node(&["Person"]).unwrap();
+        let gus = entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_edge(alix, gus, "KNOWS").unwrap();
 
         let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         let edge_event = resp
@@ -1045,15 +1078,17 @@ mod tests {
         // Primary: write data
         let primary = make_manager();
         let primary_db = primary.get("default").unwrap();
-        let alix = primary_db.db().create_node(&["Person"]);
+        let alix = primary_db.db().create_node(&["Person"]).unwrap();
         primary_db
             .db()
-            .set_node_property(alix, "name", grafeo_common::types::Value::from("Alix"));
-        let gus = primary_db.db().create_node(&["Person"]);
+            .set_node_property(alix, "name", grafeo_common::types::Value::from("Alix"))
+            .unwrap();
+        let gus = primary_db.db().create_node(&["Person"]).unwrap();
         primary_db
             .db()
-            .set_node_property(gus, "name", grafeo_common::types::Value::from("Gus"));
-        let _edge = primary_db.db().create_edge(alix, gus, "KNOWS");
+            .set_node_property(gus, "name", grafeo_common::types::Value::from("Gus"))
+            .unwrap();
+        let _edge = primary_db.db().create_edge(alix, gus, "KNOWS").unwrap();
 
         // Pull changes from primary
         let changes_resp = SyncService::pull(&primary, "default", 0, 1000).unwrap();
@@ -1197,5 +1232,63 @@ mod tests {
             crate::replication::ReplicationState::with_persistence(dir.path().to_path_buf());
         assert_eq!(state2.last_epoch("default"), 42);
         assert_eq!(state2.last_epoch("other_db"), 100);
+    }
+
+    #[test]
+    fn apply_reports_write_to_missing_node_as_conflict() {
+        let mgr = make_manager();
+        let req = SyncRequest {
+            client_id: "device-1".to_string(),
+            last_seen_epoch: 0,
+            changes: vec![SyncChangeRequest {
+                kind: "update".to_string(),
+                entity_type: "node".to_string(),
+                id: Some(424_242),
+                timestamp: 0,
+                labels: None,
+                edge_type: None,
+                src_id: None,
+                dst_id: None,
+                after: Some(serde_json::json!({"name": {"String": "Ghost"}})),
+                crdt_op: None,
+                crdt_property: None,
+            }],
+            schema_version: None,
+        };
+        let resp = SyncService::apply(&mgr, "default", req).unwrap();
+        assert_eq!(resp.applied, 0);
+        assert_eq!(resp.conflicts.len(), 1);
+        assert!(
+            resp.conflicts[0].reason.starts_with("write_failed:"),
+            "reason: {}",
+            resp.conflicts[0].reason
+        );
+    }
+
+    #[test]
+    fn apply_edge_create_with_missing_endpoint_reports_conflict() {
+        let mgr = make_manager();
+        let req = SyncRequest {
+            client_id: "device-1".to_string(),
+            last_seen_epoch: 0,
+            changes: vec![SyncChangeRequest {
+                kind: "create".to_string(),
+                entity_type: "edge".to_string(),
+                id: None,
+                timestamp: 0,
+                labels: None,
+                edge_type: Some("KNOWS".to_string()),
+                src_id: Some(900_001),
+                dst_id: Some(900_002),
+                after: None,
+                crdt_op: None,
+                crdt_property: None,
+            }],
+            schema_version: None,
+        };
+        let resp = SyncService::apply(&mgr, "default", req).unwrap();
+        assert_eq!(resp.applied, 0);
+        assert_eq!(resp.id_mappings.len(), 0);
+        assert!(resp.conflicts[0].reason.starts_with("write_failed:"));
     }
 }

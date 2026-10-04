@@ -4783,9 +4783,9 @@ async fn sync_round_trip_two_databases() {
     let state_a = sync_state();
     {
         let entry = state_a.databases().get("default").unwrap();
-        entry.db().create_node(&["Person"]);
-        entry.db().create_node(&["Person"]);
-        entry.db().create_node(&["Person"]);
+        entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_node(&["Person"]).unwrap();
     }
     let base_a = spawn_server_from_state(state_a).await;
 
@@ -4877,9 +4877,9 @@ async fn sync_with_edge_creates() {
     let state_a = sync_state();
     let (alix_raw, gus_raw) = {
         let entry = state_a.databases().get("default").unwrap();
-        let alix = entry.db().create_node(&["Person"]);
-        let gus = entry.db().create_node(&["Person"]);
-        entry.db().create_edge(alix, gus, "KNOWS");
+        let alix = entry.db().create_node(&["Person"]).unwrap();
+        let gus = entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_edge(alix, gus, "KNOWS").unwrap();
         (alix.as_u64(), gus.as_u64())
     };
     let base_a = spawn_server_from_state(state_a).await;
@@ -4993,8 +4993,8 @@ async fn sync_updates_and_deletes() {
     let state_b = sync_state();
     let (n1, n2) = {
         let entry = state_b.databases().get("default").unwrap();
-        let n1 = entry.db().create_node(&["Device"]).as_u64();
-        let n2 = entry.db().create_node(&["Device"]).as_u64();
+        let n1 = entry.db().create_node(&["Device"]).unwrap().as_u64();
+        let n2 = entry.db().create_node(&["Device"]).unwrap().as_u64();
         (n1, n2)
     };
     let base_b = spawn_server_from_state(state_b).await;
@@ -5056,7 +5056,7 @@ async fn sync_lww_conflict_detection() {
     let state = sync_state();
     let node_id = {
         let entry = state.databases().get("default").unwrap();
-        entry.db().create_node(&["Person"]).as_u64()
+        entry.db().create_node(&["Person"]).unwrap().as_u64()
     };
     let base = spawn_server_from_state(state).await;
 
@@ -5102,7 +5102,7 @@ async fn sync_limit_truncation() {
     {
         let entry = state.databases().get("default").unwrap();
         for _ in 0..7 {
-            entry.db().create_node(&["Item"]);
+            entry.db().create_node(&["Item"]).unwrap();
         }
     }
     let base = spawn_server_from_state(state).await;

@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn query_response_includes_gql_status_when_non_success() {
-        let mut result = QueryResult::from_rows(vec!["x".to_string()], vec![]);
+        let mut result = QueryResult::from_rows(vec!["x".to_string()], vec![]).unwrap();
         result.gql_status = grafeo_common::utils::GqlStatus::from_str("02000").unwrap();
         let resp = query_result_to_response(&result);
         assert_eq!(resp.gql_status.as_deref(), Some("02000"));
@@ -334,6 +334,7 @@ mod tests {
             vec!["name".to_string()],
             vec![vec![Value::String("Alice".into())]],
         )
+        .unwrap()
         .with_metrics(1.5, 10);
         let resp = query_result_to_response(&result);
         assert_eq!(resp.columns, vec!["name"]);
@@ -359,6 +360,7 @@ mod tests {
                 .map(|i| vec![Value::Int64(i as i64)])
                 .collect(),
         )
+        .unwrap()
         .with_metrics(1.0, num_rows as u64)
     }
 
