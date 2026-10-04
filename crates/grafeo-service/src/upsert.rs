@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use grafeo_common::types::{PropertyKey, Value};
-use grafeo_common::utils::error::{Error, QueryErrorKind};
+use grafeo_common::utils::error::{Error, QueryErrorKind, TransactionError};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::{EdgeUpsertOptions, GraphHandle, UpsertSummary};
 
@@ -104,13 +104,23 @@ fn graph_handle<'db>(db: &'db GrafeoDB, graph: &str) -> Result<GraphHandle<'db>,
 }
 
 /// Maps an engine failure of an upsert: internal kinds (internal, I/O,
-/// serialization and storage errors) are 500; constraint violations, query
-/// errors and bad input stay 400, a timeout is a timeout.
+/// serialization and storage errors) are 500; a write-write conflict with a
+/// concurrent transaction (or a serialization failure or deadlock) is 409,
+/// which the caller can retry; constraint violations, query errors and bad
+/// input stay 400, a timeout is a timeout.
 fn upsert_error(error: Error) -> ServiceError {
     match error {
         Error::Internal(_) | Error::Io(_) | Error::Serialization(_) | Error::Storage(_) => {
             ServiceError::Internal(error.to_string())
         }
+        Error::Transaction(
+            TransactionError::WriteConflict(_)
+            | TransactionError::Conflict
+            | TransactionError::Aborted
+            | TransactionError::SerializationFailure(_)
+            | TransactionError::Deadlock,
+        ) => ServiceError::Conflict(error.to_string()),
+        Error::Transaction(TransactionError::Timeout) => ServiceError::Timeout,
         Error::Query(ref q) if q.kind == QueryErrorKind::Timeout => ServiceError::Timeout,
         Error::NodeNotFound(_)
         | Error::EdgeNotFound(_)
@@ -237,6 +247,7 @@ mod tests {
     #[test]
     fn engine_errors_map_to_service_errors() {
         let q = |kind| Error::Query(QueryError::new(kind, "x"));
+        let tx = Error::Transaction;
         let table: Vec<(Error, &str)> = vec![
             (Error::Internal("x".into()), "internal"),
             (Error::Io(std::io::Error::other("x")), "internal"),
@@ -255,12 +266,27 @@ mod tests {
                 },
                 "bad_request",
             ),
+            (tx(TransactionError::WriteConflict("x".into())), "conflict"),
+            (tx(TransactionError::Conflict), "conflict"),
+            (tx(TransactionError::Aborted), "conflict"),
+            (
+                tx(TransactionError::SerializationFailure("x".into())),
+                "conflict",
+            ),
+            (tx(TransactionError::Deadlock), "conflict"),
+            (tx(TransactionError::Timeout), "timeout"),
+            (tx(TransactionError::ReadOnly), "bad_request"),
+            (
+                tx(TransactionError::InvalidState("x".into())),
+                "bad_request",
+            ),
         ];
         for (error, expected) in table {
             let label = format!("{error:?}");
             let got = match upsert_error(error) {
                 ServiceError::Internal(_) => "internal",
                 ServiceError::BadRequest(_) => "bad_request",
+                ServiceError::Conflict(_) => "conflict",
                 ServiceError::Timeout => "timeout",
                 other => panic!("unexpected {other:?}"),
             };
@@ -269,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_graph_is_404_and_other_graph_errors_are_500() {
+    fn a_missing_graph_is_404() {
         let db = GrafeoDB::new_in_memory();
         let err = graph_handle(&db, "nope").map(|_| ()).unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(ref m) if m.contains("nope")));

@@ -473,6 +473,7 @@ pub async fn drop_schema(
         (status = 200, description = "Upsert summary", body = grafeo_service::types::UpsertResponse),
         (status = 400, description = "Bad rows or a constraint violation", body = ErrorBody),
         (status = 404, description = "Database or graph not found", body = ErrorBody),
+        (status = 409, description = "A concurrent write conflicted: retry", body = ErrorBody),
     ),
     tag = "Database"
 )]
@@ -503,6 +504,7 @@ pub async fn upsert_nodes(
         (status = 200, description = "Upsert summary", body = grafeo_service::types::UpsertResponse),
         (status = 400, description = "Bad rows or a constraint violation", body = ErrorBody),
         (status = 404, description = "Database or graph not found", body = ErrorBody),
+        (status = 409, description = "A concurrent write conflicted: retry", body = ErrorBody),
     ),
     tag = "Database"
 )]
