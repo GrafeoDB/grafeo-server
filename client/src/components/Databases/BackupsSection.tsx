@@ -38,6 +38,7 @@ function filenameKey(filename: string): string {
 export default function BackupsSection({ database, onMutated }: Props) {
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notConfigured, setNotConfigured] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [submittingCreate, setSubmittingCreate] = useState(false);
@@ -52,8 +53,20 @@ export default function BackupsSection({ database, onMutated }: Props) {
     setLoading(true);
     api.backup
       .list(database)
-      .then(setBackups)
-      .catch(() => setBackups([]))
+      .then((list) => {
+        setNotConfigured(false);
+        setBackups(list);
+      })
+      .catch((err) => {
+        // The server answers 400 "backup not configured: ..." when it was
+        // started without --backup-dir. Match the message, not any 400.
+        setNotConfigured(
+          err instanceof GrafeoApiError &&
+            err.status === 400 &&
+            err.detail.includes("backup not configured"),
+        );
+        setBackups([]);
+      })
       .finally(() => setLoading(false));
   }, [database]);
 
@@ -150,6 +163,7 @@ export default function BackupsSection({ database, onMutated }: Props) {
     <section className={styles.section}>
       <div className={styles.header}>
         <h3 className={styles.heading}>Backups</h3>
+        {!notConfigured && (
         <div className={styles.headerActions}>
           <button
             type="button"
@@ -178,12 +192,17 @@ export default function BackupsSection({ database, onMutated }: Props) {
             + New backup
           </button>
         </div>
+        )}
       </div>
 
       {toast && <div className={styles.toast}>{toast}</div>}
 
       {loading ? (
         <div className={styles.empty}>Loading…</div>
+      ) : notConfigured ? (
+        <div className={styles.empty}>
+          Backups are not configured on this server
+        </div>
       ) : backups.length === 0 ? (
         <div className={styles.empty}>
           No backups yet. Create one with the button above.

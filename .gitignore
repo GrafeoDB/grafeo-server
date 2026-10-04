@@ -33,3 +33,4 @@ coverage/
 lcov.info
 tarpaulin-report.html
 .grafeo/*
+client/*.tsbuildinfo

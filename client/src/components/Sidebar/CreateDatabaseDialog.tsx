@@ -214,6 +214,7 @@ export default function CreateDatabaseDialog({
               const info = DB_TYPE_LABELS[t];
               return (
                 <button
+                  type="button"
                   key={t}
                   className={`${styles.radioOption} ${
                     dbType === t ? styles.selected : ""
@@ -410,10 +411,13 @@ export default function CreateDatabaseDialog({
 
         {/* Actions */}
         <div className={styles.actions}>
-          <button className={styles.cancelButton} onClick={onClose}>
+          <button
+            type="button"
+            className={styles.cancelButton} onClick={onClose}>
             Cancel
           </button>
           <button
+            type="button"
             className={styles.submitButton}
             onClick={handleSubmit}
             disabled={!canSubmit}
