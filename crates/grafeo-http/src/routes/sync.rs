@@ -105,9 +105,10 @@ mod sse {
 
     use axum::extract::{Path, Query, State};
     use axum::response::sse::{Event, KeepAlive, Sse};
-    use tokio::sync::broadcast::error::RecvError;
+    use futures_util::{Stream, StreamExt};
 
     use grafeo_service::sync::{ChangeEventDto, ChangesResponse, SyncService};
+    use tokio::sync::broadcast::error::RecvError;
 
     use crate::error::ApiError;
     use crate::middleware::auth_context::AuthContext;
@@ -135,43 +136,87 @@ mod sse {
         auth: AuthContext,
         Path(name): Path<String>,
         Query(params): Query<ChangesQuery>,
-    ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
         auth.check_db_access(&name)?;
         // The first page is pulled up front so a missing database, or one
         // without CDC, is an HTTP error rather than an empty stream.
         let first = history_page(&state, &name, params.since).await?;
+        let stream =
+            change_stream(state, name, first, params.since).map(|event| Ok(sse_event(&event)));
+        Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    }
 
-        let stream = async_stream::stream! {
-            // History page by page, each pull resuming after the previous
-            // one's cursor, until a page is not full. The cursor never moves
-            // back: a pull that finds nothing new can report a lower epoch.
+    fn sse_event(event: &ChangeEventDto) -> Event {
+        Event::default().data(to_json(event))
+    }
+
+    /// The changes of `name` from epoch `since` on: the history page by page
+    /// (`first` is its first page), then live events from the hub.
+    ///
+    /// It subscribes to the hub before it sends the last history page and
+    /// then pulls once more, so nothing the hub broadcasts while the history
+    /// streams is lost; live events the history already sent are dropped.
+    fn change_stream(
+        state: AppState,
+        name: String,
+        first: ChangesResponse,
+        since: u64,
+    ) -> impl Stream<Item = ChangeEventDto> {
+        async_stream::stream! {
+            // Each pull resumes after the previous one's cursor. The cursor
+            // never moves back: a pull that finds nothing new can report a
+            // lower epoch.
             let mut page = first;
-            let mut next_since = params.since;
-            let live_since = loop {
+            let mut next_since = since;
+            while page.changes.len() >= HISTORY_PAGE {
                 next_since = next_since.max(page.server_epoch.saturating_add(1));
-                let full = page.changes.len() >= HISTORY_PAGE;
-                for event in &page.changes {
-                    yield Ok(sse_event(event));
+                for event in page.changes {
+                    yield event;
                 }
-                if !full {
-                    break next_since;
-                }
-                match history_page(&state, &name, next_since).await {
-                    Ok(next) => page = next,
+                page = match history_page(&state, &name, next_since).await {
+                    Ok(next) => next,
                     Err(e) => {
                         tracing::debug!("SSE history pull for '{name}' failed: {e}");
                         return;
                     }
-                }
-            };
+                };
+            }
 
-            // Then live events from the hub, starting after the history.
+            // The last page: subscribe before sending it, so the hub cannot
+            // move past an event while this stream is still in its history.
+            next_since = next_since.max(page.server_epoch.saturating_add(1));
             let mut receiver = state
                 .change_hub()
-                .subscribe(&name, live_since, state.service().clone());
+                .subscribe(&name, next_since, state.service().clone());
+            for event in page.changes {
+                yield event;
+            }
+            // What the hub broadcast before the subscription is in the log
+            // by now: pull it.
+            loop {
+                let page = match history_page(&state, &name, next_since).await {
+                    Ok(page) => page,
+                    Err(e) => {
+                        tracing::debug!("SSE history pull for '{name}' failed: {e}");
+                        return;
+                    }
+                };
+                next_since = next_since.max(page.server_epoch.saturating_add(1));
+                let full = page.changes.len() >= HISTORY_PAGE;
+                for event in page.changes {
+                    yield event;
+                }
+                if !full {
+                    break;
+                }
+            }
+
+            // Live events, without the ones the history already sent.
+            let live_since = next_since;
             loop {
                 match receiver.recv().await {
-                    Ok(event) => yield Ok(sse_event(&event)),
+                    Ok(event) if event.epoch < live_since => {}
+                    Ok(event) => yield event,
                     Err(RecvError::Lagged(n)) => {
                         tracing::debug!("SSE receiver lagged by {n} events");
                         // Continue: the client will see the next available event.
@@ -179,9 +224,7 @@ mod sse {
                     Err(RecvError::Closed) => break,
                 }
             }
-        };
-
-        Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+        }
     }
 
     /// Pulls the history of `name` from epoch `since` on, one page.
@@ -200,9 +243,82 @@ mod sse {
         Ok(page)
     }
 
-    fn sse_event(event: &ChangeEventDto) -> Event {
-        let json = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
-        Event::default().data(json)
+    fn to_json(value: &impl serde::Serialize) -> String {
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use super::*;
+
+        fn cdc_state() -> AppState {
+            let state = AppState::new_in_memory(300);
+            state
+                .databases()
+                .get("default")
+                .unwrap()
+                .db()
+                .set_cdc_enabled(true);
+            state
+        }
+
+        async fn next_item(
+            stream: &mut (impl Stream<Item = ChangeEventDto> + Unpin),
+        ) -> ChangeEventDto {
+            tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("no item within 10 s")
+                .expect("the stream ended")
+        }
+
+        fn change_label(event: ChangeEventDto) -> String {
+            event.labels.unwrap().remove(0)
+        }
+
+        #[tokio::test]
+        async fn a_write_during_the_history_arrives_exactly_once() {
+            let state = cdc_state();
+            let db = state.databases().get("default").unwrap().db();
+            for _ in 0..3 {
+                db.create_node(&["Old"]).unwrap();
+            }
+            // Another subscriber keeps the hub running from here on.
+            let mut other = state.change_hub().subscribe(
+                "default",
+                db.current_epoch().0 + 1,
+                state.service().clone(),
+            );
+
+            let first = history_page(&state, "default", 0).await.unwrap();
+            let mut stream = Box::pin(change_stream(
+                state.clone(),
+                "default".to_string(),
+                first,
+                0,
+            ));
+            assert_eq!(change_label(next_item(&mut stream).await), "Old");
+
+            // A write the hub broadcasts (and moves past) while the new
+            // stream is still sending its history.
+            let during = db.create_node(&["During"]).unwrap().as_u64();
+            let seen = tokio::time::timeout(Duration::from_secs(10), other.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(seen.id, during);
+
+            let mut labels = Vec::new();
+            for _ in 0..3 {
+                labels.push(change_label(next_item(&mut stream).await));
+            }
+            assert_eq!(labels, ["Old", "Old", "During"]);
+
+            // Live from here: the hub's copy of `During` is not sent again.
+            db.create_node(&["After"]).unwrap();
+            assert_eq!(change_label(next_item(&mut stream).await), "After");
+        }
     }
 }
 
