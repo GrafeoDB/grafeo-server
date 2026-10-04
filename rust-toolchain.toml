@@ -3,6 +3,7 @@
 # Keep this identical to the `dtolnay/rust-toolchain@<version>` refs in .github/workflows.
 # The MSRV (rust-version in Cargo.toml) is checked separately with `cargo +1.91.1`;
 # the Docker builder image stays on the MSRV and never sees this file (Dockerfile.dockerignore).
+
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
