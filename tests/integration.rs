@@ -5577,7 +5577,8 @@ async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
 }
 
 /// WebSocket: a subscription that falls behind ends with a `lagged` error,
-/// and the connection stays open.
+/// the connection stays open, and subscribing again at its `since` gets
+/// every event it lost.
 #[cfg(feature = "push-changefeed")]
 #[tokio::test]
 async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open() {
@@ -5621,21 +5622,36 @@ async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open
     assert_eq!(body["id"], "s1");
     let detail: Value = serde_json::from_str(body["detail"].as_str().unwrap()).unwrap();
     assert!(detail["skipped"].as_u64().unwrap() > 0, "{detail}");
-    // The warm-up's epoch was the last sent: it may not be complete.
-    assert!(
-        detail["since"].as_u64().unwrap() <= warmup_epoch,
-        "{detail}"
-    );
+    // The first epoch not delivered in full: the warm-up's (sent live) or
+    // the one after it (sent with the history).
+    let since = detail["since"].as_u64().unwrap();
+    assert!(since <= warmup_epoch + 1, "{detail}");
 
-    // The socket is still open.
+    // The socket is still open: subscribing again at `since` sends the
+    // history from there, the whole burst once, before anything live.
     ws.send(tungstenite::Message::Text(
-        json!({"type": "ping"}).to_string().into(),
+        json!({"type": "subscribe", "sub_id": "s2", "db": "default", "since": since})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
-    let reply = ws.next().await.unwrap().unwrap();
-    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
-    assert_eq!(body["type"], "pong");
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    let mut bursts = std::collections::HashSet::new();
+    while bursts.len() < 5_000 {
+        let body = next_ws_json(&mut ws).await;
+        assert_eq!(body["type"], "change", "{body}");
+        assert_eq!(body["sub_id"], "s2");
+        if body["event"]["labels"] == json!(["Burst"]) {
+            assert!(
+                bursts.insert(body["event"]["id"].as_u64().unwrap()),
+                "sent twice: {body}"
+            );
+        }
+    }
+    db.create_node(&["After"]).unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["event"]["labels"], json!(["After"]), "{body}");
 }
 
 /// Reads the next WebSocket text message as JSON.
@@ -5650,6 +5666,82 @@ where
         .unwrap()
         .unwrap();
     serde_json::from_str(reply.to_text().unwrap()).unwrap()
+}
+
+/// WebSocket: a subscription at `since` gets the history from there, once,
+/// then live events, also while another subscriber keeps the change hub
+/// running (and so ahead of the new subscription's `since`).
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_sends_history_from_since_then_live() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let mut old = Vec::new();
+    for _ in 0..3 {
+        old.push(db.create_node(&["Old"]).unwrap().as_u64());
+    }
+    let since = db.current_epoch().0 - 1;
+    // Another subscriber keeps the hub running past the history.
+    let _other =
+        state
+            .change_hub()
+            .subscribe("default", db.current_epoch().0 + 1, state.service().clone());
+    let base = spawn_server_from_state(state.clone()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": since})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+
+    // The two writes from `since` on, in order.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body = next_ws_json(&mut ws).await;
+        assert_eq!(body["type"], "change", "{body}");
+        ids.push(body["event"]["id"].as_u64().unwrap());
+    }
+    assert_eq!(ids, old[1..]);
+
+    // Then live, with nothing in between and nothing twice.
+    let live = db.create_node(&["Live"]).unwrap().as_u64();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["event"]["id"], live, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "pong", "a change arrived twice: {body}");
+}
+
+/// WebSocket: a subscribe to a database that does not exist is an error, not
+/// a subscription.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscribe_to_a_missing_database_is_an_error() {
+    let base = spawn_server_from_state(sync_state()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "nope", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["id"], "s1");
+    assert_eq!(body["error"], "not_found");
 }
 
 /// WebSocket: dropping a database ends its subscriptions with a `closed`

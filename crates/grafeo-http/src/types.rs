@@ -250,7 +250,8 @@ pub enum WsClientMessage {
     /// Subscribe to live change events for a database.
     ///
     /// Requires the `push-changefeed` server feature. Historical events since
-    /// `since` are delivered first, then live events as they are committed.
+    /// `since` are delivered first, then live events as they are committed,
+    /// with no gap and no repeat between them.
     #[cfg(feature = "push-changefeed")]
     #[serde(rename = "subscribe")]
     Subscribe {

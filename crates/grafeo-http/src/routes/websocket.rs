@@ -5,7 +5,11 @@
 //! - **Query mode** (`type: "query"`): execute any supported query language and
 //!   receive the result in a single round-trip.
 //! - **Subscription mode** (`type: "subscribe"`, requires `push-changefeed`):
-//!   stream live change events for a named database.
+//!   stream the change events of a named database from epoch `since` on:
+//!   its history first, then live events, with no gap and no repeat between
+//!   them (the SSE stream's handover). History and live events are the same
+//!   `change` messages. A subscribe to a missing database, or one without
+//!   CDC, is answered with an `error` whose `id` is the `sub_id`.
 //!
 //! Multiple subscriptions may be active on the same connection simultaneously.
 //! Each subscription is identified by a client-assigned `sub_id`; subscribing
@@ -18,7 +22,8 @@
 //!   `since = e` (the first epoch not delivered in full; inclusive, so epoch
 //!   0 is resumed too).
 //! - `error` is `"closed"`: the database's change feed stopped (the database
-//!   was dropped or restored, or its CDC turned off).
+//!   was dropped or restored, or its CDC turned off), or a history read
+//!   failed. `detail` says which ("change feed closed" for a stopped feed).
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -152,13 +157,13 @@ async fn handle_with_subscriptions<S, R>(
 {
     use std::collections::HashMap;
 
-    use grafeo_service::changefeed::LiveCursor;
     use tokio::sync::mpsc;
 
+    use crate::routes::change_stream::{StreamItem, change_stream, history_page};
     use crate::types::WsServerMessage;
 
     // Channel that collects events from all active subscription tasks.
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<(String, SubscriptionItem)>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<(String, StreamItem)>();
 
     // Active subscription tasks, keyed by sub_id.
     let mut sub_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -216,18 +221,27 @@ async fn handle_with_subscriptions<S, R>(
                                 )),
                             }
                         } else {
-                            let rx = state.change_hub().subscribe(&db, since, state.service().clone());
-                            let handle = tokio::spawn(forward_subscription(
-                                sub_id.clone(),
-                                rx,
-                                LiveCursor::new(since),
-                                event_tx.clone(),
-                            ));
-                            // A sub_id in use: the new subscription replaces the old.
-                            if let Some(previous) = sub_tasks.insert(sub_id.clone(), handle) {
-                                previous.abort();
+                            // The first history page is read before the
+                            // reply, so a missing database, or one without
+                            // CDC, is an error rather than a subscription
+                            // that ends at once.
+                            match history_page(&state, &db, since).await {
+                                Ok(first) => {
+                                    let handle = tokio::spawn(forward_subscription(
+                                        sub_id.clone(),
+                                        change_stream(state.clone(), db, first, since),
+                                        event_tx.clone(),
+                                    ));
+                                    // A sub_id in use: the new subscription
+                                    // replaces the old.
+                                    if let Some(previous) = sub_tasks.insert(sub_id.clone(), handle)
+                                    {
+                                        previous.abort();
+                                    }
+                                    WsServerMessage::Subscribed { sub_id }
+                                }
+                                Err(e) => error_message(Some(sub_id), &e.0),
                             }
-                            WsServerMessage::Subscribed { sub_id }
                         }
                     }
                     WsClientMessage::Unsubscribe { sub_id } => {
@@ -261,71 +275,45 @@ async fn handle_with_subscriptions<S, R>(
     }
 }
 
-/// What a subscription task hands to the connection.
-#[cfg(feature = "push-changefeed")]
-#[derive(Debug)]
-enum SubscriptionItem {
-    Change(Box<grafeo_service::sync::ChangeEventDto>),
-    /// The subscription fell behind and ended.
-    Lagged(grafeo_service::changefeed::LaggedNotice),
-    /// The database's change feed stopped, which ended the subscription.
-    Closed,
-}
-
-/// Forwards the events of subscription `sub_id` to `tx` until the hub
-/// closes or the connection goes away. A subscription that falls behind
-/// ends with a lag notice, one whose feed stopped with a closed notice; the
-/// connection stays open.
+/// Forwards the change stream of subscription `sub_id` to `tx` until it
+/// ends (after a lag notice or an error) or the connection goes away. The
+/// connection stays open either way.
 #[cfg(feature = "push-changefeed")]
 async fn forward_subscription(
     sub_id: String,
-    mut receiver: tokio::sync::broadcast::Receiver<grafeo_service::sync::ChangeEventDto>,
-    mut cursor: grafeo_service::changefeed::LiveCursor,
-    tx: tokio::sync::mpsc::UnboundedSender<(String, SubscriptionItem)>,
+    stream: impl futures_util::Stream<Item = crate::routes::change_stream::StreamItem>,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, crate::routes::change_stream::StreamItem)>,
 ) {
-    use grafeo_service::changefeed::LiveItem;
-
-    loop {
-        let item = match cursor.next(&mut receiver).await {
-            LiveItem::Change(event) => SubscriptionItem::Change(event),
-            LiveItem::Lagged(notice) => {
-                tracing::warn!(
-                    sub_id = %sub_id,
-                    skipped = notice.skipped,
-                    since = notice.since,
-                    "WebSocket change subscription fell behind; ending it"
-                );
-                let _ = tx.send((sub_id, SubscriptionItem::Lagged(notice)));
-                return;
-            }
-            LiveItem::Closed => {
-                tracing::debug!(sub_id = %sub_id, "change feed stopped; ending the WebSocket subscription");
-                let _ = tx.send((sub_id, SubscriptionItem::Closed));
-                return;
-            }
-        };
+    let mut stream = std::pin::pin!(stream);
+    while let Some(item) = stream.next().await {
         if tx.send((sub_id.clone(), item)).is_err() {
             return;
         }
     }
 }
 
-/// The message a subscription item becomes on the socket.
+/// The message a change stream item of subscription `sub_id` becomes on the
+/// socket.
 #[cfg(feature = "push-changefeed")]
-fn subscription_message(sub_id: String, item: SubscriptionItem) -> WsServerMessage {
+fn subscription_message(
+    sub_id: String,
+    item: crate::routes::change_stream::StreamItem,
+) -> WsServerMessage {
+    use crate::routes::change_stream::StreamItem;
+
     match item {
-        SubscriptionItem::Change(event) => WsServerMessage::Change { sub_id, event },
-        SubscriptionItem::Lagged(notice) => WsServerMessage::Error {
+        StreamItem::Change(event) => WsServerMessage::Change { sub_id, event },
+        StreamItem::Lagged(notice) => WsServerMessage::Error {
             id: Some(sub_id),
             error: "lagged".to_string(),
             detail: Some(
                 serde_json::to_string(&notice).expect("a lag notice is always serializable"),
             ),
         },
-        SubscriptionItem::Closed => WsServerMessage::Error {
+        StreamItem::Error(message) => WsServerMessage::Error {
             id: Some(sub_id),
             error: "closed".to_string(),
-            detail: Some("change feed closed".to_string()),
+            detail: Some(message),
         },
     }
 }
@@ -394,19 +382,19 @@ async fn process_query(
             id,
             response: query_result_to_response(&qr),
         },
-        Err(e) => query_error(id, &e),
+        Err(e) => error_message(id, &e),
     }
 }
 
-/// The error message for a failed query. An internal error's text stays in
-/// the log, as in the HTTP and SSE error mapping.
-fn query_error(id: Option<String>, e: &ServiceError) -> WsServerMessage {
+/// The error message for a failed query or subscribe. An internal error's
+/// text stays in the log, as in the HTTP and SSE error mapping.
+fn error_message(id: Option<String>, e: &ServiceError) -> WsServerMessage {
     let (error, detail) = match e {
         ServiceError::BadRequest(msg) => ("bad_request".to_string(), Some(msg.clone())),
         ServiceError::Timeout => ("timeout".to_string(), None),
         ServiceError::NotFound(msg) => ("not_found".to_string(), Some(msg.clone())),
         ServiceError::Internal(_) => {
-            tracing::warn!(error = %e, "WebSocket query failed");
+            tracing::warn!(error = %e, "WebSocket request failed");
             (
                 "internal_error".to_string(),
                 Some("internal error".to_string()),
@@ -420,43 +408,35 @@ fn query_error(id: Option<String>, e: &ServiceError) -> WsServerMessage {
 #[cfg(all(test, feature = "push-changefeed"))]
 mod tests {
     use super::*;
-
-    fn event_at(epoch: u64) -> grafeo_service::sync::ChangeEventDto {
-        serde_json::from_value(serde_json::json!({
-            "id": epoch, "entity_type": "node", "kind": "create",
-            "epoch": epoch, "timestamp": epoch,
-        }))
-        .unwrap()
-    }
+    use crate::routes::change_stream::{FEED_CLOSED, StreamItem};
 
     #[test]
     fn an_internal_query_error_hides_its_detail() {
-        let message = query_error(
+        let message = error_message(
             Some("q1".to_string()),
             &ServiceError::Internal("disk at /var/x full".to_string()),
         );
         let json = serde_json::to_value(message).unwrap();
         assert_eq!(json["error"], "internal_error");
         assert_eq!(json["detail"], "internal error");
-        let bad = serde_json::to_value(query_error(None, &ServiceError::BadRequest("nope".into())))
-            .unwrap();
+        let bad = serde_json::to_value(error_message(
+            None,
+            &ServiceError::BadRequest("nope".into()),
+        ))
+        .unwrap();
         assert_eq!(bad["detail"], "nope");
     }
 
     #[tokio::test]
     async fn a_lagging_subscription_ends_with_a_lagged_error() {
-        let (sender, receiver) = tokio::sync::broadcast::channel(4);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        sender.send(event_at(3)).unwrap();
-        // Ten events into a channel of 4 before the task reads: 6 are lost.
-        for epoch in 4..14 {
-            sender.send(event_at(epoch)).unwrap();
-        }
-
+        let notice = grafeo_service::changefeed::LaggedNotice {
+            skipped: 7,
+            since: 3,
+        };
         forward_subscription(
             "s1".to_string(),
-            receiver,
-            grafeo_service::changefeed::LiveCursor::new(3),
+            futures_util::stream::iter([StreamItem::Lagged(notice)]),
             tx,
         )
         .await;
@@ -477,14 +457,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_feed_ends_the_subscription_with_a_closed_error() {
-        let (sender, receiver) = tokio::sync::broadcast::channel(4);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(sender);
-
         forward_subscription(
             "s1".to_string(),
-            receiver,
-            grafeo_service::changefeed::LiveCursor::new(0),
+            futures_util::stream::iter([StreamItem::Error(FEED_CLOSED.to_string())]),
             tx,
         )
         .await;
