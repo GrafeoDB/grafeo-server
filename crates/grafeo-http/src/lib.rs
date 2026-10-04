@@ -77,6 +77,8 @@ pub use state::AppState;
         routes::database::create_schema,
         routes::database::drop_schema,
         routes::database::import_tsv,
+        routes::database::upsert_nodes,
+        routes::database::upsert_edges,
         routes::admin::admin_stats,
         routes::admin::admin_wal_status,
         routes::admin::admin_wal_checkpoint,
@@ -132,6 +134,8 @@ pub use state::AppState;
             grafeo_service::types::CreateSchemaRequest,
             grafeo_service::types::ImportTsvRequest,
             grafeo_service::types::ImportResponse,
+            grafeo_service::types::UpsertNodesRequest, grafeo_service::types::UpsertEdgesRequest,
+            grafeo_service::types::UpsertResponse,
             grafeo_service::types::CreateProjectionRequest,
             grafeo_service::types::ProjectionListResponse,
             grafeo_service::types::ShaclValidateRequest,
@@ -218,6 +222,14 @@ pub fn router(state: AppState) -> Router {
             delete(routes::database::drop_schema),
         )
         .route("/db/{name}/import/tsv", post(routes::database::import_tsv))
+        .route(
+            "/db/{name}/upsert/nodes",
+            post(routes::database::upsert_nodes),
+        )
+        .route(
+            "/db/{name}/upsert/edges",
+            post(routes::database::upsert_edges),
+        )
         // SPARQL Protocol (W3C compliant)
         .route(
             "/db/{name}/sparql",

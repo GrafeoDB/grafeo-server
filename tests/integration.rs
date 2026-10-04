@@ -7965,3 +7965,134 @@ async fn bolt_summary_reports_write_stats() {
 
     session.close().await.unwrap();
 }
+
+// ===========================================================================
+// Upserts (engine 0.5.44)
+// ===========================================================================
+
+async fn post_json(client: &Client, url: String, body: Value) -> (u16, Value) {
+    let resp = client.post(url).json(&body).send().await.unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn upsert_nodes_creates_then_updates_by_key() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let url = format!("{base}/db/default/upsert/nodes");
+
+    let (status, body) = post_json(
+        &client,
+        url.clone(),
+        json!({"labels": ["Person"], "rows": [
+            {"id": 1, "name": "Alix"}, {"id": 2, "name": "Gus"}, {"name": "no key"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 2);
+    assert_eq!(body["updated"], 0);
+    assert_eq!(body["skipped"], 1);
+    assert_eq!(body["skipped_rows"], json!([2]));
+
+    let (_, body) = post_json(
+        &client,
+        url,
+        json!({"labels": ["Person"], "rows": [{"id": 1, "city": "Paris"}]}),
+    )
+    .await;
+    assert_eq!(body["created"], 0);
+    assert_eq!(body["updated"], 1);
+
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (p:Person {id: 1}) RETURN p.name, p.city"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0], json!(["Alix", "Paris"]));
+}
+
+#[tokio::test]
+async fn upsert_edges_links_nodes_by_key() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["Person"], "rows": [{"id": 1}, {"id": 2}]}),
+    )
+    .await;
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/edges"),
+        json!({"edge_type": "KNOWS", "rows": [
+            {"id": "k1", "src": 1, "dst": 2, "since": 2020},
+            {"id": "k2", "src": 1, "dst": 99}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 1);
+    assert_eq!(body["skipped_rows"], json!([1]));
+
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (:Person {id: 1})-[k:KNOWS]->(:Person {id: 2}) RETURN k.since"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0][0], 2020);
+}
+
+#[tokio::test]
+async fn upsert_into_named_graph_and_missing_graph() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "CREATE GRAPH g2"}),
+    )
+    .await;
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["InG2"], "rows": [{"id": 1}], "graph": "g2"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 1);
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (n:InG2) RETURN count(n)"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0][0], 0, "the default graph is untouched");
+
+    let (status, _) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["X"], "rows": [{"id": 1}], "graph": "nope"}),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn upsert_rejects_non_object_rows() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["P"], "rows": [{"id": 1}, 5]}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(body.to_string().contains("row 1"), "{body}");
+}

@@ -34,6 +34,8 @@ pub mod token_service;
 #[cfg(feature = "auth")]
 pub mod token_store;
 pub mod types;
+#[cfg(all(feature = "lpg", feature = "gql"))]
+pub mod upsert;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -810,6 +810,88 @@ impl WriteCountersInfo {
     }
 }
 
+// ============================================================================
+// Upsert types (engine 0.5.44)
+// ============================================================================
+
+fn default_upsert_key() -> String {
+    "id".to_owned()
+}
+
+fn default_src_field() -> String {
+    "src".to_owned()
+}
+
+fn default_dst_field() -> String {
+    "dst".to_owned()
+}
+
+/// Request for `POST /db/{name}/upsert/nodes`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertNodesRequest {
+    /// Labels every node has; a node matches by all of them plus its key.
+    pub labels: Vec<String>,
+    /// Property that identifies a node. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub key: String,
+    /// One plain JSON object per node. A row without the key is skipped.
+    pub rows: Vec<serde_json::Value>,
+    /// Replace a node's properties with the row's instead of merging. Default: false.
+    #[serde(default)]
+    pub replace: bool,
+    /// Named graph to write to. Default: the default graph.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// Request for `POST /db/{name}/upsert/edges`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertEdgesRequest {
+    /// Edge type of every edge.
+    pub edge_type: String,
+    /// Property that identifies an edge between two nodes. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub key: String,
+    /// Node property the source and target fields hold. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub endpoint_key: String,
+    /// Labels an endpoint must have. Default: none.
+    #[serde(default)]
+    pub endpoint_labels: Vec<String>,
+    /// Row field with the source node's key. Default: `src`.
+    #[serde(default = "default_src_field")]
+    pub src_field: String,
+    /// Row field with the target node's key. Default: `dst`.
+    #[serde(default = "default_dst_field")]
+    pub dst_field: String,
+    /// One plain JSON object per edge. Every other field is an edge property.
+    /// A row is skipped when it lacks the key or an endpoint field, or when
+    /// no node or more than one node has its endpoint key.
+    pub rows: Vec<serde_json::Value>,
+    /// Replace an edge's properties with the row's instead of merging. Default: false.
+    #[serde(default)]
+    pub replace: bool,
+    /// Named graph to write to. Default: the default graph.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// What an upsert did with its rows.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertResponse {
+    /// Rows that created a node or edge.
+    pub created: usize,
+    /// Rows that updated an existing node or edge.
+    pub updated: usize,
+    /// Rows that were not written.
+    pub skipped: usize,
+    /// Indices of the skipped rows, in order (at most 1,000).
+    pub skipped_rows: Vec<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
