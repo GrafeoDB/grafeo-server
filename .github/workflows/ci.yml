@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [grafeo-service, grafeo-http, grafeo-gwp, grafeo-boltr]
+        crate: [grafeo-service, grafeo-http, grafeo-gwp, grafeo-boltr, grafeo-sync]
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +108,17 @@ jobs:
 
       - name: Run unit tests
         run: cargo test -p ${{ matrix.crate }} --all-features
+
+      # The crate's own defaults leave the triple store off, which runs the
+      # tests for builds without RDF support.
+      - name: Run unit tests (default features)
+        if: matrix.crate == 'grafeo-service'
+        run: cargo test -p grafeo-service
+
+      # The replica guard on a build without `auth`.
+      - name: Run unit tests (replication without auth)
+        if: matrix.crate == 'grafeo-http'
+        run: cargo test -p grafeo-http --no-default-features --features replication
 
   # Rust tests (workspace + integration)
   rust-test:
@@ -145,6 +156,11 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      # tests/replication.rs needs the http, sync and replication features.
+      - name: Run replication tests
+        if: runner.os == 'Linux'
+        run: cargo test --test replication --features sync,replication
 
       - name: Run tests (release)
         run: cargo test --release
