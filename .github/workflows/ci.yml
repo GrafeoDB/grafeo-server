@@ -101,7 +101,7 @@ jobs:
       - run: mkdir -p client/dist
 
       - name: Run unit tests
-        run: cargo test -p ${{ matrix.crate }}
+        run: cargo test -p ${{ matrix.crate }} --all-features
 
   # Rust tests (workspace + integration)
   rust-test:
