@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::utils::error::{Error, QueryErrorKind};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::{EdgeUpsertOptions, GraphHandle, UpsertSummary};
 
@@ -36,7 +37,7 @@ impl UpsertService {
                     graph_handle(&db, graph)?.upsert_nodes(&labels, &req.key, rows, req.replace)
                 }
             };
-            summary.map_err(|e| ServiceError::BadRequest(e.to_string()))
+            summary.map_err(upsert_error)
         })
         .await
     }
@@ -69,7 +70,7 @@ impl UpsertService {
                     graph_handle(&db, graph)?.upsert_edges(&req.edge_type, rows, &options)
                 }
             };
-            summary.map_err(|e| ServiceError::BadRequest(e.to_string()))
+            summary.map_err(upsert_error)
         })
         .await
     }
@@ -90,10 +91,39 @@ async fn run_blocking(
     })
 }
 
-/// A handle on a named graph of the current schema; 404 when it is missing.
+/// A handle on a named graph of the current schema; 404 only when the graph
+/// is missing (the engine reports that as a semantic query error), anything
+/// else is an internal failure.
 fn graph_handle<'db>(db: &'db GrafeoDB, graph: &str) -> Result<GraphHandle<'db>, ServiceError> {
-    db.graph(graph)
-        .map_err(|_| ServiceError::NotFound(format!("graph '{graph}' not found")))
+    db.graph(graph).map_err(|e| match e {
+        Error::Query(ref q) if q.kind == QueryErrorKind::Semantic => {
+            ServiceError::NotFound(format!("graph '{graph}' not found"))
+        }
+        other => upsert_error(other),
+    })
+}
+
+/// Maps an engine failure of an upsert: internal kinds (internal, I/O,
+/// serialization and storage errors) are 500; constraint violations, query
+/// errors and bad input stay 400, a timeout is a timeout.
+fn upsert_error(error: Error) -> ServiceError {
+    match error {
+        Error::Internal(_) | Error::Io(_) | Error::Serialization(_) | Error::Storage(_) => {
+            ServiceError::Internal(error.to_string())
+        }
+        Error::Query(ref q) if q.kind == QueryErrorKind::Timeout => ServiceError::Timeout,
+        Error::NodeNotFound(_)
+        | Error::EdgeNotFound(_)
+        | Error::PropertyNotFound(_)
+        | Error::LabelNotFound(_)
+        | Error::TypeMismatch { .. }
+        | Error::InvalidValue(_)
+        | Error::Transaction(_)
+        | Error::Query(_) => ServiceError::BadRequest(error.to_string()),
+        // `Error` is non-exhaustive: a variant added later is not known to be
+        // the caller's fault.
+        _ => ServiceError::Internal(error.to_string()),
+    }
 }
 
 /// Converts request rows (plain JSON objects) to engine rows.
@@ -163,6 +193,7 @@ fn json_to_value(json: serde_json::Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::utils::error::{QueryError, StorageError};
 
     #[test]
     fn integers_beyond_i64_are_rejected_with_row_and_property() {
@@ -201,6 +232,47 @@ mod tests {
         );
         let max = vec![serde_json::json!({"id": i64::MAX})];
         assert!(rows_from_json(max).is_ok());
+    }
+
+    #[test]
+    fn engine_errors_map_to_service_errors() {
+        let q = |kind| Error::Query(QueryError::new(kind, "x"));
+        let table: Vec<(Error, &str)> = vec![
+            (Error::Internal("x".into()), "internal"),
+            (Error::Io(std::io::Error::other("x")), "internal"),
+            (Error::Serialization("x".into()), "internal"),
+            (Error::Storage(StorageError::Full), "internal"),
+            (q(QueryErrorKind::Semantic), "bad_request"),
+            (q(QueryErrorKind::Execution), "bad_request"),
+            (q(QueryErrorKind::Syntax), "bad_request"),
+            (q(QueryErrorKind::Timeout), "timeout"),
+            (Error::InvalidValue("x".into()), "bad_request"),
+            (Error::PropertyNotFound("x".into()), "bad_request"),
+            (
+                Error::TypeMismatch {
+                    expected: "a".into(),
+                    found: "b".into(),
+                },
+                "bad_request",
+            ),
+        ];
+        for (error, expected) in table {
+            let label = format!("{error:?}");
+            let got = match upsert_error(error) {
+                ServiceError::Internal(_) => "internal",
+                ServiceError::BadRequest(_) => "bad_request",
+                ServiceError::Timeout => "timeout",
+                other => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(got, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn missing_graph_is_404_and_other_graph_errors_are_500() {
+        let db = GrafeoDB::new_in_memory();
+        let err = graph_handle(&db, "nope").map(|_| ()).unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(ref m) if m.contains("nope")));
     }
 
     #[test]
