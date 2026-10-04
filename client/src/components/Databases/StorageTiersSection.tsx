@@ -20,6 +20,7 @@ const TIER_LABELS: Record<SectionTierInfo["tier"], string> = {
 export default function StorageTiersSection({ database, onMutated }: Props) {
   const [tiers, setTiers] = useState<SectionTierInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +48,10 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
         setLoadError(err instanceof GrafeoApiError ? err.detail : String(err));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRetrying(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -105,8 +109,16 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
       {loadError && (
         <div className={styles.error}>
           {loadError}{" "}
-          <button type="button" className={btn.secondary} onClick={refresh}>
-            Retry
+          <button
+            type="button"
+            className={btn.secondary}
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              refresh();
+            }}
+          >
+            {retrying ? "Retrying…" : "Retry"}
           </button>
         </div>
       )}
