@@ -13,11 +13,12 @@
 //!         "my-device-id",
 //!     )?;
 //!
-//!     // Pull changes since last known epoch (0 = full history)
+//!     // Pull the changes after the epoch bookmark (0 = full history)
 //!     let pulled = client.pull(1_000).await?;
-//!     println!("got {} events, server epoch = {}", pulled.changes.len(), pulled.server_epoch);
+//!     println!("got {} events, resume cursor = {}", pulled.changes.len(), pulled.server_epoch);
 //!
-//!     // Advance local epoch bookmark after applying pulled events
+//!     // Move the bookmark to the resume cursor once the events are applied;
+//!     // the next pull starts at the epoch after it.
 //!     client.advance_epoch(pulled.server_epoch);
 //!
 //!     // Push local changes
@@ -42,6 +43,7 @@
 //! loop {
 //!     // Pull server changes, then push local ones
 //!     let (pulled, pushed) = client.sync(vec![/* local pending changes */]).await?;
+//!     // Apply `pulled.changes` locally, then move the bookmark.
 //!     client.advance_epoch(pulled.server_epoch);
 //!     if !pushed.conflicts.is_empty() {
 //!         // Handle conflicts...
@@ -50,6 +52,14 @@
 //! }
 //! # }
 //! ```
+//!
+//! # Epoch bookmark
+//!
+//! The client keeps the `server_epoch` of the last pull it applied (the
+//! resume cursor). [`SyncClient::pull`] asks for the epochs after it, so a
+//! batch the server cut at its limit continues where it stopped, with no
+//! event repeated or skipped. A pull never splits an epoch, so a response
+//! can hold more events than `limit`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +82,8 @@ pub struct SyncClient {
     sync_url: Url,
     /// Opaque identifier for this client/device.
     pub client_id: String,
-    /// Last server epoch the client has processed. Updated by `advance_epoch()`.
+    /// Resume cursor: the `server_epoch` of the last pull the client applied,
+    /// 0 before any. Updated by `advance_epoch()`.
     last_epoch: Arc<AtomicU64>,
 }
 
@@ -104,7 +115,8 @@ impl SyncClient {
         })
     }
 
-    /// Overrides the starting epoch (useful when resuming from a persisted bookmark).
+    /// Overrides the starting epoch bookmark (useful when resuming from a
+    /// persisted `server_epoch`).
     #[must_use]
     pub fn with_epoch(self, epoch: u64) -> Self {
         self.last_epoch.store(epoch, Ordering::Relaxed);
@@ -119,18 +131,23 @@ impl SyncClient {
 
     /// Updates the acknowledged epoch.
     ///
-    /// Call this after successfully applying a pull response to advance the
-    /// cursor for the next poll. Only advances forward — a smaller value is ignored.
+    /// Call this with a pull response's `server_epoch` after applying its
+    /// changes; the next pull starts at the epoch after it. Only advances
+    /// forward: a smaller value is ignored.
     pub fn advance_epoch(&self, epoch: u64) {
         self.last_epoch.fetch_max(epoch, Ordering::Relaxed);
     }
 
-    /// Pulls change events from the server since `self.last_epoch()`.
+    /// Pulls the change events after `self.last_epoch()` (the full history
+    /// while it is 0).
     ///
-    /// `limit` is capped at 10 000 by the server. If `response.changes.len() == limit`,
-    /// there may be more events: call `advance_epoch(response.server_epoch)` and pull again.
+    /// `limit` is capped at 10 000 by the server, which never splits an
+    /// epoch, so a response can hold more than `limit` events. If
+    /// `response.changes.len() >= limit` there may be more: apply them, call
+    /// `advance_epoch(response.server_epoch)` and pull again.
     pub async fn pull(&self, limit: usize) -> Result<ChangesResponse, SyncError> {
-        let since = self.last_epoch();
+        let last = self.last_epoch();
+        let since = if last > 0 { last + 1 } else { 0 };
 
         let mut url = self.changes_url.clone();
         url.query_pairs_mut()
@@ -240,6 +257,17 @@ mod tests {
         })
     }
 
+    /// Answers with `server_epoch` equal to the `since` it was asked for.
+    async fn mock_echo_since(
+        Path(_name): Path<String>,
+        Query(q): Query<SinceQuery>,
+    ) -> Json<ChangesResponse> {
+        Json(ChangesResponse {
+            server_epoch: q.since,
+            changes: vec![],
+        })
+    }
+
     async fn mock_error(Path(_name): Path<String>) -> axum::http::StatusCode {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
@@ -248,6 +276,19 @@ mod tests {
         let app = Router::new()
             .route("/db/{name}/changes", get(mock_changes))
             .route("/db/{name}/sync", post(mock_sync));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    async fn spawn_echo_since_server() -> String {
+        let app = Router::new().route("/db/{name}/changes", get(mock_echo_since));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
@@ -341,14 +382,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_uses_last_epoch_as_since() {
+    async fn pull_asks_for_the_epochs_after_the_bookmark() {
         let base = spawn_mock_server().await;
         let client = SyncClient::new(&base, "default", "dev-1")
             .unwrap()
             .with_epoch(7);
 
         let resp = client.pull(100).await.unwrap();
-        assert_eq!(resp.server_epoch, 17); // since=7, mock returns 7+10
+        assert_eq!(resp.server_epoch, 18); // since=8, mock returns 8+10
+    }
+
+    #[tokio::test]
+    async fn pull_sends_since_one_past_the_advanced_epoch() {
+        let base = spawn_echo_since_server().await;
+        let client = SyncClient::new(&base, "default", "dev-1").unwrap();
+
+        assert_eq!(client.pull(100).await.unwrap().server_epoch, 0);
+        client.advance_epoch(41);
+        assert_eq!(client.pull(100).await.unwrap().server_epoch, 42);
     }
 
     #[tokio::test]

@@ -28,6 +28,8 @@ use tokio::sync::broadcast;
 use tracing::debug;
 
 use crate::ServiceState;
+use crate::database::DatabaseManager;
+use crate::error::ServiceError;
 use crate::sync::{ChangeEventDto, SyncService};
 
 /// Capacity of each per-database broadcast channel.
@@ -45,7 +47,9 @@ const POLL_LIMIT: usize = 500;
 
 struct ChannelState {
     sender: broadcast::Sender<ChangeEventDto>,
-    last_epoch: Arc<AtomicU64>,
+    /// The `since` of the next poll: one past the resume cursor
+    /// (`server_epoch`) of the last pull, 0 before any.
+    next_since: Arc<AtomicU64>,
     /// Handle to the background poll task. `None` means no task is running.
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -55,7 +59,7 @@ impl ChannelState {
         let (sender, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             sender,
-            last_epoch: Arc::new(AtomicU64::new(0)),
+            next_since: Arc::new(AtomicU64::new(0)),
             task: Mutex::new(None),
         }
     }
@@ -80,9 +84,11 @@ impl ChangeHub {
 
     /// Subscribes to live change events for `db_name`.
     ///
-    /// Historical events since `since_epoch` must be fetched separately via
-    /// `SyncService::pull()` — the receiver only yields events that arrive
-    /// after the subscription point.
+    /// `since_epoch` is the first epoch the subscriber has not seen: the
+    /// `since` of its next pull (`server_epoch + 1` after a pull, 0 for the
+    /// full history). The hub's polls move up to it, never back. Historical
+    /// events before it must be fetched separately via `SyncService::pull()`:
+    /// the receiver only yields events broadcast after the subscription.
     ///
     /// A background poll task is started (or restarted) automatically if none
     /// is currently running for this database.
@@ -98,8 +104,8 @@ impl ChangeHub {
             .or_insert_with(|| Arc::new(ChannelState::new()))
             .clone();
 
-        // Advance epoch to at least `since_epoch` so the poll task starts from here.
-        channel.last_epoch.fetch_max(since_epoch, Ordering::Relaxed);
+        // Move the next poll up to `since_epoch` so the poll task starts from here.
+        channel.next_since.fetch_max(since_epoch, Ordering::Relaxed);
 
         self.ensure_task_running(db_name, &channel, state);
 
@@ -119,8 +125,8 @@ impl ChangeHub {
         if needs_restart {
             let db = db_name.to_string();
             let sender = channel.sender.clone();
-            let last_epoch = Arc::clone(&channel.last_epoch);
-            let handle = tokio::spawn(poll_task(db, sender, last_epoch, state));
+            let next_since = Arc::clone(&channel.next_since);
+            let handle = tokio::spawn(poll_task(db, sender, next_since, state));
             *guard = Some(handle);
         }
     }
@@ -139,7 +145,7 @@ impl Default for ChangeHub {
 async fn poll_task(
     db_name: String,
     sender: broadcast::Sender<ChangeEventDto>,
-    last_epoch: Arc<AtomicU64>,
+    next_since: Arc<AtomicU64>,
     state: ServiceState,
 ) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -154,22 +160,106 @@ async fn poll_task(
             break;
         }
 
-        let since = last_epoch.load(Ordering::Relaxed);
-
-        let resp = match SyncService::pull(state.databases(), &db_name, since, POLL_LIMIT) {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("changefeed poll error for '{db_name}': {e}");
-                break;
-            }
-        };
-
-        if !resp.changes.is_empty() {
-            last_epoch.store(resp.server_epoch, Ordering::Relaxed);
-            for event in resp.changes {
-                // Ignore send errors — lagged receivers will get a `RecvError::Lagged`.
-                let _ = sender.send(event);
-            }
+        if let Err(e) = poll_once(state.databases(), &db_name, &sender, &next_since) {
+            debug!("changefeed poll error for '{db_name}': {e}");
+            break;
         }
+    }
+}
+
+/// Pulls the events from `next_since` on, broadcasts them, and moves
+/// `next_since` past the pull's resume cursor, so the next poll neither
+/// repeats an event nor skips one a cut batch left out.
+fn poll_once(
+    databases: &DatabaseManager,
+    db_name: &str,
+    sender: &broadcast::Sender<ChangeEventDto>,
+    next_since: &AtomicU64,
+) -> Result<(), ServiceError> {
+    let since = next_since.load(Ordering::Relaxed);
+    let resp = SyncService::pull(databases, db_name, since, POLL_LIMIT)?;
+    next_since.fetch_max(resp.server_epoch.saturating_add(1), Ordering::Relaxed);
+    for event in resp.changes {
+        // Ignore send errors: lagged receivers will get a `RecvError::Lagged`.
+        let _ = sender.send(event);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cdc_manager() -> DatabaseManager {
+        let mut mgr = DatabaseManager::new(None, false);
+        mgr.set_cdc_enabled(true);
+        mgr
+    }
+
+    /// Creates `n` nodes labelled `label` in one batch: one transaction,
+    /// one epoch.
+    fn insert_nodes(mgr: &DatabaseManager, label: &str, n: usize) {
+        let rows = (0..n)
+            .map(|i| {
+                std::collections::HashMap::from([(
+                    grafeo_common::types::PropertyKey::new("i"),
+                    grafeo_common::Value::Int64(i as i64),
+                )])
+            })
+            .collect();
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .batch_create_nodes_with_props(label, rows)
+            .unwrap();
+    }
+
+    fn received(rx: &mut broadcast::Receiver<ChangeEventDto>) -> Vec<ChangeEventDto> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_second_poll_does_not_redeliver_the_cursor_epoch() {
+        let mgr = cdc_manager();
+        let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let next_since = AtomicU64::new(0);
+        insert_nodes(&mgr, "A", 2);
+
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        assert_eq!(received(&mut rx).len(), 2);
+
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        assert!(received(&mut rx).is_empty(), "nothing new, nothing sent");
+
+        insert_nodes(&mgr, "B", 1);
+        poll_once(&mgr, "default", &sender, &next_since).unwrap();
+        let events = received(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].labels.as_deref(), Some(&["B".to_string()][..]));
+    }
+
+    #[test]
+    fn polls_deliver_a_burst_larger_than_the_poll_limit_once() {
+        let mgr = cdc_manager();
+        let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let next_since = AtomicU64::new(0);
+        // Three epochs of 300 events: more than POLL_LIMIT in all.
+        for label in ["A", "B", "C"] {
+            insert_nodes(&mgr, label, 300);
+        }
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            poll_once(&mgr, "default", &sender, &next_since).unwrap();
+            ids.extend(received(&mut rx).into_iter().map(|e| e.id));
+        }
+        assert_eq!(ids.len(), 900, "every event once");
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 900, "no event twice");
     }
 }

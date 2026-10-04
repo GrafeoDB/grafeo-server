@@ -5253,6 +5253,62 @@ async fn sync_validation_errors() {
     assert!(reasons.contains(&"edge_create_missing_src_dst_or_type"));
 }
 
+/// Reads the next `data:` line of an SSE response as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_sse_data(resp: &mut reqwest::Response, pending: &mut String) -> Value {
+    loop {
+        if let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            if let Some(data) = line.trim_end().strip_prefix("data:") {
+                return serde_json::from_str(data.trim_start()).unwrap();
+            }
+            continue;
+        }
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("no SSE data within 10 s")
+            .unwrap()
+            .expect("the SSE stream ended");
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// SSE: a history longer than one pull arrives whole and once, then live
+/// events follow it.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_pages_through_history_then_goes_live() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    // Three epochs of 6 000 events: more than the 10 000 one pull returns.
+    for label in ["A", "B", "C"] {
+        db.batch_create_nodes_with_labels(&[label], vec![std::collections::HashMap::new(); 6_000])
+            .unwrap();
+    }
+    let base = spawn_server_from_state(state).await;
+
+    let mut resp = Client::new()
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut pending = String::new();
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..18_000 {
+        let event = next_sse_data(&mut resp, &mut pending).await;
+        assert!(
+            ids.insert(event["id"].as_u64().unwrap()),
+            "event sent twice: {event}"
+        );
+    }
+
+    db.create_node(&["Live"]).unwrap();
+    let live = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(live["labels"], json!(["Live"]));
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket error paths
 // ---------------------------------------------------------------------------

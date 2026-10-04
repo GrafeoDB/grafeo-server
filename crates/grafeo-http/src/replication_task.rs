@@ -3,9 +3,13 @@
 //! When the server starts in `Replica` mode, `start` spawns a Tokio task
 //! for each database that:
 //!
-//! 1. Calls `GET /db/{name}/changes?since={last_epoch}&limit=500` on the primary.
+//! 1. Calls `GET /db/{name}/changes?since={last_epoch + 1}&limit=500` on the
+//!    primary (`since=0` before the first batch).
 //! 2. Applies the returned events via `SyncService::apply()`.
-//! 3. Advances the local epoch counter in `ReplicationState`.
+//! 3. Advances the local epoch counter in `ReplicationState` to the
+//!    response's `server_epoch`, the primary's resume cursor. The primary
+//!    never splits an epoch, so a burst larger than the batch limit arrives
+//!    over several polls without a gap.
 //! 4. Sleeps `POLL_INTERVAL` before the next iteration.
 //!
 //! The task runs indefinitely until the process exits.  Transient HTTP errors
@@ -99,7 +103,8 @@ async fn replicate_database(
     replication_state: &ReplicationState,
 ) -> Result<(), ReplicationError> {
     let last = replication_state.last_epoch(db_name);
-    // `since` is inclusive in the changes API, so add 1 to skip already-applied epochs.
+    // `last` is the primary's resume cursor (`server_epoch`) of the last
+    // batch applied: every event up to it is here, so continue after it.
     let since = if last > 0 { last + 1 } else { 0 };
     let url = format!("{primary_url}/db/{db_name}/changes?since={since}&limit={BATCH_LIMIT}");
 
@@ -240,5 +245,93 @@ impl std::fmt::Display for ReplicationError {
             }
             Self::Apply(e) => write!(f, "Apply error: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    /// Serves `state` over HTTP on an ephemeral port; returns its base URL.
+    async fn serve(state: ServiceState) -> String {
+        let app = crate::router(crate::AppState::new(
+            state,
+            vec![],
+            grafeo_service::types::EnabledFeatures::default(),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// An in-memory primary whose default database records CDC.
+    fn primary() -> ServiceState {
+        let state = ServiceState::new_in_memory(300);
+        default_db(&state).set_cdc_enabled(true);
+        state
+    }
+
+    fn default_db(state: &ServiceState) -> std::sync::Arc<grafeo_engine::GrafeoDB> {
+        state.databases().get("default").unwrap().db()
+    }
+
+    /// Creates `n` nodes in one batch: one transaction, one epoch.
+    fn insert_nodes(state: &ServiceState, label: &str, n: usize) {
+        let rows = (0..n)
+            .map(|i| {
+                std::collections::HashMap::from([(
+                    grafeo_common::types::PropertyKey::new("i"),
+                    grafeo_common::Value::Int64(i as i64),
+                )])
+            })
+            .collect();
+        default_db(state)
+            .batch_create_nodes_with_props(label, rows)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn replicates_a_burst_larger_than_the_batch_limit() {
+        let primary = primary();
+        // One transaction larger than a batch, then three a batch must cut
+        // between.
+        insert_nodes(&primary, "Burst", BATCH_LIMIT + 150);
+        for label in ["A", "B", "C"] {
+            insert_nodes(&primary, label, 300);
+        }
+        let url = serve(primary.clone()).await;
+
+        let replica = ServiceState::new_in_memory(300);
+        let progress = ReplicationState::new();
+        let http = reqwest::Client::new();
+        let mut batches = 0;
+        loop {
+            let before = progress.last_epoch("default");
+            replicate_database(&http, &replica, &url, "default", &progress)
+                .await
+                .unwrap();
+            if progress.last_epoch("default") == before {
+                break;
+            }
+            batches += 1;
+            assert!(batches < 10, "replication does not catch up");
+        }
+
+        assert_eq!(batches, 3, "650, then 300 + 300, then 300");
+        assert_eq!(default_db(&replica).node_count(), BATCH_LIMIT + 150 + 900);
+        assert_eq!(
+            progress.last_epoch("default"),
+            default_db(&primary).current_epoch().0
+        );
     }
 }

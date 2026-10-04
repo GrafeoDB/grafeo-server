@@ -4,9 +4,9 @@
 //!
 //! `GET /db/{name}/changes?since=<epoch>&limit=<n>`
 //!
-//! Clients poll `SyncService::pull()` with their last seen epoch and receive
-//! all mutations since that point. The `server_epoch` in the response becomes
-//! the `since` value for the next poll.
+//! Clients poll `SyncService::pull()` and receive the mutations from epoch
+//! `since` on. The `server_epoch` in the response is the resume cursor: the
+//! next poll passes `since = server_epoch + 1`.
 //!
 //! # Push endpoint
 //!
@@ -19,16 +19,19 @@
 //! # Protocol
 //!
 //! 1. On first sync, call `GET /changes?since=0` to receive all history.
-//! 2. Store `response.server_epoch` locally.
-//! 3. On reconnect, call with `since=stored_epoch` to receive only new changes.
+//! 2. Store `response.server_epoch` locally once its changes are applied.
+//! 3. Poll again with `since=stored_epoch + 1` to receive only new changes.
 //! 4. To push local changes, `POST /sync` with the changeset.
 //! 5. Update local IDs for any creates using the returned `id_mappings`.
 //!
 //! # Limits
 //!
-//! Pull results are capped at `limit` events (max 10 000). If
-//! `changes.len() == limit`, there may be more: poll again using the epoch of
-//! the last returned event as `since`.
+//! A pull returns about `limit` events (max 10 000) but never splits an
+//! epoch: it ends at the end of the epoch of the `limit`-th event, so one
+//! epoch with more events than `limit` comes back whole. When it leaves
+//! events out, `server_epoch` is the epoch of the last event returned, so
+//! `since = server_epoch + 1` resumes right after it. If
+//! `changes.len() >= limit` there may be more: poll again straight away.
 
 use std::collections::HashMap;
 
@@ -47,10 +50,15 @@ use crate::error::ServiceError;
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChangesResponse {
-    /// Current server epoch. Use as `since` in your next poll.
+    /// Resume cursor: every event from `since` up to and including this
+    /// epoch is in `changes`. Pass `server_epoch + 1` as `since` on the next
+    /// poll. When the response stops at `limit` this is the epoch of the last
+    /// event returned; otherwise it is the server's current epoch, or the one
+    /// before it while the current epoch's events are still being recorded.
     pub server_epoch: u64,
-    /// Change events with epoch >= the requested `since` value, ordered by
-    /// epoch ascending.
+    /// Change events with epoch >= the requested `since` value, in the order
+    /// they happened (by epoch, then timestamp). An epoch is never split
+    /// across responses.
     pub changes: Vec<ChangeEventDto>,
 }
 
@@ -257,13 +265,16 @@ impl SyncService {
     /// Returns change events for `db_name` where `epoch >= since`.
     ///
     /// `since` is inclusive. Pass `0` for the full history. To poll for new
-    /// changes after a previous sync, pass the `server_epoch` returned by
-    /// that response. Because `since` is inclusive, the event at exactly
-    /// `since` will be repeated on the next poll — clients should track the
-    /// maximum epoch they have applied and skip duplicates.
+    /// changes after a previous pull, pass that response's `server_epoch + 1`:
+    /// `server_epoch` is the resume cursor, every event up to it has been
+    /// returned.
     ///
-    /// Results are ordered by epoch ascending and capped at `limit` (caller
-    /// should clamp to <= 10 000).
+    /// Results are in the order they happened (by epoch, then timestamp).
+    /// About `limit` events come back (caller should clamp to <= 10 000; 0
+    /// counts as 1), but an epoch is never split: past `limit` the response
+    /// runs to the end of the epoch of the `limit`-th event, so a single
+    /// epoch with more events than `limit` is returned whole. See
+    /// [`resume_point`] for the cursor.
     ///
     /// # CDC activation
     ///
@@ -286,9 +297,11 @@ impl SyncService {
             ));
         }
 
-        let server_epoch = entry.db().current_epoch().0;
+        // The epoch is read before the log, so every event this pull can
+        // return is at or below it.
+        let current_epoch = entry.db().current_epoch().0;
         let since_id = grafeo_common::types::EpochId(since);
-        let until_id = grafeo_common::types::EpochId(server_epoch);
+        let until_id = grafeo_common::types::EpochId(current_epoch);
 
         let mut raw = entry
             .db()
@@ -301,7 +314,9 @@ impl SyncService {
         // delete after its edges'.
         raw.sort_by_key(|e| (e.epoch, e.timestamp.as_u64()));
 
-        let changes = raw.into_iter().take(limit).map(to_dto).collect();
+        let (end, server_epoch) = resume_point(&raw, |e| e.epoch.0, limit, current_epoch);
+        raw.truncate(end);
+        let changes = raw.into_iter().map(to_dto).collect();
 
         Ok(ChangesResponse {
             server_epoch,
@@ -658,6 +673,48 @@ impl SyncService {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// How many of the `sorted` events (by epoch) a pull returns, and the resume
+/// cursor it returns with them (`server_epoch`): the next pull starts at the
+/// epoch after it. `current_epoch` is the epoch the pull read the log up to.
+///
+/// A pull never splits an epoch: past `limit` events (0 counts as 1) it stops
+/// at the end of the epoch of the `limit`-th one, so a single epoch larger
+/// than `limit` comes back whole. When that leaves events out, the cursor is
+/// the epoch of the last event returned.
+///
+/// Otherwise the cursor is the newest epoch that can gain no more events.
+/// Engine 0.5.44 publishes a write's epoch before it records the write's
+/// events (a direct write moves the epoch first; a commit moves the store's
+/// epoch, then flushes its events), so the current epoch may still be
+/// filling while a pull reads the log. A write records all of its events in
+/// one batch, at an epoch of its own: once one of them is in the log they
+/// all are. So the cursor is the current epoch when the last event returned
+/// has it, and the epoch before it otherwise.
+fn resume_point<T>(
+    sorted: &[T],
+    epoch_of: impl Fn(&T) -> u64,
+    limit: usize,
+    current_epoch: u64,
+) -> (usize, u64) {
+    let limit = limit.max(1);
+    if let Some(last_in_limit) = sorted.get(limit - 1) {
+        let boundary = epoch_of(last_in_limit);
+        let end = limit
+            + sorted[limit..]
+                .iter()
+                .take_while(|e| epoch_of(e) == boundary)
+                .count();
+        if end < sorted.len() {
+            return (end, boundary);
+        }
+    }
+    let cursor = match sorted.last() {
+        Some(last) if epoch_of(last) == current_epoch => current_epoch,
+        _ => current_epoch.saturating_sub(1),
+    };
+    (sorted.len(), cursor)
+}
+
 /// Make the node's labels exactly `wanted`: add missing, remove extra.
 fn sync_node_labels(
     target: &grafeo_engine::Session,
@@ -928,12 +985,129 @@ mod tests {
         let full = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
         assert_eq!(full.changes.len(), 2);
 
-        // Since server_epoch (inclusive) re-returns events at that epoch.
-        // Clients handle duplicates by tracking max applied epoch themselves.
-        // Passing server_epoch+1 skips all seen events.
+        // server_epoch is the resume cursor: server_epoch + 1 skips every
+        // event already returned.
         let next = full.server_epoch.saturating_add(1);
         let empty = SyncService::pull(&mgr, "default", next, 1000).unwrap();
         assert!(empty.changes.is_empty());
+    }
+
+    /// Creates `n` nodes labelled `label` in one batch: one transaction,
+    /// one epoch.
+    fn insert_nodes(db: &grafeo_engine::GrafeoDB, label: &str, n: usize) {
+        let rows = (0..n)
+            .map(|i| {
+                HashMap::from([(
+                    grafeo_common::types::PropertyKey::new("i"),
+                    grafeo_common::Value::Int64(i as i64),
+                )])
+            })
+            .collect();
+        db.batch_create_nodes_with_props(label, rows).unwrap();
+    }
+
+    #[test]
+    fn resume_point_never_splits_an_epoch() {
+        let epoch = |e: &u64| *e;
+        // Not cut, the newest epoch has events: the cursor is the current one.
+        assert_eq!(resume_point(&[3, 7], epoch, 10, 7), (2, 7));
+        // Cut inside epoch 2: the batch runs to the end of epoch 2.
+        assert_eq!(resume_point(&[1, 1, 2, 2, 2, 3], epoch, 3, 3), (5, 2));
+        // Cut right at an epoch's end: nothing is added.
+        assert_eq!(resume_point(&[1, 1, 2, 3], epoch, 2, 3), (2, 1));
+        // One epoch larger than the limit comes back whole.
+        assert_eq!(resume_point(&[4, 4, 4, 4, 4], epoch, 2, 4), (5, 4));
+        // Exactly `limit` events: not cut.
+        assert_eq!(resume_point(&[1, 2, 3], epoch, 3, 3), (3, 3));
+        // A limit of 0 counts as 1.
+        assert_eq!(resume_point(&[1, 1, 2], epoch, 0, 2), (2, 1));
+    }
+
+    #[test]
+    fn resume_point_leaves_the_current_epoch_open_until_its_events_are_in() {
+        let epoch = |e: &u64| *e;
+        // The engine publishes an epoch before it records that epoch's
+        // events: with none of epoch 7 in the log yet, 7 may still fill, so
+        // the cursor stops at 6 and the next pull asks for 7 again.
+        assert_eq!(resume_point(&[3, 5], epoch, 10, 7), (2, 6));
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 7), (0, 6));
+        assert_eq!(resume_point::<u64>(&[], epoch, 10, 0), (0, 0));
+    }
+
+    #[test]
+    fn pull_cuts_at_an_epoch_boundary_and_resumes_after_the_cursor() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        for label in ["A", "B", "C"] {
+            insert_nodes(&db, label, 4);
+        }
+
+        // The 6th event is in the second epoch: the batch ends with it.
+        let first = SyncService::pull(&mgr, "default", 0, 6).unwrap();
+        assert_eq!(first.changes.len(), 8);
+        let epochs: std::collections::BTreeSet<u64> =
+            first.changes.iter().map(|e| e.epoch).collect();
+        assert_eq!(epochs.len(), 2, "two whole epochs");
+        assert_eq!(first.server_epoch, first.changes.last().unwrap().epoch);
+        assert!(first.server_epoch < db.current_epoch().0);
+
+        let second = SyncService::pull(&mgr, "default", first.server_epoch + 1, 6).unwrap();
+        assert_eq!(second.changes.len(), 4);
+        assert!(second.changes.iter().all(|e| e.epoch > first.server_epoch));
+        assert_eq!(second.server_epoch, db.current_epoch().0);
+
+        let mut ids: Vec<u64> = first
+            .changes
+            .iter()
+            .chain(&second.changes)
+            .map(|e| e.id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 12, "every node once, no gap and no duplicate");
+
+        let third = SyncService::pull(&mgr, "default", second.server_epoch + 1, 6).unwrap();
+        assert!(third.changes.is_empty());
+    }
+
+    #[test]
+    fn pull_returns_an_epoch_larger_than_the_limit_whole() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        let limit = 10;
+        insert_nodes(&db, "Big", limit + 5);
+
+        let resp = SyncService::pull(&mgr, "default", 0, limit).unwrap();
+        assert_eq!(resp.changes.len(), limit + 5);
+        assert_eq!(resp.server_epoch, db.current_epoch().0);
+    }
+
+    #[test]
+    fn pull_cursor_stays_below_an_epoch_with_no_events_yet() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.create_node(&["A"]).unwrap();
+        // A failed direct call uses up an epoch and records nothing, which is
+        // how a pull sees an epoch whose write has not recorded its events.
+        assert!(
+            db.set_node_property(NodeId::new(424_242), "x", 1i64.into())
+                .is_err()
+        );
+        let current = db.current_epoch().0;
+
+        let resp = SyncService::pull(&mgr, "default", 0, 1000).unwrap();
+        assert_eq!(resp.changes.len(), 1);
+        assert!(resp.changes[0].epoch < current);
+        assert_eq!(resp.server_epoch, current - 1);
+
+        // The next write is not skipped.
+        db.create_node(&["B"]).unwrap();
+        let next = SyncService::pull(&mgr, "default", resp.server_epoch + 1, 1000).unwrap();
+        assert_eq!(next.changes.len(), 1);
+        assert_eq!(
+            next.changes[0].labels.as_deref(),
+            Some(&["B".to_string()][..])
+        );
     }
 
     #[test]
