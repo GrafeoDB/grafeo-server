@@ -130,6 +130,30 @@ fn write_stored_options(db_dir: &Path, stored: &StoredOptions) -> Result<(), Ser
         .map_err(|e| ServiceError::Internal(format!("failed to write options.json: {e}")))
 }
 
+/// Undoes a failed [`DatabaseManager::create`] after the directory step.
+/// When the call created the directory it is removed whole; otherwise only
+/// the files this call produces are removed, so anything else in a
+/// pre-existing directory survives.
+fn rollback_create(dir: &Path, created_dir: bool) {
+    if created_dir {
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    }
+    for file in [
+        "options.json",
+        "options.json.tmp",
+        "data.grafeo",
+        "data.grafeo.wal",
+    ] {
+        let path = dir.join(file);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Name validation: starts with letter, then alphanumeric/underscore/hyphen, max 64 chars.
 fn is_valid_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
@@ -602,6 +626,33 @@ impl DatabaseManager {
             None => Config::in_memory(),
         };
         let config = configure(base, req.database_type, &resolved)?;
+
+        // Never adopt or overwrite a database that is on disk but absent from
+        // the map (skipped at startup because it is corrupt or its options
+        // fail validation). An io error while checking counts as present.
+        if let Some(ref dir) = db_dir
+            && (dir.join("data.grafeo").try_exists().unwrap_or(true)
+                || dir.join("grafeo.db").try_exists().unwrap_or(true))
+        {
+            return Err(ServiceError::Conflict(format!(
+                "database '{name}' already exists on disk"
+            )));
+        }
+
+        // Decode the schema before any filesystem change.
+        let schema_bytes = match req.schema_file {
+            Some(ref schema_b64) => Some(
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
+                    .map_err(|e| {
+                        ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
+                    })?,
+            ),
+            None => None,
+        };
+
+        let created_dir = db_dir
+            .as_ref()
+            .is_some_and(|dir| !dir.try_exists().unwrap_or(true));
         if let Some(ref dir) = db_dir {
             std::fs::create_dir_all(dir)
                 .map_err(|e| ServiceError::Internal(format!("failed to create directory: {e}")))?;
@@ -613,7 +664,7 @@ impl DatabaseManager {
                 options: resolved.clone(),
             };
             if let Err(e) = write_stored_options(dir, &stored) {
-                let _ = std::fs::remove_dir_all(dir);
+                rollback_create(dir, created_dir);
                 return Err(e);
             }
         }
@@ -642,7 +693,7 @@ impl DatabaseManager {
                     Ok(db) => db,
                     Err(e) => {
                         if let Some(ref dir) = db_dir {
-                            let _ = std::fs::remove_dir_all(dir);
+                            rollback_create(dir, created_dir);
                         }
                         return Err(ServiceError::Internal(format!(
                             "failed to create database after retry: {e}"
@@ -653,26 +704,13 @@ impl DatabaseManager {
         };
 
         // Schema loading (if applicable)
-        if let Some(ref schema_b64) = req.schema_file {
-            let schema_bytes =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
-                    .map_err(|e| {
-                        let _ = db.close();
-                        if let Some(ref dir) = db_dir {
-                            let _ = std::fs::remove_dir_all(dir);
-                        }
-                        ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
-                    })?;
-
-            let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
+        if let Some(ref schema_bytes) = schema_bytes {
+            let schema_result = crate::schema::load_schema(req.database_type, schema_bytes, &db);
             if let Err(e) = schema_result {
-                // Rollback: close and remove the database
+                // Rollback: close and remove what this call created
                 let _ = db.close();
-                if req.storage_mode == StorageMode::Persistent
-                    && let Some(ref dir) = self.data_dir
-                {
-                    let db_dir = dir.join(name.as_str());
-                    let _ = std::fs::remove_dir_all(db_dir);
+                if let Some(ref dir) = db_dir {
+                    rollback_create(dir, created_dir);
                 }
                 return Err(e);
             }
@@ -1528,5 +1566,76 @@ mod tests {
             mgr.get("half").unwrap().db().memory_limit(),
             Some(64 * 1024 * 1024)
         );
+    }
+
+    fn dir_listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn failed_create_in_existing_dir_keeps_other_files() {
+        // A directory that exists without a database (for example one the
+        // startup scan skipped) keeps its files when the create fails after
+        // the directory step; only what the call wrote is removed.
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("keep");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("sentinel.txt"), "precious").unwrap();
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("keep", DatabaseOptions::default());
+        req.database_type = DatabaseType::JsonSchema;
+        req.schema_file = Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"this is not json",
+        ));
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+
+        assert!(mgr.get("keep").is_none());
+        assert_eq!(dir_listing(&db_dir), vec!["sentinel.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(db_dir.join("sentinel.txt")).unwrap(),
+            "precious"
+        );
+    }
+
+    #[test]
+    fn create_refuses_to_adopt_existing_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("old");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo"), b"not a real database").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("old").is_none(), "a corrupt database is skipped");
+        let err = mgr
+            .create(&persistent_request("old", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::metadata(db_dir.join("data.grafeo")).unwrap().len(),
+            b"not a real database".len() as u64
+        );
+    }
+
+    #[test]
+    fn create_with_invalid_base64_schema_leaves_no_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("b64", DatabaseOptions::default());
+        req.schema_file = Some("!!! not base64 !!!".to_string());
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+        assert!(!dir.path().join("b64").exists());
     }
 }
