@@ -5401,9 +5401,10 @@ async fn next_sse_message(
             }
             continue;
         }
-        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+        // Above the 15 s SSE keep-alive, so a quiet stream is not a failure.
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), resp.chunk())
             .await
-            .expect("no SSE data within 10 s")
+            .expect("no SSE data within 30 s")
             .unwrap()
             .expect("the SSE stream ended");
         pending.push_str(&String::from_utf8_lossy(&chunk));

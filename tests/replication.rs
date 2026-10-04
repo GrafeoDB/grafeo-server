@@ -7,7 +7,7 @@
 //! cargo test --features "full" --test replication -- --nocapture
 //! ```
 
-#![cfg(all(feature = "http", feature = "sync"))]
+#![cfg(all(feature = "http", feature = "sync", feature = "replication"))]
 
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -35,7 +35,6 @@ async fn spawn_primary() -> String {
         auth_password: None,
         #[cfg(feature = "auth")]
         token_store_path: None,
-        #[cfg(feature = "replication")]
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
         backup_dir: None,
         backup_retention: None,
@@ -70,7 +69,6 @@ async fn spawn_replica(primary_url: &str) -> (String, grafeo_service::ServiceSta
         auth_password: None,
         #[cfg(feature = "auth")]
         token_store_path: None,
-        #[cfg(feature = "replication")]
         replication_mode: grafeo_service::replication::ReplicationMode::Replica {
             primary_url: primary_url.to_string(),
         },
@@ -286,7 +284,6 @@ async fn replica_rejects_mutation_via_put() {
     );
 }
 
-#[cfg(feature = "replication")]
 #[tokio::test]
 async fn replica_rejects_post_writes_but_answers_read_queries() {
     let client = Client::new();
