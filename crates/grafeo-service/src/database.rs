@@ -430,6 +430,10 @@ impl DatabaseManager {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
+                        // A crash between the two renames of an epoch restore
+                        // leaves the original at the pre-restore path.
+                        crate::backup::recover_orphaned_pre_restore(&path, mgr.read_only);
+
                         // Migrate legacy grafeo.db → data.grafeo (skip in read-only mode)
                         let legacy = path.join("grafeo.db");
                         let current = path.join("data.grafeo");
@@ -559,6 +563,20 @@ impl DatabaseManager {
     /// `None` metadata, as before. An unreadable or invalid file is logged
     /// and ignored rather than keeping the database closed.
     pub fn reopen_config(&self, db_file: &Path) -> (Config, Option<DatabaseMetadata>) {
+        let (config, metadata) = self.stored_config(db_file);
+        // A reopened database keeps change capture on a replication primary,
+        // as `create` does for a new one.
+        #[cfg(feature = "cdc")]
+        let config = if self.cdc_enabled {
+            config.with_cdc()
+        } else {
+            config
+        };
+        (config, metadata)
+    }
+
+    /// [`Self::reopen_config`] without the server-wide settings.
+    fn stored_config(&self, db_file: &Path) -> (Config, Option<DatabaseMetadata>) {
         let base = if self.read_only {
             Config::read_only(db_file)
         } else {
@@ -1786,5 +1804,94 @@ mod tests {
         mgr.create(&req).unwrap();
         mgr.delete("busy").unwrap();
         mgr.create(&req).unwrap();
+    }
+
+    /// Writes a database holding one node, then moves it to the pre-restore
+    /// path the way a crash between the two renames of an epoch restore leaves
+    /// it.
+    fn orphan_with_one_node(data_dir: &Path, name: &str, create_it: bool) {
+        {
+            let mgr = DatabaseManager::new(Some(data_dir.to_str().unwrap()), false);
+            if create_it {
+                mgr.create(&persistent_request(name, DatabaseOptions::default()))
+                    .unwrap();
+            }
+            mgr.get(name)
+                .unwrap()
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
+        }
+        let db_dir = data_dir.join(name);
+        std::fs::rename(
+            db_dir.join("data.grafeo"),
+            db_dir.join("data.grafeo.pre-restore"),
+        )
+        .unwrap();
+        let wal = db_dir.join("data.grafeo.wal");
+        if wal.exists() {
+            std::fs::rename(&wal, db_dir.join("data.grafeo.pre-restore.wal")).unwrap();
+        }
+    }
+
+    #[test]
+    fn startup_recovers_an_orphaned_pre_restore_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "orphan", true);
+        let db_dir = dir.path().join("orphan");
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let entry = mgr.get("orphan").expect("the original must come back");
+        assert_eq!(entry.db().node_count(), 1);
+        assert!(!db_dir.join("data.grafeo.pre-restore").exists());
+        assert!(!db_dir.join("data.grafeo.pre-restore.wal").exists());
+    }
+
+    #[test]
+    fn startup_recovers_an_orphaned_default_instead_of_recreating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "default", false);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let entry = mgr.get("default").unwrap();
+        assert_eq!(
+            entry.db().node_count(),
+            1,
+            "default must not be recreated empty"
+        );
+        assert!(
+            !dir.path()
+                .join("default")
+                .join("data.grafeo.pre-restore")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn startup_leaves_both_files_when_a_live_database_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "both", true);
+        let db_dir = dir.path().join("both");
+        // A live database next to the pre-restore copy: an operator decides.
+        {
+            let live = GrafeoDB::open(db_dir.join("data.grafeo").to_str().unwrap()).unwrap();
+            live.close().unwrap();
+        }
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert_eq!(mgr.get("both").unwrap().db().node_count(), 0);
+        assert!(db_dir.join("data.grafeo.pre-restore").exists());
+    }
+
+    #[cfg(feature = "cdc")]
+    #[test]
+    fn reopen_config_keeps_cdc_on_a_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let db_file = dir.path().join("default").join("data.grafeo");
+        assert!(!mgr.reopen_config(&db_file).0.cdc_enabled);
+        mgr.set_cdc_enabled(true);
+        assert!(mgr.reopen_config(&db_file).0.cdc_enabled);
     }
 }

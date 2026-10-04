@@ -21,6 +21,9 @@ use crate::types;
 /// labels but not backups.
 const LABELS_FILENAME: &str = "labels.json";
 
+/// The engine's message when no full backup reaches the requested epoch.
+const UNCOVERED_EPOCH_MESSAGE: &str = "no full backup covers epoch";
+
 /// Returns the per-database backup subdirectory.
 fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceError> {
     if db_name.contains('/') || db_name.contains('\\') || db_name.contains("..") {
@@ -99,6 +102,52 @@ fn move_db_files(from: &Path, to: &Path) -> std::io::Result<()> {
         };
     }
     Ok(())
+}
+
+/// Startup recovery for a crash between the two renames of an epoch restore:
+/// the original sits at `data.grafeo.pre-restore` and there is no
+/// `data.grafeo`. Moves it back so the database opens with its data instead
+/// of being recreated empty. When a live database exists too, or the
+/// directory is read-only, nothing moves and an operator decides.
+pub(crate) fn recover_orphaned_pre_restore(db_dir: &Path, read_only: bool) {
+    let live = db_dir.join("data.grafeo");
+    let previous = db_dir.join("data.grafeo.pre-restore");
+    if !db_files_exist(&previous) {
+        return;
+    }
+    if db_files_exist(&live) {
+        tracing::error!(
+            path = %previous.display(),
+            "Found a pre-restore copy next to a live database; leaving both in place. It may be the original from an epoch restore: verify it, then remove it"
+        );
+        return;
+    }
+    if read_only {
+        tracing::error!(
+            path = %previous.display(),
+            "Found an orphaned pre-restore copy and no database file, but the server is read-only; move it back to data.grafeo by hand"
+        );
+        return;
+    }
+    if !previous.try_exists().unwrap_or(false) {
+        tracing::error!(
+            path = %previous.display(),
+            "Found a pre-restore WAL without its database file; leaving it in place for an operator"
+        );
+        return;
+    }
+    match move_db_files(&previous, &live) {
+        Ok(()) => tracing::warn!(
+            path = %previous.display(),
+            restored = %live.display(),
+            "Recovered the original database from an interrupted epoch restore"
+        ),
+        Err(e) => tracing::error!(
+            path = %previous.display(),
+            error = %e,
+            "Could not move an orphaned pre-restore copy back into place"
+        ),
+    }
 }
 
 /// Moves the live database aside to `previous` and the staged restore into
@@ -408,7 +457,16 @@ impl BackupService {
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))
         .and_then(|r| {
-            r.map_err(|e| ServiceError::Internal(format!("restore to epoch failed: {e}")))
+            r.map_err(|e| {
+                let message = format!("restore to epoch failed: {e}");
+                // The engine reports an epoch no full backup reaches as an
+                // internal error; to the caller it is a bad request.
+                if e.to_string().contains(UNCOVERED_EPOCH_MESSAGE) {
+                    ServiceError::BadRequest(message)
+                } else {
+                    ServiceError::Internal(message)
+                }
+            })
         });
         if let Err(e) = restore_result {
             clear_staging(&staged);
@@ -418,7 +476,9 @@ impl BackupService {
         clear_replay_scratch(&staged);
 
         // Release the live handle so its files can be moved aside. If the
-        // close fails the old handle may still be open, so no file moves.
+        // close fails the old handle may still be open, so no file moves. It
+        // keeps serving, but its checkpoint timer and WAL flusher already
+        // stopped; a restart restores them.
         let old_db = entry.db();
         if let Err(e) = old_db.close() {
             clear_staging(&staged);
@@ -461,6 +521,13 @@ impl BackupService {
                 entry.swap_db(Arc::new(new_db));
                 entry.set_available();
                 remove_db_files(&previous);
+                if db_files_exist(&previous) {
+                    tracing::warn!(
+                        database = %db_name,
+                        path = %previous.display(),
+                        "Epoch restore succeeded but the pre-restore copy could not be removed; delete it by hand, it blocks the next epoch restore"
+                    );
+                }
                 tracing::info!(
                     database = %db_name,
                     epoch = target_epoch,
@@ -529,14 +596,29 @@ impl BackupService {
     ) {
         // Never open a missing file: the engine would create an empty
         // database and the entry would serve it as if it were the original.
-        if !db_file.exists() {
-            tracing::error!(
-                database = %db_name,
-                path = %db_file.display(),
-                "Epoch restore failed and the db file is missing; \
-                 entry left in Restoring state so callers get 503"
-            );
-            return;
+        // An unreadable path is not proof the file is there, so it keeps
+        // the entry in Restoring like a missing one.
+        match db_file.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(
+                    database = %db_name,
+                    path = %db_file.display(),
+                    "Epoch restore failed and the db file is missing; \
+                     entry left in Restoring state so callers get 503"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    database = %db_name,
+                    path = %db_file.display(),
+                    error = %e,
+                    "Epoch restore failed and the db file cannot be checked; \
+                     entry left in Restoring state so callers get 503"
+                );
+                return;
+            }
         }
 
         let config = reopen_config.clone();
@@ -706,7 +788,17 @@ impl BackupService {
         // 2. Close the old handle
         let old_db = entry.db();
         if let Err(e) = old_db.close() {
-            tracing::warn!(database = %db_name, error = %e, "Error closing database for restore");
+            // Like epoch restore: nothing was touched on disk, and the old
+            // handle may still be open, so no file is removed under it. It
+            // keeps serving, but its checkpoint timer and WAL flusher already
+            // stopped; a restart restores them.
+            tracing::error!(database = %db_name, error = %e, "Error closing database for restore; restore aborted");
+            return (
+                Err(ServiceError::Internal(format!(
+                    "failed to close the database for restore: {e}"
+                ))),
+                true,
+            );
         }
         drop(old_db);
 
@@ -1833,7 +1925,11 @@ mod tests {
             .await
             .expect_err("an uncovered epoch must fail");
         assert!(
-            err.to_string().contains("covers"),
+            matches!(err, ServiceError::BadRequest(_)),
+            "an uncovered epoch is a client error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("no full backup covers epoch"),
             "unexpected error: {err}"
         );
 
@@ -1929,6 +2025,61 @@ mod tests {
         // released and a fresh one was opened from the restored file.
         let entry = mgr.get("default").unwrap();
         assert_eq!(entry.db().node_count(), 1);
+    }
+
+    #[cfg(feature = "sync")]
+    #[tokio::test]
+    async fn epoch_restore_keeps_cdc_on_a_primary() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mut mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        mgr.set_cdc_enabled(true);
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
+            .await
+            .unwrap();
+
+        crate::sync::SyncService::pull(&mgr, "default", 0, 100)
+            .expect("the restored database must still record changes");
+    }
+
+    #[cfg(feature = "sync")]
+    #[tokio::test]
+    async fn full_restore_keeps_cdc_on_a_primary() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mut mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        mgr.set_cdc_enabled(true);
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        let file_path = db_backup_dir(backup_dir.path(), "default")
+            .unwrap()
+            .join(&backup.filename);
+        BackupService::restore_database(&mgr, "default", &file_path, backup_dir.path())
+            .await
+            .unwrap();
+
+        crate::sync::SyncService::pull(&mgr, "default", 0, 100)
+            .expect("the restored database must still record changes");
     }
 
     // -----------------------------------------------------------------------
