@@ -46,6 +46,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Run clippy (workspace, all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: Check docs
         run: cargo doc --no-deps
         env:
@@ -69,6 +72,9 @@ jobs:
       - name: Check on the MSRV
         run: cargo +1.91.1 check --workspace
 
+      - name: Check on the MSRV (all features, all targets)
+        run: cargo +1.91.1 check --workspace --all-features --all-targets
+
   # Per-crate unit tests (fast, no integration deps)
   crate-tests:
     name: Crate Tests (${{ matrix.crate }})
@@ -76,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [grafeo-service, grafeo-http, grafeo-gwp]
+        crate: [grafeo-service, grafeo-http, grafeo-gwp, grafeo-boltr]
     steps:
       - uses: actions/checkout@v4
 
