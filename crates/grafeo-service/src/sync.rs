@@ -55,6 +55,8 @@ pub struct ChangesResponse {
     /// poll. When the response stops at `limit` this is the epoch of the last
     /// event returned; otherwise it is the server's current epoch, or the one
     /// before it while the current epoch's events are still being recorded.
+    /// With no `changes` it can be below the `since` asked for: never move a
+    /// stored cursor back.
     pub server_epoch: u64,
     /// Change events with epoch >= the requested `since` value, in the order
     /// they happened (by epoch, then timestamp). An epoch is never split

@@ -5309,6 +5309,33 @@ async fn sse_stream_pages_through_history_then_goes_live() {
     assert_eq!(live["labels"], json!(["Live"]));
 }
 
+/// SSE: when the history fills its last page exactly, the empty pull after
+/// it does not move the live cursor back onto events already sent.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_after_an_exactly_full_page_sends_no_event_twice() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    db.batch_create_nodes_with_labels(&["Page"], vec![std::collections::HashMap::new(); 10_000])
+        .unwrap();
+    let base = spawn_server_from_state(state).await;
+
+    let mut resp = Client::new()
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut pending = String::new();
+    for _ in 0..10_000 {
+        next_sse_data(&mut resp, &mut pending).await;
+    }
+    db.create_node(&["Live"]).unwrap();
+    let live = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(live["labels"], json!(["Live"]), "{live}");
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket error paths
 // ---------------------------------------------------------------------------

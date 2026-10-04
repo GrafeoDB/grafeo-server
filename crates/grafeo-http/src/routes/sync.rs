@@ -44,7 +44,8 @@ pub struct ChangesQuery {
 /// A response never splits an epoch: past `limit` events it runs to the end
 /// of the epoch of the `limit`-th one, and `server_epoch` is the epoch of its
 /// last event. If `changes.len() >= limit`, more events may be waiting: poll
-/// again straight away.
+/// again straight away. A response without changes can report a lower
+/// `server_epoch` than the cursor already held: keep the larger one.
 ///
 /// With auth on, the token must be allowed on the database.
 pub async fn db_changes(
@@ -142,10 +143,12 @@ mod sse {
 
         let stream = async_stream::stream! {
             // History page by page, each pull resuming after the previous
-            // one's cursor, until a page is not full.
+            // one's cursor, until a page is not full. The cursor never moves
+            // back: a pull that finds nothing new can report a lower epoch.
             let mut page = first;
+            let mut next_since = params.since;
             let live_since = loop {
-                let next_since = page.server_epoch.saturating_add(1);
+                next_since = next_since.max(page.server_epoch.saturating_add(1));
                 let full = page.changes.len() >= HISTORY_PAGE;
                 for event in &page.changes {
                     yield Ok(sse_event(event));
