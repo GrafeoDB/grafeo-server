@@ -106,10 +106,11 @@ impl ChangeHub {
     /// the subscription: fetch the ones before it with `SyncService::pull()`.
     ///
     /// The first subscriber of a database starts its poll task at
-    /// `since_epoch`, but never past the database's next epoch, so a client
-    /// that asks for a far epoch cannot hold the feed back for everyone.
-    /// Later subscribers leave the polls where they are: moving them ahead
-    /// would skip events the subscribers already listening still wait for.
+    /// `since_epoch`, but never past the first epoch that can still gain
+    /// events (see [`first_cursor`]), so a client that asks for a far epoch
+    /// cannot hold the feed back for everyone. Later subscribers leave the
+    /// polls where they are: moving them ahead would skip events the
+    /// subscribers already listening still wait for.
     ///
     /// When the feed stops (the database was dropped, restored or replaced
     /// by a new one of the same name, or its CDC turned off), the receiver
@@ -120,16 +121,6 @@ impl ChangeHub {
         since_epoch: u64,
         state: ServiceState,
     ) -> broadcast::Receiver<ChangeEventDto> {
-        let (start, origin) = match state.databases().get(db_name) {
-            Some(entry) => {
-                let db = entry.db();
-                (
-                    since_epoch.min(db.current_epoch().0.saturating_add(1)),
-                    Some(Arc::downgrade(&db)),
-                )
-            }
-            None => (0, None),
-        };
         loop {
             let channel = Arc::clone(
                 &self
@@ -156,7 +147,7 @@ impl ChangeHub {
                     self.clone(),
                     db_name.to_string(),
                     Arc::clone(&channel),
-                    HubCursor::new(start, origin),
+                    first_cursor(state.databases(), db_name, since_epoch),
                     state,
                 )));
             }
@@ -274,6 +265,30 @@ impl HubCursor {
     fn new(next_since: u64, origin: Option<Weak<GrafeoDB>>) -> Self {
         Self { next_since, origin }
     }
+}
+
+/// Where a new feed of `db_name` starts for its first subscriber, which asked
+/// for `since_epoch` on: there, but never past the first epoch that can still
+/// gain events. That is the current epoch while none of its events are in the
+/// log (the engine publishes an epoch before it records its events), else
+/// the next one: where a pull from the current epoch resumes. Starting lower
+/// would broadcast events every subscriber has again (a whole epoch, which
+/// can be more than the channel holds); starting higher would pass events
+/// recorded after the subscription.
+fn first_cursor(databases: &DatabaseManager, db_name: &str, since_epoch: u64) -> HubCursor {
+    let Some(entry) = databases.get(db_name) else {
+        // The first poll fails and closes the feed.
+        return HubCursor::new(0, None);
+    };
+    let db = entry.db();
+    let current = db.current_epoch().0;
+    // As in the polls, only a pull with events moves past an epoch: an empty
+    // one can name the current epoch as done (0 before the first write).
+    let open = match SyncService::pull_from(&db, current, 1) {
+        Ok(resp) if !resp.changes.is_empty() => resp.server_epoch.saturating_add(1),
+        _ => current,
+    };
+    HubCursor::new(since_epoch.min(open), Some(Arc::downgrade(&db)))
 }
 
 /// Polls the CDC log of `db_name` from `cursor` on and broadcasts what it
@@ -612,6 +627,80 @@ mod tests {
         // One past the current epoch is where a caught-up cursor stands.
         let mut cursor = HubCursor::new(1, None);
         poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
+    }
+
+    #[test]
+    fn a_new_feed_starts_at_the_first_epoch_that_can_still_gain_events() {
+        let mgr = cdc_manager();
+        let db = mgr.get("default").unwrap().db();
+        let start = |since| first_cursor(&mgr, "default", since).next_since;
+        assert_eq!(start(u64::MAX), 0, "epoch 0 is open on a new database");
+
+        db.create_node(&["A"]).unwrap();
+        let written = db.current_epoch().0;
+        assert_eq!(
+            start(u64::MAX),
+            written + 1,
+            "the write's epoch is complete"
+        );
+        assert_eq!(start(1), 1, "a lower since is kept");
+
+        // A failed direct call uses up an epoch and records nothing: that
+        // epoch looks like one whose write has not recorded its events.
+        assert!(
+            db.set_node_property(grafeo_common::types::NodeId::new(424_242), "x", 1i64.into())
+                .is_err()
+        );
+        let open = db.current_epoch().0;
+        assert_eq!(open, written + 1);
+        assert_eq!(
+            start(u64::MAX),
+            open,
+            "an epoch still filling is not passed"
+        );
+
+        assert_eq!(first_cursor(&mgr, "missing", 9).next_since, 0);
+    }
+
+    /// RDF triple writes record their events at the current epoch, which is
+    /// what an epoch still filling looks like to the feed.
+    #[cfg(feature = "sparql")]
+    #[tokio::test]
+    async fn a_far_first_subscriber_does_not_pass_an_epoch_still_filling() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let db = state.databases().get("default").unwrap().db();
+        db.create_node(&["A"]).unwrap();
+        assert!(
+            db.set_node_property(grafeo_common::types::NodeId::new(424_242), "x", 1i64.into())
+                .is_err()
+        );
+
+        let _far = hub.subscribe("default", u64::MAX, state.clone());
+        let mut rx = hub.subscribe("default", 0, state.clone());
+        db.session()
+            .execute_sparql(
+                "INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }",
+            )
+            .unwrap();
+        let event = recv(&mut rx).await.unwrap();
+        assert_eq!(event.entity_type, "triple");
+    }
+
+    #[tokio::test]
+    async fn a_new_feed_does_not_broadcast_a_complete_epoch_again() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        let db = state.databases().get("default").unwrap().db();
+        db.create_node(&["Before"]).unwrap();
+
+        let mut rx = hub.subscribe("default", u64::MAX, state.clone());
+        let id = db.create_node(&["After"]).unwrap().as_u64();
+        assert_eq!(
+            recv(&mut rx).await.unwrap().id,
+            id,
+            "first comes the new write"
+        );
     }
 
     #[tokio::test]
