@@ -615,6 +615,29 @@ mod tests {
         assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
     }
 
+    #[cfg(feature = "compact-store")]
+    #[tokio::test]
+    async fn compaction_succeeds_with_a_live_subscriber_and_ends_its_feed() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        create_cdc_database(&state, "columnar");
+        let mut rx = subscribed_past_a_write(&hub, &state, "columnar").await;
+
+        crate::admin::AdminService::compact(state.databases(), "columnar")
+            .await
+            .expect("a live feed does not block compaction");
+        assert_eq!(
+            state
+                .databases()
+                .get("columnar")
+                .unwrap()
+                .metadata
+                .storage_mode,
+            "compact"
+        );
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+    }
+
     #[test]
     fn a_cursor_past_the_next_epoch_ends_the_feed() {
         let mgr = cdc_manager();

@@ -406,13 +406,17 @@ impl AdminService {
         let name = db_name.to_owned();
 
         let result = tokio::task::spawn_blocking(move || {
-            let (mut db_arc, mut metadata) = db_entry.into_parts();
-            let db = match Arc::get_mut(&mut db_arc) {
-                Some(db) => db,
-                None => {
-                    let entry = DatabaseEntry::new(db_arc, metadata);
+            let (db_arc, mut metadata) = db_entry.into_parts();
+            // `try_unwrap` needs only the one strong reference; weak ones
+            // (a live change feed keeps one to tell instances apart) do not
+            // stand in the way, unlike with `Arc::get_mut`. The database
+            // goes back in a new `Arc`: a new instance to a change feed,
+            // which ends its subscriptions.
+            let mut db = match Arc::try_unwrap(db_arc) {
+                Ok(db) => db,
+                Err(shared) => {
                     return Err((
-                        entry,
+                        DatabaseEntry::new(shared, metadata),
                         ServiceError::Conflict(
                             "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
                         ),
@@ -423,14 +427,14 @@ impl AdminService {
             match catch_unwind(AssertUnwindSafe(|| db.compact())) {
                 Ok(Ok(())) => {
                     metadata.storage_mode = "compact".to_string();
-                    Ok(DatabaseEntry::new(db_arc, metadata))
+                    Ok(DatabaseEntry::new(Arc::new(db), metadata))
                 }
                 Ok(Err(e)) => Err((
-                    DatabaseEntry::new(db_arc, metadata),
+                    DatabaseEntry::new(Arc::new(db), metadata),
                     ServiceError::Internal(format!("compaction failed: {e}")),
                 )),
                 Err(_panic) => Err((
-                    DatabaseEntry::new(db_arc, metadata),
+                    DatabaseEntry::new(Arc::new(db), metadata),
                     ServiceError::Internal("compaction panicked".to_string()),
                 )),
             }
