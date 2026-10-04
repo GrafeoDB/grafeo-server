@@ -14,9 +14,10 @@
 //!
 //! # Wire protocol
 //!
-//! The replica reuses the existing `GET /db/{name}/changes?since={epoch}&limit=500`
-//! endpoint — no new protocol required. `SyncService::apply()` is used to
-//! replay the returned `ChangeEventDto` entries.
+//! The replica reuses the existing `GET /db/{name}/changes?since={since}&limit=500`
+//! endpoint, so no new protocol is required. `since` is the `server_epoch`
+//! of the last applied batch plus one (0 before the first batch), and
+//! `SyncService::apply()` replays the returned `ChangeEventDto` entries.
 //!
 //! # Per-database epoch tracking
 //!

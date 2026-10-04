@@ -126,11 +126,12 @@ mod sse {
     /// the client disconnects.
     ///
     /// Events are newline-delimited JSON objects in the `data:` field of each
-    /// SSE event, matching the `ChangeEventDto` schema. A named event ends
+    /// SSE event, matching the `ChangeEventDto` schema. Two named events end
     /// the stream:
     ///
     /// - `lagged`: the client fell too far behind and lost events. The data
     ///   is `{"skipped": n, "last_epoch": e}`: reconnect with `since = e + 1`.
+    /// - `error`: a history pull failed. The data is `{"message": "..."}`.
     ///
     /// The `limit` query parameter is ignored for the streaming endpoint.
     ///
@@ -155,6 +156,7 @@ mod sse {
     enum StreamItem {
         Change(Box<ChangeEventDto>),
         Lagged(LaggedNotice),
+        HistoryFailed(String),
     }
 
     impl StreamItem {
@@ -162,6 +164,9 @@ mod sse {
             match self {
                 Self::Change(event) => Event::default().data(to_json(&event)),
                 Self::Lagged(notice) => Event::default().event("lagged").data(to_json(&notice)),
+                Self::HistoryFailed(message) => Event::default()
+                    .event("error")
+                    .data(to_json(&serde_json::json!({ "message": message }))),
             }
         }
     }
@@ -192,7 +197,7 @@ mod sse {
                 page = match history_page(&state, &name, next_since).await {
                     Ok(next) => next,
                     Err(e) => {
-                        tracing::debug!("SSE history pull for '{name}' failed: {e}");
+                        yield history_failed(&name, &e);
                         return;
                     }
                 };
@@ -213,7 +218,7 @@ mod sse {
                 let page = match history_page(&state, &name, next_since).await {
                     Ok(page) => page,
                     Err(e) => {
-                        tracing::debug!("SSE history pull for '{name}' failed: {e}");
+                        yield history_failed(&name, &e);
                         return;
                     }
                 };
@@ -245,6 +250,11 @@ mod sse {
                 }
             }
         }
+    }
+
+    fn history_failed(name: &str, error: &ApiError) -> StreamItem {
+        tracing::warn!(db = %name, error = %error, "SSE history pull failed; ending the stream");
+        StreamItem::HistoryFailed(error.to_string())
     }
 
     /// Pulls the history of `name` from epoch `since` on, one page.
@@ -294,7 +304,7 @@ mod sse {
         fn change_label(item: StreamItem) -> String {
             match item {
                 StreamItem::Change(event) => event.labels.unwrap().remove(0),
-                other @ StreamItem::Lagged(_) => panic!("expected a change, got {other:?}"),
+                other => panic!("expected a change, got {other:?}"),
             }
         }
 
@@ -367,7 +377,7 @@ mod sse {
                     assert!(notice.skipped >= 2_000 - 1_024, "{notice:?}");
                     assert_eq!(notice.last_epoch, warmup_epoch);
                 }
-                other @ StreamItem::Change(_) => panic!("expected a lag, got {other:?}"),
+                other => panic!("expected a lag, got {other:?}"),
             }
             assert!(stream.next().await.is_none(), "the lag ends the stream");
 
@@ -375,6 +385,31 @@ mod sse {
             let resumed =
                 SyncService::pull(state.databases(), "default", warmup_epoch + 1, 10_000).unwrap();
             assert_eq!(resumed.changes.len(), 2_000);
+        }
+
+        #[tokio::test]
+        async fn a_failed_history_pull_ends_the_stream_with_an_error() {
+            let state = cdc_state();
+            let db = state.databases().get("default").unwrap().db();
+            db.create_node(&["Old"]).unwrap();
+            let first = history_page(&state, "default", 0).await.unwrap();
+            let mut stream = Box::pin(change_stream(
+                state.clone(),
+                "default".to_string(),
+                first,
+                0,
+            ));
+            assert_eq!(change_label(next_item(&mut stream).await), "Old");
+
+            // The pull after the last page fails: CDC is off now.
+            db.set_cdc_enabled(false);
+            match next_item(&mut stream).await {
+                StreamItem::HistoryFailed(message) => {
+                    assert!(message.contains("CDC is not enabled"), "{message}");
+                }
+                other => panic!("expected a failure, got {other:?}"),
+            }
+            assert!(stream.next().await.is_none(), "the failure ends the stream");
         }
     }
 }
