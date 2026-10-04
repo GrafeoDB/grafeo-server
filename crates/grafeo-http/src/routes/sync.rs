@@ -117,9 +117,12 @@ mod sse {
     /// Server-Sent Events stream of change events for the named database.
     ///
     /// The client receives all historical events from epoch `since` on
-    /// first (0 for the full history, else one past the last epoch it saw),
-    /// then live events as they are committed. The stream stays open until
-    /// the client disconnects or one of the named events below ends it.
+    /// first, then live events as they are committed. `since` is inclusive:
+    /// 0 for the full history; to resume after a disconnect, the epoch of
+    /// the last event received (that epoch may have been cut off part way,
+    /// so expect some of its events again), or the `since` of a `lagged`
+    /// event. The stream stays open until the client disconnects or one of
+    /// the named events below ends it.
     ///
     /// Events are newline-delimited JSON objects in the `data:` field of each
     /// SSE event, matching the `ChangeEventDto` schema. Two named events end
@@ -130,7 +133,8 @@ mod sse {
     ///   first epoch not delivered in full; inclusive, so epoch 0 is resumed
     ///   too).
     /// - `error`: a history pull failed, or the live feed stopped (the
-    ///   database was dropped or restored, or its CDC turned off). The data
+    ///   database was dropped, restored or compacted, or its CDC turned
+    ///   off). The data
     ///   is `{"message": "..."}`; an internal failure reads "internal error",
     ///   with the detail in the server log.
     ///

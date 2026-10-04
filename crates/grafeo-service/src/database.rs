@@ -394,8 +394,9 @@ impl DatabaseEntry {
 
     /// Consumes the entry and returns the inner `Arc<GrafeoDB>` and metadata.
     ///
-    /// Used by compact, which needs `Arc::get_mut` for `&mut GrafeoDB` access.
-    /// The entry must not be in the DashMap when calling this.
+    /// Used by compact, which takes the database out with `Arc::try_unwrap`
+    /// for `&mut GrafeoDB` access. The entry must not be in the DashMap when
+    /// calling this.
     pub fn into_parts(self) -> (Arc<GrafeoDB>, DatabaseMetadata) {
         (self.inner.into_inner(), self.metadata)
     }

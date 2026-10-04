@@ -113,9 +113,9 @@ impl ChangeHub {
     /// polls where they are: moving them ahead would skip events the
     /// subscribers already listening still wait for.
     ///
-    /// When the feed stops (the database was dropped, restored or replaced
-    /// by a new one of the same name, or its CDC turned off), the receiver
-    /// yields `Closed`.
+    /// When the feed stops (the database was dropped, restored, compacted
+    /// or replaced by a new one of the same name, or its CDC turned off),
+    /// the receiver yields `Closed`.
     pub fn subscribe(
         &self,
         db_name: &str,
@@ -350,7 +350,7 @@ fn poll_once(
     let db = databases.get_available(db_name)?.db();
     let replaced = || {
         ServiceError::Unavailable(format!(
-            "database '{db_name}' was restored or replaced; its change feed ends"
+            "database '{db_name}' was restored, compacted or replaced; its change feed ends"
         ))
     };
     match &cursor.origin {
