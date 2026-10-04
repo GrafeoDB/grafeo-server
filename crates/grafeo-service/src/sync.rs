@@ -162,7 +162,8 @@ pub struct SyncChangeRequest {
     /// Used for LWW conflict detection on update and delete.
     #[serde(default)]
     pub timestamp: u64,
-    /// Node labels. Required for node creates.
+    /// Node labels. Required for node creates; on a node update, the complete
+    /// set of labels the node should have after the change.
     pub labels: Option<Vec<String>>,
     /// Edge relationship type. Required for edge creates.
     pub edge_type: Option<String>,
@@ -481,17 +482,17 @@ impl SyncService {
                         continue;
                     }
 
-                    // LWW path: apply `after` properties with timestamp conflict check.
-                    let after = match &change.after {
-                        Some(v) => v,
-                        None => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: "update_missing_after".to_string(),
-                            });
-                            continue;
-                        }
-                    };
+                    // LWW path: apply `after` properties and label changes with
+                    // a timestamp conflict check.
+                    let is_node = change.entity_type == "node";
+                    let has_labels = is_node && change.labels.is_some();
+                    if change.after.is_none() && !has_labels {
+                        conflicts.push(ConflictRecord {
+                            request_index: idx,
+                            reason: "update_missing_after".to_string(),
+                        });
+                        continue;
+                    }
 
                     match change.entity_type.as_str() {
                         "node" => {
@@ -507,9 +508,19 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                match json_to_props(after).try_for_each(|(key, val)| {
-                                    target.set_node_property(node_id, &key, val)
-                                }) {
+                                let props = match &change.after {
+                                    Some(after) => {
+                                        json_to_props(after).try_for_each(|(key, val)| {
+                                            target.set_node_property(node_id, &key, val)
+                                        })
+                                    }
+                                    None => Ok(()),
+                                };
+                                let result = props.and_then(|()| match &change.labels {
+                                    Some(wanted) => sync_node_labels(target, node_id, wanted),
+                                    None => Ok(()),
+                                });
+                                match result {
                                     Ok(()) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
@@ -517,6 +528,9 @@ impl SyncService {
                         }
                         "edge" => {
                             let edge_id = EdgeId::new(raw_id);
+                            let Some(after) = &change.after else {
+                                continue;
+                            };
                             if server_is_newer(
                                 target,
                                 grafeo_engine::cdc::EntityId::Edge(edge_id),
@@ -643,6 +657,28 @@ impl SyncService {
 /// When there is no CDC history for the entity (e.g., it was created via a
 /// GQL session, which does not record to the CDC log), the function returns
 /// `false` — the client change is applied unconditionally.
+/// Make the node's labels exactly `wanted`: add missing, remove extra.
+fn sync_node_labels(
+    target: &grafeo_engine::Session,
+    node_id: NodeId,
+    wanted: &[String],
+) -> Result<(), grafeo_common::utils::error::Error> {
+    let Some(node) = target.get_node(node_id) else {
+        return Err(grafeo_common::utils::error::Error::Internal(format!(
+            "node {} not found",
+            node_id.as_u64()
+        )));
+    };
+    let current: Vec<String> = node.labels.iter().map(|l| l.to_string()).collect();
+    for label in wanted.iter().filter(|l| !current.contains(l)) {
+        target.add_node_label(node_id, label)?;
+    }
+    for label in current.iter().filter(|l| !wanted.contains(l)) {
+        target.remove_node_label(node_id, label)?;
+    }
+    Ok(())
+}
+
 fn server_is_newer(
     session: &grafeo_engine::Session,
     entity_id: grafeo_engine::cdc::EntityId,
@@ -1667,5 +1703,43 @@ mod tests {
             resp.conflicts[0].reason
         );
         assert_eq!(mgr.get("default").unwrap().db().list_graphs(), before);
+    }
+
+    #[test]
+    fn replication_replays_label_changes() {
+        let primary = make_manager();
+        let pdb = primary.get("default").unwrap().db();
+        pdb.session().execute("INSERT (:Draft {k: 1})").unwrap();
+        pdb.session()
+            .execute("MATCH (n:Draft) SET n:Published")
+            .unwrap();
+        pdb.session()
+            .execute("MATCH (n:Published) REMOVE n:Draft")
+            .unwrap();
+
+        let changes = SyncService::pull(&primary, "default", 0, 1000)
+            .unwrap()
+            .changes;
+        // CDC off on the replica, as in real replication: with CDC on, the
+        // replica's own create event would be newer than the primary's update.
+        let replica = DatabaseManager::new(None, false);
+        let resp = SyncService::apply(
+            &replica,
+            "default",
+            SyncRequest {
+                client_id: "replica-1".to_string(),
+                last_seen_epoch: 0,
+                changes: changes.into_iter().map(to_sync_change).collect(),
+                schema_version: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(resp.conflicts.len(), 0, "{:?}", resp.conflicts);
+
+        let rdb = replica.get("default").unwrap().db();
+        let published = rdb.execute("MATCH (n:Published) RETURN count(n)").unwrap();
+        assert_eq!(published.rows()[0][0], grafeo_common::Value::Int64(1));
+        let drafts = rdb.execute("MATCH (n:Draft) RETURN count(n)").unwrap();
+        assert_eq!(drafts.rows()[0][0], grafeo_common::Value::Int64(0));
     }
 }

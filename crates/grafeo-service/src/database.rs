@@ -605,6 +605,17 @@ impl DatabaseManager {
         if let Some(ref dir) = db_dir {
             std::fs::create_dir_all(dir)
                 .map_err(|e| ServiceError::Internal(format!("failed to create directory: {e}")))?;
+            // Write options.json before the engine creates data.grafeo, so a
+            // crash can only leave options.json without data.grafeo (which the
+            // startup scan skips), never the reverse.
+            let stored = StoredOptions {
+                database_type: req.database_type,
+                options: resolved.clone(),
+            };
+            if let Err(e) = write_stored_options(dir, &stored) {
+                let _ = std::fs::remove_dir_all(dir);
+                return Err(e);
+            }
         }
 
         tracing::info!(
@@ -627,9 +638,17 @@ impl DatabaseManager {
                     "Engine creation failed, retrying after brief pause"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                GrafeoDB::with_config(config).map_err(|e| {
-                    ServiceError::Internal(format!("failed to create database after retry: {e}"))
-                })?
+                match GrafeoDB::with_config(config) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        if let Some(ref dir) = db_dir {
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
+                        return Err(ServiceError::Internal(format!(
+                            "failed to create database after retry: {e}"
+                        )));
+                    }
+                }
             }
         };
 
@@ -638,6 +657,10 @@ impl DatabaseManager {
             let schema_bytes =
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
                     .map_err(|e| {
+                        let _ = db.close();
+                        if let Some(ref dir) = db_dir {
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
                         ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
                     })?;
 
@@ -660,18 +683,6 @@ impl DatabaseManager {
         #[cfg(feature = "cdc")]
         if self.cdc_enabled {
             db.set_cdc_enabled(true);
-        }
-
-        if let Some(ref dir) = db_dir {
-            let stored = StoredOptions {
-                database_type: req.database_type,
-                options: resolved.clone(),
-            };
-            if let Err(e) = write_stored_options(dir, &stored) {
-                let _ = db.close();
-                let _ = std::fs::remove_dir_all(dir);
-                return Err(e);
-            }
         }
 
         let metadata = metadata_for(req.database_type, req.storage_mode, &resolved);
@@ -1485,5 +1496,37 @@ mod tests {
         })
         .unwrap();
         assert!(!dir.path().join("scratch").exists());
+    }
+
+    #[test]
+    fn options_file_exists_before_the_database_file() {
+        // cubic 4178501194: a crash between engine creation and the options
+        // write must not leave a data.grafeo without options.json. Writing
+        // the options first means a crash can only leave options.json without
+        // data.grafeo, which the startup scan skips.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let db_dir = dir.path().join("half");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join(OPTIONS_FILE), "{}").unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert!(
+            mgr.get("half").is_none(),
+            "a directory without data.grafeo is skipped"
+        );
+
+        // Creating the same name later works and rewrites options.json.
+        let options = DatabaseOptions {
+            memory_limit_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        mgr.create(&persistent_request("half", options)).unwrap();
+        drop(mgr);
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert_eq!(
+            mgr.get("half").unwrap().db().memory_limit(),
+            Some(64 * 1024 * 1024)
+        );
     }
 }
