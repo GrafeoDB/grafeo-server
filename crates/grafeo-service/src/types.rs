@@ -1167,6 +1167,18 @@ mod tests {
             vec![("nodes-created", i64::MAX), ("relationships-deleted", 3)]
         );
         let mut names: Vec<_> = WriteCounter::ALL.iter().map(|c| c.bolt_name()).collect();
+        assert_eq!(
+            names,
+            [
+                "nodes-created",
+                "nodes-deleted",
+                "relationships-created",
+                "relationships-deleted",
+                "properties-set",
+                "labels-added",
+                "labels-removed",
+            ]
+        );
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), 7);
