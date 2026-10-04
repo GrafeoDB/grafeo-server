@@ -8019,7 +8019,12 @@ async fn bolt_summary_reports_write_stats() {
 async fn post_json(client: &Client, url: String, body: Value) -> (u16, Value) {
     let resp = client.post(url).json(&body).send().await.unwrap();
     let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(Value::Null))
+    // axum's JSON rejections are plain text, so keep a non-JSON body as a string.
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
 }
 
 #[tokio::test]
