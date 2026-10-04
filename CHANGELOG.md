@@ -31,7 +31,7 @@ Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation option
 - **Upserts reject integers above `i64::MAX`** (400, naming the row and property) instead of rounding them to floats, so large keys no longer collide. serde_json still reads integers beyond `u64::MAX` or below `i64::MIN` as floats.
 - **Epoch restore replays into a staging file**: the database is in Restoring (503) while the backup chain replays into `data.grafeo.restoring`, which is swapped in when ready; a chain that fails leaves the database untouched. An epoch the chain does not cover returns 400 with its own message instead of 500.
 - **OpenAPI**: the upsert endpoints document `rows` as an array of objects, and say that one call is one statement and that the body is limited by `GRAFEO_MAX_BODY_SIZE` (2 MiB by default, 413 above it).
-- **`POST /admin/{db}/reload-eligible` takes an optional body** (the target fraction defaults to 0.7).
+- **`POST /admin/{db}/reload-eligible` takes an optional body** (the target fraction defaults to 0.7); an empty body with `Content-Type: application/json` counts as no body.
 - **Build**: Rust toolchain pinned to 1.99.0 for local builds and CI; the MSRV stays 1.91.1 and CI checks it, with all features too. CI runs each crate's unit tests with all features (now including `grafeo-boltr`) and clippy with all features.
 
 ### Fixed

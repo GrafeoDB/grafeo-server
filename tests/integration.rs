@@ -3478,6 +3478,33 @@ async fn admin_reload_eligible_accepts_missing_body() {
 }
 
 #[tokio::test]
+async fn admin_reload_eligible_accepts_empty_json_body() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .header("content-type", "application/json")
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+
+    // A body that is not JSON is still a 400.
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .header("content-type", "application/json")
+        .body("{nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
 async fn admin_reload_eligible_not_found() {
     let base = spawn_server().await;
     let client = Client::new();

@@ -208,10 +208,16 @@ pub async fn admin_reload_eligible(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(db): Path<String>,
-    body: Option<Json<types::ReloadEligibleRequest>>,
+    body: axum::body::Bytes,
 ) -> Result<Json<types::ReloadEligibleResponse>, ApiError> {
     auth.check_admin()?;
-    let req = body.map(|Json(req)| req).unwrap_or_default();
+    // An empty body (with or without a JSON content type) means the defaults.
+    let req = if body.iter().all(u8::is_ascii_whitespace) {
+        types::ReloadEligibleRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::bad_request(format!("invalid JSON body: {e}")))?
+    };
     let reloaded =
         AdminService::reload_eligible(state.databases(), &db, req.target_fraction).await?;
     Ok(Json(types::ReloadEligibleResponse { reloaded }))
