@@ -109,6 +109,7 @@ mod sse {
     use futures_util::{Stream, StreamExt};
 
     use grafeo_service::changefeed::{LaggedNotice, LiveCursor, LiveItem};
+    use grafeo_service::error::ServiceError;
     use grafeo_service::sync::{ChangeEventDto, ChangesResponse, SyncService};
 
     use crate::error::ApiError;
@@ -138,7 +139,13 @@ mod sse {
     ///   is `{"skipped": n, "last_epoch": e}`: reconnect with `since = e + 1`.
     /// - `error`: a history pull failed, or the live feed stopped (the
     ///   database was dropped or restored, or its CDC turned off). The data
-    ///   is `{"message": "..."}`.
+    ///   is `{"message": "..."}`; an internal failure reads "internal error",
+    ///   with the detail in the server log.
+    ///
+    /// Both are terminal: the server ends the stream after either. A browser
+    /// `EventSource` then reconnects by itself with the original `?since=`,
+    /// replaying what it already has, unless the client calls `close()` on
+    /// these events and opens a new stream from the cursor it received.
     ///
     /// The `limit` query parameter is ignored for the streaming endpoint.
     ///
@@ -275,9 +282,14 @@ mod sse {
         }
     }
 
+    /// The `error` item for a failed history pull. An internal error's text
+    /// stays in the log, as in the HTTP error mapping.
     fn history_failed(name: &str, error: &ApiError) -> StreamItem {
         tracing::warn!(db = %name, error = %error, "SSE history pull failed; ending the stream");
-        StreamItem::Error(error.to_string())
+        StreamItem::Error(match &error.0 {
+            ServiceError::Internal(_) => "internal error".to_string(),
+            _ => error.to_string(),
+        })
     }
 
     /// Pulls the history of `name` from epoch `since` on, one page.
@@ -328,6 +340,20 @@ mod sse {
             match item {
                 StreamItem::Change(event) => event.labels.unwrap().remove(0),
                 other => panic!("expected a change, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_history_error_hides_internal_detail_only() {
+            let internal = history_failed("default", &ApiError::internal("disk at /var/x full"));
+            match internal {
+                StreamItem::Error(message) => assert_eq!(message, "internal error"),
+                other => panic!("expected an error, got {other:?}"),
+            }
+            let bad = history_failed("default", &ApiError::bad_request("CDC is not enabled"));
+            match bad {
+                StreamItem::Error(message) => assert!(message.contains("CDC is not enabled")),
+                other => panic!("expected an error, got {other:?}"),
             }
         }
 
