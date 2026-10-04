@@ -57,11 +57,11 @@ fn resolve_options(options: &DatabaseOptions) -> DatabaseOptions {
 /// every reopen share it, so a reopened database gets the settings it was
 /// created with.
 fn configure(
-    mut config: Config,
+    config: Config,
     database_type: DatabaseType,
     options: &DatabaseOptions,
 ) -> Result<Config, ServiceError> {
-    config = config.with_graph_model(database_type.graph_model());
+    let mut config = type_config(config, database_type);
     if let Some(limit) = options.memory_limit_bytes {
         config = config.with_memory_limit(limit);
     }
@@ -70,9 +70,6 @@ fn configure(
     }
     if options.backward_edges == Some(false) {
         config = config.without_backward_edges();
-    }
-    if database_type == DatabaseType::JsonSchema {
-        config = config.with_schema_constraints();
     }
     if options.wal_enabled == Some(false) {
         config.wal_enabled = false;
@@ -92,6 +89,18 @@ fn configure(
         }
     }
     Ok(config)
+}
+
+/// What `database_type` itself needs of the engine config, whatever the
+/// options: its graph model, and schema constraint checks for a JSON Schema
+/// database.
+fn type_config(config: Config, database_type: DatabaseType) -> Config {
+    let config = config.with_graph_model(database_type.graph_model());
+    if database_type == DatabaseType::JsonSchema {
+        config.with_schema_constraints()
+    } else {
+        config
+    }
 }
 
 /// The metadata a database with these resolved options reports.
@@ -678,7 +687,7 @@ impl DatabaseManager {
                 // `database_type`, has an unknown model and opens as before.
                 return match e.database_type {
                     Some(database_type) => {
-                        Self::model_only_config(base, database_type, &options_path, &e.message)
+                        Self::type_only_config(base, database_type, &options_path, &e.message)
                     }
                     None => {
                         tracing::warn!(
@@ -700,7 +709,7 @@ impl DatabaseManager {
         let configured = match configure(base.clone(), stored.database_type, &stored.options) {
             Ok(config) => config,
             Err(e) => {
-                return Self::model_only_config(
+                return Self::type_only_config(
                     base,
                     stored.database_type,
                     &options_path,
@@ -722,27 +731,28 @@ impl DatabaseManager {
                 | ConfigError::ZeroThreads
                 | ConfigError::ZeroWalFlushInterval
                 | ConfigError::ZeroAdaptiveFlushInterval),
-            ) => Self::model_only_config(base, stored.database_type, &options_path, &e.to_string()),
+            ) => Self::type_only_config(base, stored.database_type, &options_path, &e.to_string()),
             Err(e) => Err(Self::keep_closed(&options_path, &e)),
         }
     }
 
-    /// The base config with the stored graph model, for a file whose options
-    /// are ignored because of `reason`. The model itself must pass
+    /// The base config with what the stored database type needs (its graph
+    /// model, and schema constraints for JSON Schema), for a file whose
+    /// options are ignored because of `reason`. That config must pass
     /// validation, or the database stays closed.
-    fn model_only_config(
+    fn type_only_config(
         base: Config,
         database_type: DatabaseType,
         options_path: &Path,
         reason: &str,
     ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
-        let config = base.with_graph_model(database_type.graph_model());
+        let config = type_config(base, database_type);
         match config.validate() {
             Ok(()) => {
                 tracing::warn!(
                     path = %options_path.display(),
                     error = %reason,
-                    "Ignoring invalid options.json; falling back to engine defaults with the stored graph model"
+                    "Ignoring invalid options.json; falling back to engine defaults with the stored database type"
                 );
                 Ok((config, None))
             }
@@ -2100,6 +2110,33 @@ mod tests {
             .get("zero")
             .expect("a stored file that fails validation must not keep the database closed");
         assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[test]
+    fn a_json_schema_database_keeps_its_schema_checks_when_its_options_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("checked", DatabaseOptions::default()))
+                .unwrap();
+        }
+        // A JSON Schema database whose stored options fail the engine's
+        // validation.
+        let file = dir.path().join("checked").join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["database_type"] = serde_json::json!("JsonSchema");
+        json["options"]["threads"] = serde_json::json!(0);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(None, false);
+        let (config, metadata) = mgr
+            .reopen_config(&dir.path().join("checked").join("data.grafeo"))
+            .unwrap();
+        assert!(metadata.is_none(), "the options fell back");
+        assert!(config.schema_constraints, "the schema checks stay on");
+        assert_eq!(config.graph_model, grafeo_engine::GraphModel::Lpg);
     }
 
     #[test]
