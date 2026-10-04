@@ -117,10 +117,12 @@ pub(crate) fn path_present(path: &Path) -> bool {
 /// Startup recovery for a crash between the two renames of an epoch restore:
 /// the original sits at `data.grafeo.pre-restore` and there is no
 /// `data.grafeo`. Moves it back, with its WAL, so the database opens with its
-/// data instead of being recreated empty. A lone WAL at the live path is not
-/// a live database: the move reunites the file with it. Nothing moves, and an
-/// operator decides, when `data.grafeo` exists, when the directory is
-/// read-only, or when both sides have a WAL (the move would overwrite one).
+/// data instead of being recreated empty. Nothing moves, and an operator
+/// decides, when `data.grafeo` exists, when the directory is read-only, when
+/// the pre-restore database file is missing or unusable, or when a WAL sits at
+/// the live path: the original normally has no WAL when it is moved aside,
+/// while a restore's staging file can leave one there, so a live WAL cannot be
+/// told from the original's and the move could replay it into the wrong file.
 pub(crate) fn recover_orphaned_pre_restore(db_dir: &Path, read_only: bool) {
     let live = db_dir.join("data.grafeo");
     let previous = db_dir.join("data.grafeo.pre-restore");
@@ -145,18 +147,24 @@ pub(crate) fn recover_orphaned_pre_restore(db_dir: &Path, read_only: bool) {
         return;
     }
     if !matches!(previous.try_exists(), Ok(true)) {
-        tracing::error!(
-            path = %previous.display(),
-            wal = %previous_wal.display(),
-            "Found a pre-restore WAL, but the pre-restore database file is missing or cannot be checked; leaving everything in place for an operator"
-        );
+        if path_present(&previous) {
+            tracing::error!(
+                path = %previous.display(),
+                "The pre-restore path exists but is not a database file that can be read (a dangling link, or it cannot be checked); leaving everything in place for an operator"
+            );
+        } else {
+            tracing::error!(
+                path = %previous_wal.display(),
+                "Found a pre-restore WAL without a pre-restore database file; leaving everything in place for an operator"
+            );
+        }
         return;
     }
-    if path_present(&live_wal) && path_present(&previous_wal) {
+    if path_present(&live_wal) {
         tracing::error!(
             live_wal = %live_wal.display(),
-            pre_restore_wal = %previous_wal.display(),
-            "Both the live path and the pre-restore copy have a WAL; moving the copy back would overwrite one of them. Leaving everything in place for an operator"
+            pre_restore = %previous.display(),
+            "Found a pre-restore copy and a WAL at the live path but no data.grafeo; the WAL may belong to a restored database that did not open, so moving the copy back could replay it into the original. Leaving everything in place for an operator"
         );
         return;
     }

@@ -168,26 +168,31 @@ fn rollback_create(dir: &Path, created_dir: bool) {
     }
 }
 
-/// Whether `dir` holds a database's files, which a create must never adopt
-/// or overwrite: `data.grafeo` and its WAL, or the legacy `grafeo.db` and its
-/// WAL that startup migrates. An entry of any kind counts, a dangling
-/// symbolic link included (the engine would create the file it points to),
-/// and so does an entry that cannot be checked for any reason but its
-/// absence.
-fn has_database_files(dir: &Path) -> bool {
+/// The entries in `dir` that belong to a database and that a create must
+/// never adopt or overwrite: `data.grafeo` and its WAL, the legacy
+/// `grafeo.db` and its WAL that startup migrates, and the pre-restore copy
+/// of an interrupted epoch restore with its WAL. An entry of any kind counts,
+/// a dangling symbolic link included (the engine would create the file it
+/// points to), and so does an entry that cannot be checked for any reason
+/// but its absence.
+fn database_files_present(dir: &Path) -> Vec<PathBuf> {
     [
         "data.grafeo",
         "data.grafeo.wal",
         "grafeo.db",
         "grafeo.db.wal",
+        "data.grafeo.pre-restore",
+        "data.grafeo.pre-restore.wal",
     ]
     .iter()
-    .any(|file| {
-        !matches!(
-            std::fs::symlink_metadata(dir.join(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound
-        )
-    })
+    .map(|file| dir.join(file))
+    .filter(|path| crate::backup::path_present(path))
+    .collect()
+}
+
+/// Whether `dir` holds any [`database_files_present`].
+fn has_database_files(dir: &Path) -> bool {
+    !database_files_present(dir).is_empty()
 }
 
 /// Name validation: starts with letter, then alphanumeric/underscore/hyphen, max 64 chars.
@@ -517,17 +522,10 @@ impl DatabaseManager {
                 // An empty default must never be created next to files of an
                 // earlier one: it would shadow them, or adopt and rewrite
                 // them. Recovery is retried on every start.
-                let leftovers: Vec<String> = [
-                    "data.grafeo",
-                    "data.grafeo.wal",
-                    "data.grafeo.pre-restore",
-                    "data.grafeo.pre-restore.wal",
-                ]
-                .iter()
-                .map(|file| default_dir.join(file))
-                .filter(|path| crate::backup::path_present(path))
-                .map(|path| path.display().to_string())
-                .collect();
+                let leftovers: Vec<String> = database_files_present(&default_dir)
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
                 assert!(
                     leftovers.is_empty(),
                     "refusing to create an empty default database: found {} from an earlier one that did not open. Check the server log for the reason (an interrupted epoch restore, options.json, a lock), fix or move these files, then start again",
@@ -608,8 +606,17 @@ impl DatabaseManager {
     /// Applies the options in the database's [`OPTIONS_FILE`] and returns the
     /// metadata they imply. A database without the file (created before
     /// 0.5.44, or the `default` database) opens with engine defaults and
-    /// `None` metadata, as before. An unreadable or invalid file is logged
-    /// and ignored rather than keeping the database closed.
+    /// `None` metadata, as before. A file that cannot be read or parsed is
+    /// logged and ignored (its graph model is unknown then). A file with a
+    /// value the engine refuses (zero threads, zero memory) or an unknown
+    /// name falls back to engine defaults with the stored graph model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and the database must stay closed, when the stored
+    /// graph model fails the engine's validation, for example an RDF database
+    /// on a build without the triple store: opening it with another model
+    /// would rewrite the file without its data.
     pub fn reopen_config(
         &self,
         db_file: &Path,
@@ -653,10 +660,11 @@ impl DatabaseManager {
             }
         };
         // `configure` only checks names; the engine checks the values. A file
-        // with a value-range error falls back to the base config. Any other
-        // validation error keeps the database closed: opening the file with
-        // a config that cannot read all of its sections would rewrite it
-        // without them at the next checkpoint.
+        // with a value-range error or an unknown name falls back to the base
+        // config with the stored graph model. The model is kept because the
+        // file's sections depend on it: opening an RDF file as a property
+        // graph would rewrite it without its RDF data at the next checkpoint.
+        // Any other validation error keeps the database closed.
         let configured = match configure(base.clone(), stored.database_type, &stored.options) {
             Ok(config) => config,
             Err(e) => {
@@ -665,7 +673,7 @@ impl DatabaseManager {
                     error = %e,
                     "Ignoring invalid options.json; opening with engine defaults"
                 );
-                return Ok((base, None));
+                return Self::model_only_config(base, &stored, &options_path);
             }
         };
         match configured.validate() {
@@ -688,16 +696,41 @@ impl DatabaseManager {
                     error = %e,
                     "Ignoring invalid options.json; opening with engine defaults"
                 );
-                Ok((base, None))
+                Self::model_only_config(base, &stored, &options_path)
             }
-            Err(ConfigError::RdfFeatureRequired) => Err(ServiceError::Internal(format!(
-                "{} declares an RDF-based database, but this server was built without the triple store;                  use a server built with it. The database stays closed and its files are untouched",
+            Err(e) => Err(Self::keep_closed(&options_path, &e)),
+        }
+    }
+
+    /// The base config with the stored graph model, for a file whose options
+    /// are ignored. The model itself must pass validation, or the database
+    /// stays closed.
+    fn model_only_config(
+        base: Config,
+        stored: &StoredOptions,
+        options_path: &Path,
+    ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
+        let config = base.with_graph_model(stored.database_type.graph_model());
+        match config.validate() {
+            Ok(()) => Ok((config, None)),
+            // A value error cannot come from a base config; treat it like any
+            // other error and keep the database closed.
+            Err(e) => Err(Self::keep_closed(options_path, &e)),
+        }
+    }
+
+    /// The error for a stored config the engine rejects in a way that must
+    /// not be worked around.
+    fn keep_closed(options_path: &Path, error: &ConfigError) -> ServiceError {
+        match error {
+            ConfigError::RdfFeatureRequired => ServiceError::Internal(format!(
+                "{} declares an RDF-based database, but this server was built without the triple store; use a server built with it. The database stays closed and its files are untouched",
                 options_path.display()
-            ))),
-            Err(e) => Err(ServiceError::Internal(format!(
-                "{} fails the engine's validation ({e}); the database stays closed and its files are untouched",
+            )),
+            other => ServiceError::Internal(format!(
+                "{} fails the engine's validation ({other}); the database stays closed and its files are untouched",
                 options_path.display()
-            ))),
+            )),
         }
     }
 
@@ -2181,23 +2214,47 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_reunites_a_pre_restore_file_with_a_lone_live_wal() {
+    fn a_lone_live_wal_next_to_a_pre_restore_copy_is_left_alone() {
+        // The WAL may belong to a restored database that did not open, so
+        // moving the copy back could replay it into the original.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("data.grafeo.pre-restore"), b"original").unwrap();
-        std::fs::write(dir.path().join("data.grafeo.wal"), b"live wal").unwrap();
+        let db_dir = dir.path().join("walled");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore"), b"original").unwrap();
+        std::fs::write(db_dir.join("data.grafeo.wal"), b"live wal").unwrap();
 
-        crate::backup::recover_orphaned_pre_restore(dir.path(), false);
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
 
+        assert!(mgr.get("walled").is_none(), "the database is not opened");
+        assert!(!db_dir.join("data.grafeo").exists());
         assert_eq!(
-            std::fs::read(dir.path().join("data.grafeo")).unwrap(),
+            std::fs::read(db_dir.join("data.grafeo.pre-restore")).unwrap(),
             b"original"
         );
         assert_eq!(
-            std::fs::read(dir.path().join("data.grafeo.wal")).unwrap(),
-            b"live wal",
-            "the live WAL stays with the moved file"
+            std::fs::read(db_dir.join("data.grafeo.wal")).unwrap(),
+            b"live wal"
         );
-        assert!(!dir.path().join("data.grafeo.pre-restore").exists());
+    }
+
+    #[test]
+    fn create_refuses_a_directory_with_an_orphaned_pre_restore_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        // Placed after startup, which would have moved the copy back.
+        let db_dir = dir.path().join("orphan");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore"), b"original").unwrap();
+
+        let err = mgr
+            .create(&persistent_request("orphan", DatabaseOptions::default()))
+            .unwrap_err();
+
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+        assert_eq!(
+            dir_listing(&db_dir),
+            vec!["data.grafeo.pre-restore".to_string()]
+        );
     }
 
     #[test]
@@ -2290,5 +2347,52 @@ mod tests {
         };
         write_stored_options(&data_dir.join("default"), &stored).unwrap();
         std::fs::read(data_dir.join("default").join("data.grafeo")).unwrap()
+    }
+
+    /// Rewrites options.json of `name` to declare RDF with `extra` merged
+    /// into its options, and returns the bytes of its `data.grafeo`.
+    #[cfg(not(feature = "triple-store"))]
+    fn declare_rdf_with(data_dir: &Path, name: &str, extra: serde_json::Value) -> Vec<u8> {
+        let file = data_dir.join(name).join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["database_type"] = serde_json::json!("Rdf");
+        for (key, value) in extra.as_object().unwrap() {
+            json["options"][key] = value.clone();
+        }
+        std::fs::write(&file, json.to_string()).unwrap();
+        std::fs::read(data_dir.join(name).join("data.grafeo")).unwrap()
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_database_with_ignored_options_stays_closed_without_the_triple_store() {
+        // The fallbacks keep the stored graph model, so a value error or an
+        // unknown name cannot turn an RDF file into a property graph.
+        for (name, extra) in [
+            ("zero_threads", serde_json::json!({ "threads": 0 })),
+            (
+                "bad_tier",
+                serde_json::json!({ "section_tiers": { "NoSuchSection": "force_ram" } }),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_str().unwrap();
+            {
+                let mgr = DatabaseManager::new(Some(path), false);
+                mgr.create(&persistent_request(name, DatabaseOptions::default()))
+                    .unwrap();
+            }
+            let before = declare_rdf_with(dir.path(), name, extra);
+
+            let mgr = DatabaseManager::new(Some(path), false);
+            assert!(mgr.get(name).is_none(), "{name} must stay closed");
+            drop(mgr);
+            assert_eq!(
+                std::fs::read(dir.path().join(name).join("data.grafeo")).unwrap(),
+                before,
+                "{name}: the file is untouched"
+            );
+        }
     }
 }
