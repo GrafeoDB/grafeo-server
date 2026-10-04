@@ -42,17 +42,23 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
         // Engine emits nodes as `Value::Map { _id, _labels, ...props }` and
         // edges as `Value::Map { _id, _type, _source, _target, ...props }`
         // (see grafeo-core `node_to_map` / `edge_to_map`). Detect those
-        // shapes so Bolt clients receive proper Node/Relationship
-        // structures instead of a generic dict. Issue #341.
-        Value::Map(map) if map.contains_key(&PropertyKey::new("_labels")) => {
-            BoltValue::Node(value_to_bolt_node(value))
-        }
+        // shapes so Bolt clients receive proper Relationship/Node structures
+        // instead of a generic dict (issue #341). The edge shape is checked
+        // first, and both need `_id`, so a user map or an edge property that
+        // happens to be called `_labels` is not mistaken for a node.
         Value::Map(map)
-            if map.contains_key(&PropertyKey::new("_source"))
-                && map.contains_key(&PropertyKey::new("_target"))
-                && map.contains_key(&PropertyKey::new("_type")) =>
+            if map.contains_key(&PropertyKey::new("_id"))
+                && map.contains_key(&PropertyKey::new("_type"))
+                && map.contains_key(&PropertyKey::new("_source"))
+                && map.contains_key(&PropertyKey::new("_target")) =>
         {
             BoltValue::Relationship(value_to_bolt_relationship(value))
+        }
+        Value::Map(map)
+            if map.contains_key(&PropertyKey::new("_id"))
+                && map.contains_key(&PropertyKey::new("_labels")) =>
+        {
+            BoltValue::Node(value_to_bolt_node(value))
         }
         Value::Map(map) => {
             let dict: BoltDict = map
@@ -819,5 +825,53 @@ mod tests {
             Some(&BoltValue::Boolean(true))
         );
         assert!(!stats.contains_key("nodes-deleted"));
+    }
+
+    // PR #69 review: `_labels` alone does not make a node.
+    #[test]
+    fn map_with_labels_key_but_no_id_stays_dict() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_labels"),
+                grafeo_common::Value::List(vec![grafeo_common::Value::String("X".into())].into()),
+            ),
+            (
+                grafeo_common::PropertyKey::new("name"),
+                grafeo_common::Value::String("n".into()),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        assert!(matches!(grafeo_to_bolt(&val), BoltValue::Dict(_)));
+    }
+
+    // PR #69 review: an edge with a `_labels` property is still an edge.
+    #[test]
+    fn edge_shaped_map_with_labels_property_encodes_as_relationship() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(10),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_type"),
+                grafeo_common::Value::String("KNOWS".into()),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_source"),
+                grafeo_common::Value::Int64(1),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_target"),
+                grafeo_common::Value::Int64(2),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_labels"),
+                grafeo_common::Value::List(vec![grafeo_common::Value::String("X".into())].into()),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        assert!(matches!(grafeo_to_bolt(&val), BoltValue::Relationship(_)));
     }
 }

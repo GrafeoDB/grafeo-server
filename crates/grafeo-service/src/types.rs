@@ -1050,9 +1050,11 @@ mod tests {
     }
 
     #[test]
-    fn reload_eligible_request_default_target_fraction() {
+    fn reload_eligible_request_target_fraction_is_optional() {
+        // The 0.7 default is applied by AdminService::reload_eligible, not by
+        // deserialization; an empty body leaves the field unset.
         let req: ReloadEligibleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!((req.target_fraction.unwrap_or(0.7) - 0.7).abs() < 1e-9);
+        assert_eq!(req.target_fraction, None);
     }
 
     #[test]

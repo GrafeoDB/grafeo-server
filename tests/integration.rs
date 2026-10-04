@@ -3463,6 +3463,21 @@ async fn admin_reload_eligible_accepts_explicit_fraction() {
 }
 
 #[tokio::test]
+async fn admin_reload_eligible_accepts_missing_body() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+}
+
+#[tokio::test]
 async fn admin_reload_eligible_not_found() {
     let base = spawn_server().await;
     let client = Client::new();

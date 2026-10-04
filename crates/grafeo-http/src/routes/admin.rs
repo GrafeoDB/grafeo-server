@@ -208,9 +208,10 @@ pub async fn admin_reload_eligible(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(db): Path<String>,
-    Json(req): Json<types::ReloadEligibleRequest>,
+    body: Option<Json<types::ReloadEligibleRequest>>,
 ) -> Result<Json<types::ReloadEligibleResponse>, ApiError> {
     auth.check_admin()?;
+    let req = body.map(|Json(req)| req).unwrap_or_default();
     let reloaded =
         AdminService::reload_eligible(state.databases(), &db, req.target_fraction).await?;
     Ok(Json(types::ReloadEligibleResponse { reloaded }))

@@ -78,7 +78,9 @@ fn clear_staging(staged: &Path) {
 
 /// True when the database file or its WAL sidecar exists.
 fn db_files_exist(db_file: &Path) -> bool {
-    db_file.exists() || sidecar_wal(db_file).exists()
+    // An unreadable path (for example permission denied) counts as present,
+    // so it blocks the restore instead of being ignored.
+    db_file.try_exists().unwrap_or(true) || sidecar_wal(db_file).try_exists().unwrap_or(true)
 }
 
 /// Moves a database file, and its WAL sidecar when there is one, to `to`.
@@ -392,7 +394,7 @@ impl BackupService {
         if db_files_exist(&previous) {
             entry.set_available();
             return Err(ServiceError::Conflict(format!(
-                "a previous epoch restore left {} behind; an operator must inspect                  it and remove it before another restore can run",
+                "a previous epoch restore left {} behind; it may be the only copy of the original database: verify it (or move it somewhere safe) before removing it, then retry",
                 previous.display()
             )));
         }
@@ -438,7 +440,7 @@ impl BackupService {
                 tracing::error!(
                     database = %db_name,
                     original = %previous.display(),
-                    "Epoch restore swap failed and the original is not back in place;                      entry left in Restoring state, original may be at the pre-restore path"
+                    "Epoch restore swap failed and the original is not back in place; entry left in Restoring state, original may be at the pre-restore path"
                 );
             }
             return Err(ServiceError::Internal(format!(
@@ -478,7 +480,7 @@ impl BackupService {
                         database = %db_name,
                         restored = %db_file.display(),
                         original = %previous.display(),
-                        "Could not clear the restored files after a failed reopen; entry left                          in Restoring state, original kept at the pre-restore path"
+                        "Could not clear the restored files after a failed reopen; entry left in Restoring state, original kept at the pre-restore path"
                     );
                     return Err(e);
                 }
@@ -1705,6 +1707,9 @@ mod tests {
             err.to_string().contains("data.grafeo.pre-restore"),
             "unexpected error: {err}"
         );
+        let msg = err.to_string();
+        assert!(msg.contains("only copy"), "unexpected error: {msg}");
+        assert!(!msg.contains("  "), "double space in: {msg}");
         assert_eq!(std::fs::read(&stale).unwrap(), b"only copy");
 
         let entry = mgr.get("default").unwrap();
