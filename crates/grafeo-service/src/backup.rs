@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::backup::{BackupKind, BackupSegment};
+use grafeo_engine::{Config, GrafeoDB};
 
 use crate::database::{DatabaseEntry, DatabaseManager};
 use crate::error::ServiceError;
@@ -380,6 +380,7 @@ impl BackupService {
         let db_file = db_dir.join("data.grafeo");
         let staged = db_dir.join("data.grafeo.restoring");
         let previous = db_dir.join("data.grafeo.pre-restore");
+        let (reopen_config, _) = databases.reopen_config(&db_file);
 
         // Engine 0.5.43+ never restores over an existing database, so the
         // chain is replayed into a staging file before the live handle
@@ -431,7 +432,8 @@ impl BackupService {
             // Reopen only when the original is back in place and nothing is
             // left at the pre-restore path.
             if db_file.exists() && !db_files_exist(&previous) {
-                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
+                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name, &reopen_config)
+                    .await;
             } else {
                 tracing::error!(
                     database = %db_name,
@@ -444,8 +446,8 @@ impl BackupService {
             )));
         }
 
-        let db_file_str = db_file.to_string_lossy().into_owned();
-        let open_result = tokio::task::spawn_blocking(move || GrafeoDB::open(&db_file_str))
+        let open_config = reopen_config.clone();
+        let open_result = tokio::task::spawn_blocking(move || GrafeoDB::with_config(open_config))
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))
             .and_then(|r| {
@@ -482,7 +484,13 @@ impl BackupService {
                 }
                 match move_db_files(&previous, &db_file) {
                     Ok(()) => {
-                        Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
+                        Self::recover_after_failed_epoch_restore(
+                            &entry,
+                            &db_file,
+                            db_name,
+                            &reopen_config,
+                        )
+                        .await;
                     }
                     Err(move_err) => {
                         tracing::error!(
@@ -515,6 +523,7 @@ impl BackupService {
         entry: &Arc<DatabaseEntry>,
         db_file: &Path,
         db_name: &str,
+        reopen_config: &Config,
     ) {
         // Never open a missing file: the engine would create an empty
         // database and the entry would serve it as if it were the original.
@@ -528,14 +537,8 @@ impl BackupService {
             return;
         }
 
-        // to_string_lossy is safe here: the db file lives under --data-dir
-        // which is user-supplied, and if the path is not valid UTF-8 the
-        // engine's open() will fail with a descriptive error that the
-        // match below handles. The prior to_str match added a dead error
-        // branch that no real deployment exercised.
-        let db_file_str = db_file.to_string_lossy().into_owned();
-
-        let reopen = tokio::task::spawn_blocking(move || GrafeoDB::open(&db_file_str)).await;
+        let config = reopen_config.clone();
+        let reopen = tokio::task::spawn_blocking(move || GrafeoDB::with_config(config)).await;
         match reopen {
             Ok(Ok(db)) => {
                 entry.swap_db(Arc::new(db));
@@ -611,14 +614,24 @@ impl BackupService {
         // so validation errors don't orphan the entry in Restoring.
         let db_dir = db_backup_dir(backup_dir, db_name)?;
 
+        let (reopen_config, _) =
+            databases.reopen_config(&data_dir.join(db_name).join("data.grafeo"));
+
         if !entry.set_restoring() {
             return Err(ServiceError::Conflict(
                 "database is already being restored".to_string(),
             ));
         }
 
-        let (result, has_valid_handle) =
-            Self::do_restore(&entry, db_name, backup_path, &db_dir, data_dir).await;
+        let (result, has_valid_handle) = Self::do_restore(
+            &entry,
+            db_name,
+            backup_path,
+            &db_dir,
+            data_dir,
+            reopen_config,
+        )
+        .await;
 
         if has_valid_handle {
             entry.set_available();
@@ -632,6 +645,7 @@ impl BackupService {
         backup_path: &Path,
         backup_dir: &Path,
         data_dir: &Path,
+        reopen_config: Config,
     ) -> (Result<(), ServiceError>, bool) {
         // 1. Safety backup via backup_full
         tracing::info!(database = %db_name, "Creating safety backup before restore");
@@ -728,6 +742,7 @@ impl BackupService {
         // 4. Open backup and save to the persistent path
         let backup_owned = backup_path.to_path_buf();
         let db_file_clone = db_file.clone();
+        let open_config = reopen_config.clone();
         let open_result = tokio::task::spawn_blocking(move || -> Result<GrafeoDB, String> {
             let backup_db =
                 GrafeoDB::open(&backup_owned).map_err(|e| format!("failed to open backup: {e}"))?;
@@ -735,7 +750,7 @@ impl BackupService {
                 .save(&db_file_clone)
                 .map_err(|e| format!("failed to save restored data: {e}"))?;
             backup_db.close().ok();
-            GrafeoDB::open(db_file_clone.to_str().unwrap())
+            GrafeoDB::with_config(open_config)
                 .map_err(|e| format!("failed to open restored database: {e}"))
         })
         .await
@@ -754,9 +769,14 @@ impl BackupService {
                     error = %e,
                     "Failed to restore, recovering from safety backup"
                 );
-                let recovered =
-                    Self::recover_from_safety(entry, &db_file, backup_dir, safety_file.as_deref())
-                        .await;
+                let recovered = Self::recover_from_safety(
+                    entry,
+                    &db_file,
+                    backup_dir,
+                    safety_file.as_deref(),
+                    &reopen_config,
+                )
+                .await;
                 (
                     Err(ServiceError::Internal(format!(
                         "restore failed{}: {e}",
@@ -778,6 +798,7 @@ impl BackupService {
         db_file: &Path,
         backup_dir: &Path,
         known_safety_file: Option<&Path>,
+        reopen_config: &Config,
     ) -> bool {
         // Use the exact safety file if known, otherwise fall back to guessing
         let safety_path = known_safety_file.map(|p| p.to_path_buf()).or_else(|| {
@@ -800,6 +821,7 @@ impl BackupService {
         };
 
         let db_file_owned = db_file.to_path_buf();
+        let config = reopen_config.clone();
         let recovery_result = tokio::task::spawn_blocking(move || {
             if db_file_owned.exists() {
                 if db_file_owned.is_dir() {
@@ -812,7 +834,7 @@ impl BackupService {
                 let _ = safety_db.save(&db_file_owned);
                 safety_db.close().ok();
             }
-            GrafeoDB::open(db_file_owned.to_str().unwrap())
+            GrafeoDB::with_config(config)
         })
         .await;
 
@@ -2338,5 +2360,64 @@ mod tests {
             let map: HashMap<String, String> = serde_json::from_str(&text).unwrap();
             assert!(!map.contains_key(&first.filename));
         }
+    }
+
+    fn capped_request(limit: usize) -> types::CreateDatabaseRequest {
+        types::CreateDatabaseRequest {
+            name: "capped".to_string(),
+            database_type: types::DatabaseType::Lpg,
+            storage_mode: types::StorageMode::Persistent,
+            options: types::DatabaseOptions {
+                memory_limit_bytes: Some(limit),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_keeps_creation_options() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        let limit = 128 * 1024 * 1024;
+        mgr.create(&capped_request(limit)).unwrap();
+        mgr.get("capped")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let initial = BackupService::backup_database(&mgr, "capped", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        BackupService::restore_to_epoch(&mgr, "capped", initial.end_epoch, backup_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
+    }
+
+    #[tokio::test]
+    async fn restore_database_keeps_creation_options() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        let limit = 128 * 1024 * 1024;
+        mgr.create(&capped_request(limit)).unwrap();
+        let backup = BackupService::backup_database(&mgr, "capped", backup_dir.path(), None)
+            .await
+            .unwrap();
+        let backup_path = backup_dir.path().join("capped").join(&backup.filename);
+
+        BackupService::restore_database(&mgr, "capped", &backup_path, backup_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
     }
 }

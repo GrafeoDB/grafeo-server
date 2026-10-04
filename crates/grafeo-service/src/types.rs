@@ -95,7 +95,7 @@ impl StorageMode {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DatabaseOptions {
     /// Memory limit in bytes. Default: 512 MB.
