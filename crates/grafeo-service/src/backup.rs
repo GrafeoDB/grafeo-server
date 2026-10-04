@@ -38,35 +38,79 @@ fn sidecar_wal(db_file: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Removes a database file and its WAL sidecar, each a file or a directory.
-/// Missing paths are fine.
-fn remove_db_files(db_file: &Path) {
-    for path in [db_file.to_path_buf(), sidecar_wal(db_file)] {
-        let _ = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
+/// Removes a file or directory. A missing path is fine; any other error is
+/// logged, since a leftover can break a later restore.
+fn remove_path(path: &Path) {
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(e) = result
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), error = %e, "Could not remove path");
     }
 }
 
+/// Removes a database file and its WAL sidecar, each a file or a directory.
+fn remove_db_files(db_file: &Path) {
+    remove_path(db_file);
+    remove_path(&sidecar_wal(db_file));
+}
+
+/// Removes the scratch directories the engine's `restore_to_epoch` leaves
+/// next to the staging file (`<staged>.restore_wal` and its `.trimmed_wal`).
+fn clear_replay_scratch(staged: &Path) {
+    let mut restore_wal = staged.as_os_str().to_owned();
+    restore_wal.push(".restore_wal");
+    let mut trimmed = restore_wal.clone();
+    trimmed.push(".trimmed_wal");
+    remove_path(Path::new(&restore_wal));
+    remove_path(Path::new(&trimmed));
+}
+
+/// Removes the staging database, its sidecar and the replay scratch.
+fn clear_staging(staged: &Path) {
+    remove_db_files(staged);
+    clear_replay_scratch(staged);
+}
+
+/// True when the database file or its WAL sidecar exists.
+fn db_files_exist(db_file: &Path) -> bool {
+    db_file.exists() || sidecar_wal(db_file).exists()
+}
+
 /// Moves a database file, and its WAL sidecar when there is one, to `to`.
+/// All or nothing: when the sidecar cannot move, the file is moved back.
 fn move_db_files(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)?;
     let wal = sidecar_wal(from);
-    if wal.exists() {
-        std::fs::rename(&wal, sidecar_wal(to))?;
+    if wal.exists()
+        && let Err(e) = std::fs::rename(&wal, sidecar_wal(to))
+    {
+        return match std::fs::rename(to, from) {
+            Ok(()) => Err(e),
+            Err(undo) => Err(std::io::Error::other(format!(
+                "{e}; moving the database file back also failed: {undo}"
+            ))),
+        };
     }
     Ok(())
 }
 
 /// Moves the live database aside to `previous` and the staged restore into
-/// its place. When the second move fails the live database is put back.
+/// its place. When the second move fails the live database is put back; if
+/// that fails too, the error says so.
 fn swap_db_files(live: &Path, staged: &Path, previous: &Path) -> std::io::Result<()> {
     move_db_files(live, previous)?;
     if let Err(e) = move_db_files(staged, live) {
-        let _ = move_db_files(previous, live);
-        return Err(e);
+        return match move_db_files(previous, live) {
+            Ok(()) => Err(e),
+            Err(undo) => Err(std::io::Error::other(format!(
+                "{e}; putting the original database back also failed: {undo}"
+            ))),
+        };
     }
     Ok(())
 }
@@ -296,8 +340,8 @@ impl BackupService {
     ///
     /// Replays the full backup plus the incremental segments needed to reach
     /// the target epoch into a staging file, then swaps it in and hot-swaps
-    /// the database handle. The live database keeps serving until the staged
-    /// copy is ready.
+    /// the database handle. A chain that fails to replay leaves the live
+    /// database untouched.
     pub async fn restore_to_epoch(
         databases: &DatabaseManager,
         db_name: &str,
@@ -338,9 +382,10 @@ impl BackupService {
         let previous = db_dir.join("data.grafeo.pre-restore");
 
         // Engine 0.5.43+ never restores over an existing database, so the
-        // chain is replayed into a staging file while the live database keeps
-        // serving. A chain that fails to replay leaves it untouched.
-        remove_db_files(&staged);
+        // chain is replayed into a staging file before the live handle
+        // closes. A chain that fails to replay leaves the live database
+        // untouched.
+        clear_staging(&staged);
         let epoch_id = grafeo_common::types::EpochId::new(target_epoch);
         let staged_clone = staged.clone();
         let restore_result = tokio::task::spawn_blocking(move || {
@@ -352,25 +397,39 @@ impl BackupService {
             r.map_err(|e| ServiceError::Internal(format!("restore to epoch failed: {e}")))
         });
         if let Err(e) = restore_result {
-            remove_db_files(&staged);
+            clear_staging(&staged);
             entry.set_available();
             return Err(e);
         }
+        clear_replay_scratch(&staged);
 
-        // Release the live handle so its files can be moved aside.
+        // A stale pre-restore copy that cannot be deleted aborts the restore
+        // now, while the live handle is still open.
+        remove_db_files(&previous);
+        if db_files_exist(&previous) {
+            clear_staging(&staged);
+            entry.set_available();
+            return Err(ServiceError::Internal(format!(
+                "cannot clear the stale {}; remove it and retry",
+                previous.display()
+            )));
+        }
+
+        // Release the live handle so its files can be moved aside. If the
+        // close fails the old handle may still be open, so no file moves.
         let old_db = entry.db();
         if let Err(e) = old_db.close() {
-            tracing::warn!(
-                database = %db_name,
-                error = %e,
-                "Error closing database for epoch restore"
-            );
+            clear_staging(&staged);
+            entry.set_available();
+            return Err(ServiceError::Internal(format!(
+                "failed to close the database for epoch restore: {e}"
+            )));
         }
         drop(old_db);
 
-        remove_db_files(&previous);
         if let Err(e) = swap_db_files(&db_file, &staged, &previous) {
-            remove_db_files(&staged);
+            clear_staging(&staged);
+            // Reopens only when the original files are back in place.
             Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
             return Err(ServiceError::Internal(format!(
                 "failed to swap in the restored database: {e}"
@@ -398,16 +457,25 @@ impl BackupService {
                 Ok(())
             }
             Err(e) => {
-                // Put the original files back, then reopen them.
+                // Put the original files back, then reopen them. If they
+                // cannot be put back, the entry stays in Restoring and the
+                // original is left at the pre-restore path.
                 remove_db_files(&db_file);
-                if let Err(move_err) = move_db_files(&previous, &db_file) {
-                    tracing::error!(
-                        database = %db_name,
-                        error = %move_err,
-                        "Could not put the original database back after a failed epoch restore"
-                    );
+                match move_db_files(&previous, &db_file) {
+                    Ok(()) => {
+                        Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
+                    }
+                    Err(move_err) => {
+                        tracing::error!(
+                            database = %db_name,
+                            error = %move_err,
+                            original = %previous.display(),
+                            "Could not put the original database back after a failed epoch \
+                             restore; entry left in Restoring state, original kept at the \
+                             pre-restore path"
+                        );
+                    }
                 }
-                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
                 Err(e)
             }
         }
@@ -429,6 +497,18 @@ impl BackupService {
         db_file: &Path,
         db_name: &str,
     ) {
+        // Never open a missing file: the engine would create an empty
+        // database and the entry would serve it as if it were the original.
+        if !db_file.exists() {
+            tracing::error!(
+                database = %db_name,
+                path = %db_file.display(),
+                "Epoch restore failed and the db file is missing; \
+                 entry left in Restoring state so callers get 503"
+            );
+            return;
+        }
+
         // to_string_lossy is safe here: the db file lives under --data-dir
         // which is user-supplied, and if the path is not valid UTF-8 the
         // engine's open() will fail with a descriptive error that the
@@ -1443,7 +1523,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn restore_to_epoch_unwritable_dir_keeps_database_online() {
-        // The engine cannot write the staging file into an unreadable directory; the restore fails before the live handle closes.
+        // The engine cannot write the staging file into an unreadable
+        // directory; the restore fails before the live handle closes.
         use std::os::unix::fs::PermissionsExt;
 
         let data_dir = tempfile::tempdir().unwrap();
@@ -1460,13 +1541,13 @@ mod tests {
                 .unwrap();
         }
 
-        BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
             .await
             .unwrap();
 
-        // Strip write+read on the per-db data dir so both the engine's
-        // restore_to_epoch (tries to overwrite data.grafeo) and the
-        // recovery's GrafeoDB::open (tries to read the same file) fail.
+        // Strip write+read on the per-db data dir so the engine cannot
+        // create the staging file. The target epoch is covered by the full
+        // backup, so the failure is the unwritable directory, not the chain.
         let db_data_dir = data_dir.path().join("default");
         let original_mode = std::fs::metadata(&db_data_dir)
             .unwrap()
@@ -1474,16 +1555,19 @@ mod tests {
             .mode();
         std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = BackupService::restore_to_epoch(&mgr, "default", 0, backup_dir.path()).await;
+        let result =
+            BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
+                .await;
 
         // Restore perms before asserting so tempdir cleanup works even
         // if the assertion fails.
         std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(original_mode))
             .unwrap();
 
+        let err = result.expect_err("an unwritable db dir must fail the restore");
         assert!(
-            result.is_err(),
-            "expected restore_to_epoch to fail when the db dir is unreadable, got {result:?}"
+            err.to_string().contains("restore to epoch failed"),
+            "unexpected error: {err}"
         );
 
         let entry = mgr.get("default").unwrap();
@@ -1496,8 +1580,11 @@ mod tests {
 
     #[tokio::test]
     async fn restore_to_epoch_bad_chain_keeps_database_online() {
-        // The chain is replayed into a staging file before the live handle
-        // closes, so a chain that fails leaves the database untouched.
+        // A corrupt full backup that the epoch check accepts is copied into
+        // the staging file unvalidated, so the replay succeeds. The swap
+        // happens, the reopen of the corrupt file fails, the original files
+        // are put back and the recovery reopens them: the entry ends
+        // Available with the original data.
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let mgr =
@@ -1522,24 +1609,71 @@ mod tests {
         .unwrap();
         insert("INSERT (:Person {name: 'Bob'})");
 
-        let result = BackupService::restore_to_epoch(&mgr, "default", 0, backup_dir.path()).await;
-        assert!(result.is_err(), "a corrupt chain must fail, got {result:?}");
+        let result =
+            BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
+                .await;
+        let err = result.expect_err("a corrupt chain must fail");
+        assert!(
+            err.to_string().contains("failed to reopen database"),
+            "unexpected error: {err}"
+        );
 
         let entry = mgr.get("default").unwrap();
         assert!(!entry.is_restoring());
         assert_eq!(
             entry.db().node_count(),
             2,
-            "the live database must be untouched"
+            "the original data must be back in place"
         );
         insert("INSERT (:Person {name: 'Carol'})");
+        let db_dir = data_dir.path().join("default");
+        assert!(!db_dir.join("data.grafeo.restoring").exists());
+        assert!(!db_dir.join("data.grafeo.pre-restore").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_uncovered_epoch_keeps_database_online() {
+        // No full backup covers epoch 0, so the engine fails during replay,
+        // before the live handle closes.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        let insert = |q: &str| {
+            mgr.get("default")
+                .unwrap()
+                .db()
+                .session()
+                .execute(q)
+                .unwrap()
+        };
+
+        insert("INSERT (:Person {name: 'Alice'})");
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+        assert!(backup.end_epoch > 0, "epoch 0 must be uncovered");
+        let handle_before = mgr.get("default").unwrap().db();
+
+        let err = BackupService::restore_to_epoch(&mgr, "default", 0, backup_dir.path())
+            .await
+            .expect_err("an uncovered epoch must fail");
         assert!(
-            !data_dir
-                .path()
-                .join("default")
-                .join("data.grafeo.restoring")
-                .exists()
+            err.to_string().contains("covers"),
+            "unexpected error: {err}"
         );
+
+        let entry = mgr.get("default").unwrap();
+        assert!(!entry.is_restoring());
+        assert!(
+            Arc::ptr_eq(&handle_before, &entry.db()),
+            "the live handle must not be replaced"
+        );
+        assert_eq!(entry.db().node_count(), 1);
+        insert("INSERT (:Person {name: 'Bob'})");
+        let db_dir = data_dir.path().join("default");
+        assert!(!db_dir.join("data.grafeo.restoring").exists());
+        assert!(!db_dir.join("data.grafeo.restoring.restore_wal").exists());
     }
 
     #[tokio::test]
