@@ -26,7 +26,12 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refresh = useCallback(() => {
+    // Only show the loading state when there is nothing to show yet, so a
+    // normal refresh never blanks an existing table.
+    if (tiers.length === 0) setLoading(true);
+    setRefreshKey((k) => k + 1);
+  }, [tiers.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,7 +102,14 @@ export default function StorageTiersSection({ database, onMutated }: Props) {
 
       {toast && <div className={styles.toast}>{toast}</div>}
       {error && <div className={styles.error}>{error}</div>}
-      {loadError && <div className={styles.error}>{loadError}</div>}
+      {loadError && (
+        <div className={styles.error}>
+          {loadError}{" "}
+          <button type="button" className={btn.secondary} onClick={refresh}>
+            Retry
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className={styles.empty}>Loading…</div>
