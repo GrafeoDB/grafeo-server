@@ -394,7 +394,7 @@ impl BackupService {
         if db_files_exist(&previous) {
             entry.set_available();
             return Err(ServiceError::Conflict(format!(
-                "a previous epoch restore left {} behind; it may be the only copy of the original database: verify it (or move it somewhere safe) before removing it, then retry",
+                "a previous epoch restore left {} behind, or it cannot be checked; it may be the only copy of the original database: verify it (or move it somewhere safe) before removing it, then retry",
                 previous.display()
             )));
         }
@@ -1566,7 +1566,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn restore_to_epoch_unwritable_dir_keeps_database_online() {
-        // The engine cannot write the staging file into an unreadable
+        // The engine cannot write the staging file into a read-only
         // directory; the restore fails before the live handle closes.
         use std::os::unix::fs::PermissionsExt;
 
@@ -1588,15 +1588,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Strip write+read on the per-db data dir so the engine cannot
-        // create the staging file. The target epoch is covered by the full
-        // backup, so the failure is the unwritable directory, not the chain.
+        // Strip write on the per-db data dir (keeping read and execute so
+        // the stat checks still work) so the engine cannot create the
+        // staging file. The target epoch is covered by the full backup, so
+        // the failure is the read-only directory, not the chain.
         let db_data_dir = data_dir.path().join("default");
         let original_mode = std::fs::metadata(&db_data_dir)
             .unwrap()
             .permissions()
             .mode();
-        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
         let result =
             BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
@@ -1607,7 +1608,7 @@ mod tests {
         std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(original_mode))
             .unwrap();
 
-        let err = result.expect_err("an unwritable db dir must fail the restore");
+        let err = result.expect_err("a read-only db dir must fail the restore");
         assert!(
             err.to_string().contains("restore to epoch failed"),
             "unexpected error: {err}"
@@ -1619,6 +1620,54 @@ mod tests {
             "a restore that fails before the swap must leave the entry available"
         );
         assert_eq!(entry.db().node_count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_to_epoch_uncheckable_dir_conflicts_and_stays_online() {
+        // With mode 0o000 the stale pre-restore check cannot stat anything,
+        // so the restore refuses with a Conflict before touching any file.
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        let db_data_dir = data_dir.path().join("default");
+        let original_mode = std::fs::metadata(&db_data_dir)
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result =
+            BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
+                .await;
+
+        std::fs::set_permissions(&db_data_dir, std::fs::Permissions::from_mode(original_mode))
+            .unwrap();
+
+        let err = result.expect_err("an uncheckable db dir must fail the restore");
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        let entry = mgr
+            .get_available("default")
+            .expect("the entry must be available again");
+        assert_eq!(entry.db().node_count(), 1);
+        assert!(db_data_dir.join("data.grafeo").exists());
+        assert!(!db_data_dir.join("data.grafeo.pre-restore").exists());
+        assert!(!db_data_dir.join("data.grafeo.restoring").exists());
     }
 
     #[tokio::test]
