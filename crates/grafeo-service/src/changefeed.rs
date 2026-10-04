@@ -604,6 +604,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_replacement_at_or_past_the_cursor_epoch_still_closes_the_subscribers() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        create_cdc_database(&state, "swapped");
+        let mut rx = subscribed_past_a_write(&hub, &state, "swapped").await;
+
+        // The replacement has as many epochs as the original and one more:
+        // the cursor is not ahead of it, so the epoch rule lets it through,
+        // and without the instance check the hub would send its third node.
+        let replacement = fresh_cdc_db();
+        for _ in 0..3 {
+            replacement.create_node(&["New"]).unwrap();
+        }
+        state
+            .databases()
+            .get("swapped")
+            .unwrap()
+            .swap_db(replacement);
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+    }
+
+    #[tokio::test]
     async fn a_database_recreated_between_two_polls_closes_the_subscribers() {
         let state = cdc_state();
         let hub = ChangeHub::new();
