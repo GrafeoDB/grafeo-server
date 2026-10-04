@@ -92,9 +92,9 @@ impl SyncClient {
     ///
     /// # Arguments
     ///
-    /// * `base_url` — Root URL of the grafeo-server (e.g. `"http://localhost:7474"`).
-    /// * `db_name` — Name of the database to sync (e.g. `"default"`).
-    /// * `client_id` — Stable opaque identifier for this device/session.
+    /// * `base_url`: Root URL of the grafeo-server (e.g. `"http://localhost:7474"`).
+    /// * `db_name`: Name of the database to sync (e.g. `"default"`).
+    /// * `client_id`: Stable opaque identifier for this device/session.
     pub fn new(base_url: &str, db_name: &str, client_id: &str) -> Result<Self, SyncError> {
         let base = Url::parse(base_url).map_err(|e| SyncError::InvalidUrl(e.to_string()))?;
 

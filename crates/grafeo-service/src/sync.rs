@@ -152,7 +152,7 @@ pub struct SyncRequest {
     /// Optional schema version hash computed by the client (FNV-1a hex over
     /// sorted label names + property keys). When present, the server checks
     /// for a mismatch and reports it in `SyncResponse.schema_mismatch`.
-    /// No changes are rejected — this is a diagnostic warning only.
+    /// No changes are rejected: this is a diagnostic warning only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<String>,
 }
@@ -266,7 +266,7 @@ pub struct IdMapping {
 
 /// Pull-based changefeed and push-based apply service.
 ///
-/// Stateless — all state is borrowed from the `DatabaseManager`.
+/// Stateless: all state is borrowed from the `DatabaseManager`.
 pub struct SyncService;
 
 impl SyncService {
@@ -301,7 +301,7 @@ impl SyncService {
 
         if !entry.db().is_cdc_enabled() {
             return Err(ServiceError::BadRequest(
-                "CDC is not enabled on this database — sync requires replication mode or explicit CDC activation".to_string(),
+                "CDC is not enabled on this database: sync requires replication mode or explicit CDC activation".to_string(),
             ));
         }
 
@@ -751,7 +751,7 @@ fn sync_node_labels(
 ///
 /// When there is no CDC history for the entity (e.g., it was created via a
 /// GQL session, which does not record to the CDC log), the function returns
-/// `false` — the client change is applied unconditionally.
+/// `false`, and the client change is applied unconditionally.
 fn server_is_newer(
     session: &grafeo_engine::Session,
     entity_id: grafeo_engine::cdc::EntityId,
@@ -862,7 +862,7 @@ fn compute_schema_version(db: &grafeo_engine::GrafeoDB) -> String {
     };
     keys.sort();
 
-    // FNV-1a 64-bit hash — stable across runs for the same input.
+    // FNV-1a 64-bit hash, stable across runs for the same input.
     let mut hash: u64 = 14_695_981_039_346_656_037;
     for key in &keys {
         for &byte in key.as_bytes() {
@@ -1237,7 +1237,7 @@ mod tests {
                 kind: "update".to_string(),
                 entity_type: "node".to_string(),
                 id: Some(node.as_u64()),
-                timestamp: u64::MAX, // very new — no server conflict
+                timestamp: u64::MAX, // very new: no server conflict
                 labels: None,
                 edge_type: None,
                 src_id: None,
@@ -1297,7 +1297,7 @@ mod tests {
         let mgr = make_manager();
         let entry = mgr.get("default").unwrap();
         let node = entry.db().create_node(&["Person"]).unwrap();
-        // Write a property — this records a CDC event with a recent timestamp.
+        // Write a property: this records a CDC event with a recent timestamp.
         entry
             .db()
             .set_node_property(node, "name", grafeo_common::types::Value::from("Gus"))
@@ -1380,8 +1380,8 @@ mod tests {
         assert_ne!(resp.server_schema_version, "");
         // If the version we sent matches the server, mismatch is false; any
         // real mismatch should set it true. We can't assert a specific outcome
-        // for "0000000000000000" since a truly empty schema may equal it —
-        // instead, assert consistency: mismatch iff versions differ.
+        // for "0000000000000000" since a truly empty schema may equal it.
+        // Instead, assert consistency: mismatch iff versions differ.
         let expected_mismatch = "0000000000000000" != resp.server_schema_version;
         assert_eq!(resp.schema_mismatch, expected_mismatch);
     }

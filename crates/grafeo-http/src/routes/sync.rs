@@ -2,9 +2,9 @@
 //!
 //! # Endpoints
 //!
-//! - `GET /db/{name}/changes?since=<epoch>&limit=<n>` — pull changefeed
-//! - `POST /db/{name}/sync` — push client changes with LWW conflict resolution
-//! - `GET /db/{name}/changes/stream` — SSE push stream (requires `push-changefeed`)
+//! - `GET /db/{name}/changes?since=<epoch>&limit=<n>`: pull changefeed
+//! - `POST /db/{name}/sync`: push client changes with LWW conflict resolution
+//! - `GET /db/{name}/changes/stream`: SSE push stream (requires `push-changefeed`)
 //!
 //! Requires the `sync` feature (implies `cdc`).
 

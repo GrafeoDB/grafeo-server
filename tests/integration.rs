@@ -1242,7 +1242,7 @@ async fn query_with_timeout_ms_succeeds() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    // Large timeout — should succeed
+    // Large timeout: should succeed
     let resp = client
         .post(format!("{base}/query"))
         .json(&json!({"query": "MATCH (n) RETURN count(n)", "timeout_ms": 60000}))
@@ -1353,7 +1353,7 @@ async fn no_auth_when_not_configured() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    // Standard spawn_server has no auth — should work without token
+    // Standard spawn_server has no auth, so it should work without token
     let resp = client
         .post(format!("{base}/query"))
         .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
@@ -2307,7 +2307,7 @@ async fn gwp_delete_then_recreate_database() {
         wal_durability: None,
     };
 
-    // Create, delete, recreate — exercises the close barrier path
+    // Create, delete, recreate: exercises the close barrier path
     catalog_client.create_graph(config.clone()).await.unwrap();
     catalog_client
         .drop_graph("default", "ephemeral", false)
@@ -2650,7 +2650,7 @@ async fn admin_create_and_drop_property_index() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["dropped"], true);
 
-    // Drop again — should return false
+    // Drop again: should return false
     let resp = client
         .delete(format!("{base}/admin/default/index"))
         .json(&json!({"type": "property", "property": "name"}))
@@ -2723,7 +2723,7 @@ async fn openapi_includes_admin_and_search_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// Search endpoints (v0.4.3) — feature-dependent stubs
+// Search endpoints (v0.4.3): feature-dependent stubs
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -3193,7 +3193,7 @@ async fn bolt_database_switching() {
         .await
         .unwrap();
 
-    // Query the new database — should see the data
+    // Query the new database: should see the data
     let result = session
         .run_with_params(
             "MATCH (n:SwitchTest) RETURN n.name",
@@ -3204,7 +3204,7 @@ async fn bolt_database_switching() {
         .unwrap();
     assert_eq!(result.records.len(), 1);
 
-    // Query the default database explicitly — should NOT see the data
+    // Query the default database explicitly: should NOT see the data
     let default_extra = boltr::types::BoltDict::from([(
         "db".to_string(),
         boltr::types::BoltValue::String("default".to_string()),
@@ -5212,7 +5212,7 @@ async fn sync_updates_and_deletes() {
     );
 }
 
-/// Sync: LWW conflict detection — stale client update is rejected.
+/// Sync: LWW conflict detection, a stale client update is rejected.
 ///
 /// A node is created directly on the server (CDC records it with the current
 /// wall-clock time T). Pushing an update with timestamp=1 (which is less than T)
@@ -5702,7 +5702,7 @@ async fn websocket_query_bad_syntax_returns_error() {
 
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
 
-    // Send a query with invalid GQL — should produce a "bad_request" error frame.
+    // Send a query with invalid GQL: should produce a "bad_request" error frame.
     ws.send(tungstenite::Message::Text(
         json!({
             "type": "query",
@@ -6390,7 +6390,7 @@ async fn restore_data_rollback() {
     seed_nodes(&client, &base, "default", 5).await;
     assert_eq!(db_node_count(&client, &base, "default").await, 15);
 
-    // Restore — should roll back to 10
+    // Restore: should roll back to 10
     let resp = client
         .post(format!("{base}/admin/default/restore"))
         .json(&json!({ "backup": filename }))

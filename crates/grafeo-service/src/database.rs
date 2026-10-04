@@ -3,7 +3,7 @@
 //! Each named database is an independent `GrafeoDB` instance. The `"default"`
 //! database always exists and cannot be deleted.
 //!
-//! Session management has been moved to `SessionRegistry` — this module only
+//! Session management has been moved to `SessionRegistry`: this module only
 //! handles database lifecycle (create/delete/list/info).
 
 use std::path::{Path, PathBuf};
@@ -408,7 +408,7 @@ impl DatabaseManager {
             std::fs::create_dir_all(dir).expect("failed to create data directory");
 
             // Migration: old flat layout had `{data_dir}/grafeo.db` directly.
-            // Skip in read-only mode — can't rename on read-only mounts.
+            // Skip in read-only mode: can't rename on read-only mounts.
             let old_flat = dir.join("grafeo.db");
             if !mgr.read_only && old_flat.exists() {
                 let new_dir = dir.join("default");
@@ -881,7 +881,7 @@ impl DatabaseManager {
 
         // Explicitly drop the Arc to ensure the engine is fully released
         // before we touch the filesystem. If other references exist (e.g.,
-        // stale sessions), this won't be the final drop — but we've already
+        // stale sessions), this won't be the final drop, but we've already
         // removed from the registry so new lookups will fail.
         drop(entry);
 
@@ -1118,7 +1118,7 @@ mod tests {
             schema_filename: None,
         };
 
-        // Create, delete, immediately recreate — exercises the close barrier
+        // Create, delete, immediately recreate: exercises the close barrier
         mgr.create(&req).unwrap();
         assert!(mgr.get("ephemeral").is_some());
 
