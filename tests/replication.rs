@@ -284,6 +284,42 @@ async fn replica_rejects_mutation_via_put() {
     );
 }
 
+#[cfg(feature = "replication")]
+#[tokio::test]
+async fn replica_rejects_post_writes_but_answers_read_queries() {
+    let client = Client::new();
+    let primary = spawn_primary().await;
+    let replica = spawn_replica(&primary).await;
+
+    for (path, body) in [
+        (
+            "/db/default/upsert/nodes",
+            json!({"labels": ["Person"], "key": "name", "rows": [{"name": "Alix"}]}),
+        ),
+        ("/db", json!({"name": "copy"})),
+    ] {
+        let resp = client
+            .post(format!("{replica}{path}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 503, "POST {path}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "replica_mode", "POST {path}");
+    }
+
+    let resp = client
+        .post(format!("{replica}/query"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0, "nothing was written: {body}");
+}
+
 #[tokio::test]
 async fn replica_allows_read_queries() {
     let client = Client::new();
