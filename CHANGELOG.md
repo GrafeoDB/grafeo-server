@@ -5,7 +5,7 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.44] - Unreleased
+## [0.5.44] - 2026-10-04
 
 Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation options survive a restart, write counters on every transport, upserts by key, graph-aware sync and replication, and storage tiers in Studio. Replicas no longer lose events, the sync endpoints check authorization, and creating a database never touches an existing one. Lockstep from 0.5.40: also ships the unreleased 0.5.42 changes below.
 
