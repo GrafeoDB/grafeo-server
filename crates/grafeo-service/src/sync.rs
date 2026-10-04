@@ -298,8 +298,17 @@ impl SyncService {
         limit: usize,
     ) -> Result<ChangesResponse, ServiceError> {
         let entry = databases.get_available(db_name)?;
+        Self::pull_from(&entry.db(), since, limit)
+    }
 
-        if !entry.db().is_cdc_enabled() {
+    /// [`pull`](Self::pull) from one database instance: the change hub
+    /// checks which instance it reads before it pulls.
+    pub(crate) fn pull_from(
+        db: &grafeo_engine::GrafeoDB,
+        since: u64,
+        limit: usize,
+    ) -> Result<ChangesResponse, ServiceError> {
+        if !db.is_cdc_enabled() {
             return Err(ServiceError::BadRequest(
                 "CDC is not enabled on this database: sync requires replication mode or explicit CDC activation".to_string(),
             ));
@@ -307,12 +316,11 @@ impl SyncService {
 
         // The epoch is read before the log, so every event this pull can
         // return is at or below it.
-        let current_epoch = entry.db().current_epoch().0;
+        let current_epoch = db.current_epoch().0;
         let since_id = grafeo_common::types::EpochId(since);
         let until_id = grafeo_common::types::EpochId(current_epoch);
 
-        let mut raw = entry
-            .db()
+        let mut raw = db
             .changes_between(since_id, until_id)
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
         // Engine 0.5.44 keeps the log per (graph, entity) and sorts only by

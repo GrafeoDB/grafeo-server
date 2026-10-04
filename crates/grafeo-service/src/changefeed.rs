@@ -23,10 +23,11 @@
 //! to resume, so the subscription can end with it instead of going on with a
 //! silent gap.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use grafeo_engine::GrafeoDB;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -110,17 +111,25 @@ impl ChangeHub {
     /// Later subscribers leave the polls where they are: moving them ahead
     /// would skip events the subscribers already listening still wait for.
     ///
-    /// When the poll task stops on an error (the database was dropped, its
-    /// CDC turned off, a restore began), the receiver yields `Closed`.
+    /// When the feed stops (the database was dropped, restored or replaced
+    /// by a new one of the same name, or its CDC turned off), the receiver
+    /// yields `Closed`.
     pub fn subscribe(
         &self,
         db_name: &str,
         since_epoch: u64,
         state: ServiceState,
     ) -> broadcast::Receiver<ChangeEventDto> {
-        let start = state.databases().get(db_name).map_or(0, |entry| {
-            since_epoch.min(entry.db().current_epoch().0.saturating_add(1))
-        });
+        let (start, origin) = match state.databases().get(db_name) {
+            Some(entry) => {
+                let db = entry.db();
+                (
+                    since_epoch.min(db.current_epoch().0.saturating_add(1)),
+                    Some(Arc::downgrade(&db)),
+                )
+            }
+            None => (0, None),
+        };
         loop {
             let channel = Arc::clone(
                 &self
@@ -147,7 +156,7 @@ impl ChangeHub {
                     self.clone(),
                     db_name.to_string(),
                     Arc::clone(&channel),
-                    start,
+                    HubCursor::new(start, origin),
                     state,
                 )));
             }
@@ -251,7 +260,23 @@ pub struct LaggedNotice {
 // Background poll task
 // ---------------------------------------------------------------------------
 
-/// Polls the CDC log of `db_name` from `next_since` on and broadcasts what it
+/// Where a hub's polls stand.
+struct HubCursor {
+    /// The `since` of the next poll.
+    next_since: u64,
+    /// The database instance the polls read, once known. A restore swaps
+    /// in a new instance and a drop and recreate makes one; either is
+    /// another history, which the cursor does not apply to.
+    origin: Option<Weak<GrafeoDB>>,
+}
+
+impl HubCursor {
+    fn new(next_since: u64, origin: Option<Weak<GrafeoDB>>) -> Self {
+        Self { next_since, origin }
+    }
+}
+
+/// Polls the CDC log of `db_name` from `cursor` on and broadcasts what it
 /// finds on `channel`, until the channel has no subscribers or a poll fails.
 /// Either way it retires the channel; after a failure that closes the
 /// subscribers still on it.
@@ -259,7 +284,7 @@ async fn poll_task(
     hub: ChangeHub,
     db_name: String,
     channel: Arc<ChannelState>,
-    mut next_since: u64,
+    mut cursor: HubCursor,
     state: ServiceState,
 ) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -280,12 +305,7 @@ async fn poll_task(
             }
         }
 
-        if let Err(e) = poll_once(
-            state.databases(),
-            &db_name,
-            &channel.sender,
-            &mut next_since,
-        ) {
+        if let Err(e) = poll_once(state.databases(), &db_name, &channel.sender, &mut cursor) {
             debug!("changefeed poll error for '{db_name}': {e}; closing its subscribers");
             hub.retire(&db_name, &channel, &mut channel.poller.lock());
             return;
@@ -293,21 +313,42 @@ async fn poll_task(
     }
 }
 
-/// Pulls the events from `next_since` on and broadcasts them. When there
-/// were any, it moves `next_since` past the pull's resume cursor, so the next
-/// poll neither repeats an event nor skips one a cut batch left out. An empty
-/// pull leaves it where it is: staying put skips nothing, while an empty
-/// pull's cursor can name an epoch that is still open (0 before the first
-/// write).
+/// Pulls the events from `cursor.next_since` on and broadcasts them. When
+/// there were any, it moves the cursor past the pull's resume cursor, so the
+/// next poll neither repeats an event nor skips one a cut batch left out. An
+/// empty pull leaves it where it is: staying put skips nothing, while an
+/// empty pull's cursor can name an epoch that is still open (0 before the
+/// first write).
+///
+/// A database that is no longer the instance the cursor belongs to (restored,
+/// or dropped and created again between two polls) fails the poll, and so
+/// does one whose epoch went back below the cursor: the cursor means nothing
+/// in that history, and staying on it would stall the subscribers silently.
 fn poll_once(
     databases: &DatabaseManager,
     db_name: &str,
     sender: &broadcast::Sender<ChangeEventDto>,
-    next_since: &mut u64,
+    cursor: &mut HubCursor,
 ) -> Result<(), ServiceError> {
-    let resp = SyncService::pull(databases, db_name, *next_since, POLL_LIMIT)?;
+    let db = databases.get_available(db_name)?.db();
+    let replaced = || {
+        ServiceError::Unavailable(format!(
+            "database '{db_name}' was restored or replaced; its change feed ends"
+        ))
+    };
+    match &cursor.origin {
+        Some(origin) if !std::ptr::eq(origin.as_ptr(), Arc::as_ptr(&db)) => {
+            return Err(replaced());
+        }
+        Some(_) => {}
+        None => cursor.origin = Some(Arc::downgrade(&db)),
+    }
+    if cursor.next_since > db.current_epoch().0.saturating_add(1) {
+        return Err(replaced());
+    }
+    let resp = SyncService::pull_from(&db, cursor.next_since, POLL_LIMIT)?;
     if !resp.changes.is_empty() {
-        *next_since = (*next_since).max(resp.server_epoch.saturating_add(1));
+        cursor.next_since = cursor.next_since.max(resp.server_epoch.saturating_add(1));
     }
     for event in resp.changes {
         // Ignore send errors: lagged receivers will get a `RecvError::Lagged`.
@@ -356,17 +397,17 @@ mod tests {
     fn a_second_poll_does_not_redeliver_the_cursor_epoch() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let mut next_since = 0;
+        let mut cursor = HubCursor::new(0, None);
         insert_nodes(&mgr, "A", 2);
 
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         assert_eq!(received(&mut rx).len(), 2);
 
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         assert!(received(&mut rx).is_empty(), "nothing new, nothing sent");
 
         insert_nodes(&mgr, "B", 1);
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         let events = received(&mut rx);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].labels.as_deref(), Some(&["B".to_string()][..]));
@@ -376,14 +417,14 @@ mod tests {
     fn an_empty_poll_leaves_the_cursor_and_the_next_write_arrives() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let mut next_since = 0;
+        let mut cursor = HubCursor::new(0, None);
 
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         assert!(received(&mut rx).is_empty());
-        assert_eq!(next_since, 0, "nothing seen, nothing passed");
+        assert_eq!(cursor.next_since, 0, "nothing seen, nothing passed");
 
         insert_nodes(&mgr, "A", 1);
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         assert_eq!(received(&mut rx).len(), 1);
     }
 
@@ -394,9 +435,9 @@ mod tests {
     fn an_epoch_zero_triple_event_after_an_empty_poll_arrives() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let mut next_since = 0;
+        let mut cursor = HubCursor::new(0, None);
 
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         assert!(received(&mut rx).is_empty());
 
         mgr.get("default")
@@ -407,7 +448,7 @@ mod tests {
                 "INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }",
             )
             .unwrap();
-        poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
         let events = received(&mut rx);
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].entity_type, "triple");
@@ -504,6 +545,73 @@ mod tests {
         // A subscription to the missing database closes too.
         let mut again = hub.subscribe("gone", 0, state.clone());
         assert!(matches!(recv(&mut again).await, Err(RecvError::Closed)));
+    }
+
+    /// Subscribes to `name`, then waits until the hub has moved past one
+    /// write, so its cursor is ahead of a fresh database's epoch.
+    async fn subscribed_past_a_write(
+        hub: &ChangeHub,
+        state: &ServiceState,
+        name: &str,
+    ) -> broadcast::Receiver<ChangeEventDto> {
+        let mut rx = hub.subscribe(name, 0, state.clone());
+        let db = state.databases().get(name).unwrap().db();
+        db.create_node(&["Old"]).unwrap();
+        db.create_node(&["Old"]).unwrap();
+        recv(&mut rx).await.unwrap();
+        recv(&mut rx).await.unwrap();
+        rx
+    }
+
+    /// A fresh in-memory database with CDC on: epoch 0, another history.
+    fn fresh_cdc_db() -> Arc<GrafeoDB> {
+        let db = GrafeoDB::new_in_memory();
+        db.set_cdc_enabled(true);
+        Arc::new(db)
+    }
+
+    #[tokio::test]
+    async fn a_restore_between_two_polls_closes_the_subscribers() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        create_cdc_database(&state, "restored");
+        let mut rx = subscribed_past_a_write(&hub, &state, "restored").await;
+
+        // What a restore does, between two polls (the test runtime runs the
+        // poll task only when the test awaits).
+        state
+            .databases()
+            .get("restored")
+            .unwrap()
+            .swap_db(fresh_cdc_db());
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn a_database_recreated_between_two_polls_closes_the_subscribers() {
+        let state = cdc_state();
+        let hub = ChangeHub::new();
+        create_cdc_database(&state, "again");
+        let mut rx = subscribed_past_a_write(&hub, &state, "again").await;
+
+        state.databases().delete("again").unwrap();
+        create_cdc_database(&state, "again");
+        assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
+    }
+
+    #[test]
+    fn a_cursor_past_the_next_epoch_ends_the_feed() {
+        let mgr = cdc_manager();
+        let (sender, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        // The epoch went back below the cursor (a database at epoch 0).
+        let mut cursor = HubCursor::new(2, None);
+        assert!(matches!(
+            poll_once(&mgr, "default", &sender, &mut cursor),
+            Err(ServiceError::Unavailable(_))
+        ));
+        // One past the current epoch is where a caught-up cursor stands.
+        let mut cursor = HubCursor::new(1, None);
+        poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
     }
 
     #[tokio::test]
@@ -628,7 +736,7 @@ mod tests {
     fn polls_deliver_a_burst_larger_than_the_poll_limit_once() {
         let mgr = cdc_manager();
         let (sender, mut rx) = broadcast::channel(CHANNEL_CAPACITY);
-        let mut next_since = 0;
+        let mut cursor = HubCursor::new(0, None);
         // Three epochs of 300 events: more than POLL_LIMIT in all.
         for label in ["A", "B", "C"] {
             insert_nodes(&mgr, label, 300);
@@ -636,7 +744,7 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..3 {
-            poll_once(&mgr, "default", &sender, &mut next_since).unwrap();
+            poll_once(&mgr, "default", &sender, &mut cursor).unwrap();
             ids.extend(received(&mut rx).into_iter().map(|e| e.id));
         }
         assert_eq!(ids.len(), 900, "every event once");
