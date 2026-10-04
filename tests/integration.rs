@@ -5309,6 +5309,51 @@ async fn sync_limit_truncation() {
     );
 }
 
+/// `GET /db/{name}/changes`: a named-graph event carries `graph` and a label
+/// change carries `before_labels` in the JSON.
+#[cfg(feature = "sync")]
+#[tokio::test]
+async fn sync_changes_json_has_graph_and_before_labels() {
+    let state = sync_state();
+    {
+        let db = state.databases().get("default").unwrap().db();
+        db.execute("CREATE GRAPH g2").unwrap();
+        let session = db.session();
+        session.use_graph("g2");
+        session.execute("INSERT (:InG2)").unwrap();
+        db.session().execute("INSERT (:Draft)").unwrap();
+        db.session()
+            .execute("MATCH (n:Draft) SET n:Published")
+            .unwrap();
+    }
+    let base = spawn_server_from_state(state).await;
+
+    let page: Value = Client::new()
+        .get(format!("{base}/db/default/changes?since=0&limit=100"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let changes = page["changes"].as_array().unwrap();
+    let in_g2 = changes
+        .iter()
+        .find(|c| c["labels"] == json!(["InG2"]))
+        .expect("the named-graph event");
+    assert_eq!(in_g2["graph"], "g2");
+    let in_default = changes
+        .iter()
+        .find(|c| c["labels"] == json!(["Draft"]))
+        .expect("the default-graph event");
+    assert!(in_default.get("graph").is_none_or(Value::is_null));
+    let relabel = changes
+        .iter()
+        .find(|c| c.get("before_labels").is_some_and(|v| !v.is_null()))
+        .expect("the label-change event");
+    assert_eq!(relabel["before_labels"], json!(["Draft"]));
+}
+
 /// Sync: missing required fields produce descriptive conflict reasons.
 ///
 /// Verifies the three structural validation errors: `update_missing_id`,

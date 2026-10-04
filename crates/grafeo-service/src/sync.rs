@@ -694,6 +694,9 @@ fn apply_op(target: &grafeo_engine::Session, op: ChangeOp<'_>, timestamp: u64) -
             // Properties first, then labels (adds before removes). Nothing is
             // rolled back if a later step fails, so a failed change can be
             // partly applied (a superset of the target labels, never a loss).
+            // The same holds for the property loop: a schema violation on a
+            // later property leaves the earlier properties of this change
+            // written (there is no per-change transaction yet).
             let props = after.map_or(Ok(()), |after| {
                 json_to_props(after)
                     .try_for_each(|(key, val)| target.set_node_property(id, &key, val))
@@ -1664,6 +1667,7 @@ mod tests {
         let resp = SyncService::apply(&mgr, "default", req).unwrap();
         assert_eq!(resp.applied, 0);
         assert_eq!(resp.id_mappings.len(), 0);
+        assert_eq!(resp.conflicts.len(), 1);
         assert!(resp.conflicts[0].reason.starts_with("write_failed:"));
     }
 
@@ -1689,6 +1693,32 @@ mod tests {
         assert_eq!(
             order, sorted,
             "events must be ordered by (epoch, timestamp)"
+        );
+
+        // Event counts: four nodes and three edges created, then DETACH DELETE
+        // removes two edges and the node, in a later epoch than the creates.
+        let of = |kind: &str, entity: &str| {
+            changes
+                .iter()
+                .filter(|e| e.kind == kind && e.entity_type == entity)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(of("create", "node").len(), 4);
+        assert_eq!(of("create", "edge").len(), 3);
+        assert_eq!(of("delete", "edge").len(), 2);
+        assert_eq!(of("delete", "node").len(), 1);
+        let last_create = changes
+            .iter()
+            .filter(|e| e.kind == "create")
+            .map(|e| e.epoch)
+            .max()
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .filter(|e| e.kind == "delete")
+                .all(|e| e.epoch > last_create),
+            "the DETACH DELETE events come in a later epoch than the creates"
         );
 
         let mut live_nodes = std::collections::HashSet::new();
@@ -1969,6 +1999,125 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A change's conflict reason when it is the only one and nothing applied.
+    fn only_conflict(resp: &SyncResponse) -> &str {
+        assert_eq!(resp.applied, 0, "{:?}", resp.conflicts);
+        assert_eq!(resp.conflicts.len(), 1, "{:?}", resp.conflicts);
+        &resp.conflicts[0].reason
+    }
+
+    #[test]
+    fn deleting_a_node_that_still_has_edges_is_write_failed() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        let a = db.create_node(&["A"]).unwrap();
+        let b = db.create_node(&["B"]).unwrap();
+        db.create_edge(a, b, "R").unwrap();
+
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                id: Some(a.as_u64()),
+                // Newer than the server's history, so the LWW check passes.
+                timestamp: u64::MAX,
+                ..bare_change("delete", "node")
+            }],
+        );
+        assert!(
+            only_conflict(&resp).starts_with("write_failed:"),
+            "{:?}",
+            resp.conflicts
+        );
+        assert!(db.get_node(a).is_some(), "the node is still there");
+    }
+
+    #[test]
+    fn a_crdt_op_on_a_missing_node_is_write_failed() {
+        let mgr = make_manager();
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                id: Some(424_242),
+                crdt_op: Some(CrdtOp::Increment {
+                    amount: 1,
+                    replica_id: "r".to_string(),
+                }),
+                crdt_property: Some("n".to_string()),
+                ..bare_change("update", "node")
+            }],
+        );
+        assert!(
+            only_conflict(&resp).starts_with("write_failed:"),
+            "{:?}",
+            resp.conflicts
+        );
+    }
+
+    #[test]
+    fn an_lww_edge_update_on_a_missing_edge_is_write_failed() {
+        let mgr = make_manager();
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                id: Some(777_777),
+                after: Some(serde_json::json!({"since": {"Int64": 2020}})),
+                ..bare_change("update", "edge")
+            }],
+        );
+        assert!(
+            only_conflict(&resp).starts_with("write_failed:"),
+            "{:?}",
+            resp.conflicts
+        );
+    }
+
+    #[test]
+    fn a_graph_key_with_two_slashes_is_graph_unavailable() {
+        let mgr = make_manager();
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                labels: Some(vec!["X".to_string()]),
+                graph: Some("a/b/c".to_string()),
+                ..bare_change("create", "node")
+            }],
+        );
+        assert!(
+            only_conflict(&resp).starts_with("graph_unavailable:a/b/c"),
+            "{:?}",
+            resp.conflicts
+        );
+    }
+
+    #[test]
+    fn replay_into_a_schemas_default_graph() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.execute("CREATE SCHEMA s1").unwrap();
+
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                labels: Some(vec!["InS1".to_string()]),
+                graph: Some("s1/__default__".to_string()),
+                ..bare_change("create", "node")
+            }],
+        );
+        assert_eq!(resp.applied, 1, "{:?}", resp.conflicts);
+        assert!(resp.conflicts.is_empty());
+
+        // The write is logged under the schema's default graph, and not in
+        // the database's default graph.
+        let changes = SyncService::pull(&mgr, "default", 0, 1000).unwrap().changes;
+        let event = changes
+            .iter()
+            .find(|e| e.labels.as_deref() == Some(&["InS1".to_string()][..]))
+            .expect("the node's create event");
+        assert_eq!(event.graph.as_deref(), Some("s1/__default__"));
+        let in_default = db.execute("MATCH (n:InS1) RETURN count(n)").unwrap();
+        assert_eq!(in_default.rows()[0][0], grafeo_common::Value::Int64(0));
     }
 
     #[test]
