@@ -393,75 +393,30 @@ impl AdminService {
     ///
     /// Requires exclusive access to the database (no active sessions or
     /// concurrent requests holding a reference).
+    ///
+    /// Taking the database out of the registry, compacting it and putting it
+    /// back run in one blocking task that owns a handle on the service, so a
+    /// caller that stops waiting (a dropped request) cannot leave the
+    /// database out of the registry: the task finishes and puts it back.
     #[cfg(feature = "compact-store")]
-    pub async fn compact(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
-        if databases.is_read_only() {
+    pub async fn compact(state: &crate::ServiceState, db_name: &str) -> Result<(), ServiceError> {
+        if state.databases().is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
-
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-        use std::sync::Arc;
-
-        let db_entry = databases.take_exclusive(db_name)?;
+        let state = state.clone();
         let name = db_name.to_owned();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let (db_arc, mut metadata) = db_entry.into_parts();
-            // `try_unwrap` needs only the one strong reference; weak ones
-            // (a live change feed keeps one to tell instances apart) do not
-            // stand in the way, unlike with `Arc::get_mut`. The database
-            // goes back in a new `Arc`: a new instance to a change feed,
-            // which ends its subscriptions.
-            let mut db = match Arc::try_unwrap(db_arc) {
-                Ok(db) => db,
-                Err(shared) => {
-                    return Err((
-                        DatabaseEntry::new(shared, metadata),
-                        ServiceError::Conflict(
-                            "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
-                        ),
-                    ));
-                }
-            };
-
-            match catch_unwind(AssertUnwindSafe(|| db.compact())) {
-                Ok(Ok(())) => {
-                    metadata.storage_mode = "compact".to_string();
-                    Ok(DatabaseEntry::new(Arc::new(db), metadata))
-                }
-                Ok(Err(e)) => Err((
-                    DatabaseEntry::new(Arc::new(db), metadata),
-                    ServiceError::Internal(format!("compaction failed: {e}")),
-                )),
-                Err(_panic) => Err((
-                    DatabaseEntry::new(Arc::new(db), metadata),
-                    ServiceError::Internal("compaction panicked".to_string()),
-                )),
-            }
-        })
-        .await
-        .expect("compact: spawn_blocking task should not be cancelled");
-
-        match result {
-            Ok(compacted) => {
-                databases.reinsert(name.clone(), compacted);
-                tracing::info!(name = %name, "Database compacted to columnar read-only store");
-                Ok(())
-            }
-            Err((original, err)) => {
-                databases.reinsert(name, original);
-                Err(err)
-            }
-        }
+        tokio::task::spawn_blocking(move || compact_in_place(state.databases(), &name))
+            .await
+            .map_err(|e| ServiceError::Internal(format!("compaction task failed: {e}")))?
     }
 
     /// Compact stub when the `compact-store` feature is disabled.
     #[cfg(not(feature = "compact-store"))]
     pub fn compact(
-        databases: &DatabaseManager,
+        state: &crate::ServiceState,
         _db_name: &str,
     ) -> impl Future<Output = Result<(), ServiceError>> {
-        std::future::ready(if databases.is_read_only() {
+        std::future::ready(if state.databases().is_read_only() {
             Err(ServiceError::ReadOnly)
         } else {
             Err(ServiceError::BadRequest(
@@ -760,6 +715,67 @@ impl AdminService {
     }
 }
 
+/// Takes `db_name` out of the registry, compacts it and puts it back, the
+/// original when compaction fails. Blocking.
+#[cfg(feature = "compact-store")]
+fn compact_in_place(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
+    let db_entry = databases.take_exclusive(db_name)?;
+    let result = compact_entry(db_entry);
+
+    match result {
+        Ok(compacted) => {
+            databases.reinsert(db_name.to_owned(), compacted);
+            tracing::info!(name = %db_name, "Database compacted to columnar read-only store");
+            Ok(())
+        }
+        Err((original, err)) => {
+            databases.reinsert(db_name.to_owned(), original);
+            Err(err)
+        }
+    }
+}
+
+/// Compacts the database of `db_entry`: the compacted entry, or the original
+/// with the error.
+#[cfg(feature = "compact-store")]
+fn compact_entry(db_entry: DatabaseEntry) -> Result<DatabaseEntry, (DatabaseEntry, ServiceError)> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+
+    let (db_arc, mut metadata) = db_entry.into_parts();
+    // `try_unwrap` needs only the one strong reference; weak ones
+    // (a live change feed keeps one to tell instances apart) do not
+    // stand in the way, unlike with `Arc::get_mut`. The database
+    // goes back in a new `Arc`: a new instance to a change feed,
+    // which ends its subscriptions.
+    let mut db = match Arc::try_unwrap(db_arc) {
+        Ok(db) => db,
+        Err(shared) => {
+            return Err((
+                DatabaseEntry::new(shared, metadata),
+                ServiceError::Conflict(
+                    "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
+                ),
+            ));
+        }
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| db.compact())) {
+        Ok(Ok(())) => {
+            metadata.storage_mode = "compact".to_string();
+            Ok(DatabaseEntry::new(Arc::new(db), metadata))
+        }
+        Ok(Err(e)) => Err((
+            DatabaseEntry::new(Arc::new(db), metadata),
+            ServiceError::Internal(format!("compaction failed: {e}")),
+        )),
+        Err(_panic) => Err((
+            DatabaseEntry::new(Arc::new(db), metadata),
+            ServiceError::Internal("compaction panicked".to_string()),
+        )),
+    }
+}
+
 /// Reject names containing `/`, which grafeo-engine uses internally as the
 /// `schema/graph` compound storage-key separator. Catching this at the service
 /// layer surfaces as a clean 400 instead of a scrubbed 500 from the engine.
@@ -805,6 +821,65 @@ fn calculate_db_disk_usage(dir: &Path) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::ServiceState;
+
+    #[cfg(feature = "compact-store")]
+    #[test]
+    fn a_dropped_compaction_request_still_puts_the_database_back() {
+        // One blocking thread, held by a task that waits for a signal: the
+        // compaction queues behind it, so the caller gives up before any of
+        // it runs.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = ServiceState::new_in_memory(300);
+            state
+                .databases()
+                .create(&types::CreateDatabaseRequest {
+                    name: "columns".to_string(),
+                    database_type: types::DatabaseType::Lpg,
+                    storage_mode: types::StorageMode::InMemory,
+                    options: types::DatabaseOptions::default(),
+                    schema_file: None,
+                    schema_filename: None,
+                })
+                .unwrap();
+            let db = state.databases().get("columns").unwrap().db();
+            for _ in 0..3 {
+                db.create_node(&["Kept"]).unwrap();
+            }
+            drop(db);
+
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || wait.recv().ok());
+
+            // The caller stops waiting at once, as a dropped request does.
+            let gave_up = tokio::time::timeout(
+                std::time::Duration::ZERO,
+                AdminService::compact(&state, "columns"),
+            )
+            .await;
+            assert!(gave_up.is_err(), "the compaction was still queued");
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    if let Some(entry) = state.databases().get("columns")
+                        && entry.metadata.storage_mode == "compact"
+                    {
+                        break entry;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the compacted database is back in the registry");
+            assert_eq!(entry.db().node_count(), 3, "readable, nothing lost");
+        });
+    }
 
     #[tokio::test]
     async fn test_database_stats_default_db() {

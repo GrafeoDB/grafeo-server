@@ -290,6 +290,14 @@ pub fn ensure_migrated(backup_dir: &Path) {
 /// Stateless backup and restore operations.
 pub struct BackupService;
 
+/// The files an epoch restore moves: the live database, the staging file the
+/// chain is replayed into, and where the original waits during the swap.
+struct EpochRestorePaths {
+    db_file: PathBuf,
+    staged: PathBuf,
+    previous: PathBuf,
+}
+
 impl BackupService {
     /// Create a full backup of a database.
     ///
@@ -473,6 +481,42 @@ impl BackupService {
             }
         };
 
+        // The rest runs in a task of its own: a caller that stops waiting (a
+        // dropped request) cannot leave the database in Restoring, or closed
+        // with its files half swapped.
+        let task = Self::finish_epoch_restore(
+            entry,
+            db_name.to_owned(),
+            target_epoch,
+            backup_sub,
+            EpochRestorePaths {
+                db_file,
+                staged,
+                previous,
+            },
+            reopen_config,
+        );
+        tokio::spawn(task)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("epoch restore task failed: {e}")))?
+    }
+
+    /// The part of [`restore_to_epoch`](Self::restore_to_epoch) after the
+    /// database is marked Restoring: replay into the staging file, swap it
+    /// in, reopen. It owns what it needs, so it can run as a task of its own.
+    async fn finish_epoch_restore(
+        entry: Arc<DatabaseEntry>,
+        db_name: String,
+        target_epoch: u64,
+        backup_sub: PathBuf,
+        paths: EpochRestorePaths,
+        reopen_config: Config,
+    ) -> Result<(), ServiceError> {
+        let EpochRestorePaths {
+            db_file,
+            staged,
+            previous,
+        } = paths;
         // Engine 0.5.43+ never restores over an existing database, so the
         // chain is replayed into a staging file before the live handle
         // closes. A chain that fails to replay leaves the live database
@@ -536,8 +580,13 @@ impl BackupService {
             // Reopen only when the original is back in place and nothing is
             // left at the pre-restore path.
             if db_file.exists() && !db_files_exist(&previous) {
-                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name, &reopen_config)
-                    .await;
+                Self::recover_after_failed_epoch_restore(
+                    &entry,
+                    &db_file,
+                    &db_name,
+                    &reopen_config,
+                )
+                .await;
             } else {
                 tracing::error!(
                     database = %db_name,
@@ -598,7 +647,7 @@ impl BackupService {
                         Self::recover_after_failed_epoch_restore(
                             &entry,
                             &db_file,
-                            db_name,
+                            &db_name,
                             &reopen_config,
                         )
                         .await;
@@ -749,20 +798,29 @@ impl BackupService {
             ));
         }
 
-        let (result, has_valid_handle) = Self::do_restore(
-            &entry,
-            db_name,
-            backup_path,
-            &db_dir,
-            data_dir,
-            reopen_config,
-        )
-        .await;
-
-        if has_valid_handle {
-            entry.set_available();
-        }
-        result
+        // The rest runs in a task of its own: a caller that stops waiting (a
+        // dropped request) cannot leave the database in Restoring, or closed
+        // without its files.
+        let name = db_name.to_owned();
+        let backup_path = backup_path.to_path_buf();
+        let data_dir = data_dir.to_path_buf();
+        tokio::spawn(async move {
+            let (result, has_valid_handle) = Self::do_restore(
+                &entry,
+                &name,
+                &backup_path,
+                &db_dir,
+                &data_dir,
+                reopen_config,
+            )
+            .await;
+            if has_valid_handle {
+                entry.set_available();
+            }
+            result
+        })
+        .await
+        .map_err(|e| ServiceError::Internal(format!("restore task failed: {e}")))?
     }
 
     async fn do_restore(
@@ -1342,6 +1400,114 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `test` on a runtime with one blocking thread. `hold` occupies it
+    /// until the returned sender is used, so work the code under test hands
+    /// to `spawn_blocking` queues behind it.
+    fn with_one_blocking_thread<F: std::future::Future<Output = ()>>(test: impl FnOnce() -> F) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(test());
+    }
+
+    fn hold_the_blocking_thread() -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let held = tokio::task::spawn_blocking(move || {
+            let _ = wait.recv();
+        });
+        (release, held)
+    }
+
+    /// A persistent `default` with one node and a full backup of it, then a
+    /// second node: a restore brings it back to one.
+    async fn backed_up_then_changed(
+        data_dir: &Path,
+        backup_dir: &Path,
+    ) -> (DatabaseManager, types::BackupEntry) {
+        let mgr = DatabaseManager::new(Some(data_dir.to_str().unwrap()), false);
+        let db = mgr.get("default").unwrap().db();
+        db.session()
+            .execute("INSERT (:Person {name: 'Alix'})")
+            .unwrap();
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir, None)
+            .await
+            .unwrap();
+        db.session()
+            .execute("INSERT (:Person {name: 'Gus'})")
+            .unwrap();
+        assert_eq!(db.node_count(), 2);
+        (mgr, backup)
+    }
+
+    /// Waits until `default` is available again and holds `nodes` nodes.
+    async fn back_with(mgr: &DatabaseManager, nodes: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Ok(entry) = mgr.get_available("default")
+                    && entry.db().node_count() == nodes
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the restore finished and the database is available");
+    }
+
+    #[test]
+    fn a_dropped_full_restore_request_still_finishes_the_restore() {
+        with_one_blocking_thread(|| async {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backup_dir = tempfile::tempdir().unwrap();
+            let (mgr, backup) = backed_up_then_changed(data_dir.path(), backup_dir.path()).await;
+            let file_path = db_backup_dir(backup_dir.path(), "default")
+                .unwrap()
+                .join(&backup.filename);
+
+            let (release, held) = hold_the_blocking_thread();
+            // The caller stops waiting at once, as a dropped request does.
+            let gave_up = tokio::time::timeout(
+                std::time::Duration::ZERO,
+                BackupService::restore_database(&mgr, "default", &file_path, backup_dir.path()),
+            )
+            .await;
+            assert!(gave_up.is_err(), "the restore was still queued");
+
+            release.send(()).unwrap();
+            held.await.unwrap();
+            back_with(&mgr, 1).await;
+        });
+    }
+
+    #[test]
+    fn a_dropped_epoch_restore_request_still_finishes_the_restore() {
+        with_one_blocking_thread(|| async {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backup_dir = tempfile::tempdir().unwrap();
+            let (mgr, backup) = backed_up_then_changed(data_dir.path(), backup_dir.path()).await;
+
+            let (release, held) = hold_the_blocking_thread();
+            let gave_up = tokio::time::timeout(
+                std::time::Duration::ZERO,
+                BackupService::restore_to_epoch(
+                    &mgr,
+                    "default",
+                    backup.end_epoch,
+                    backup_dir.path(),
+                ),
+            )
+            .await;
+            assert!(gave_up.is_err(), "the restore was still queued");
+
+            release.send(()).unwrap();
+            held.await.unwrap();
+            back_with(&mgr, 1).await;
+        });
+    }
 
     #[test]
     fn move_db_files_rolls_back_when_the_sidecar_cannot_move() {

@@ -264,7 +264,7 @@ pub async fn admin_compact(
     Path(db): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     auth.check_admin()?;
-    AdminService::compact(state.databases(), &db).await?;
+    AdminService::compact(state.service(), &db).await?;
     Ok(Json(serde_json::json!({ "compacted": true })))
 }
 

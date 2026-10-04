@@ -646,7 +646,7 @@ mod tests {
         create_cdc_database(&state, "columnar");
         let mut rx = subscribed_past_a_write(&hub, &state, "columnar").await;
 
-        crate::admin::AdminService::compact(state.databases(), "columnar")
+        crate::admin::AdminService::compact(&state, "columnar")
             .await
             .expect("a live feed does not block compaction");
         assert_eq!(
