@@ -2021,6 +2021,52 @@ async fn gwp_execute_query() {
     session.close().await.unwrap();
 }
 
+#[cfg(all(feature = "gwp", feature = "text-index"))]
+#[tokio::test]
+async fn gwp_call_grafeo_search_text() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let http_client = Client::new();
+
+    // Seed text-indexable data via HTTP (same pattern as gwp_execute_query).
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // Create a text index via HTTP (no GWP admin path for this in scope).
+    let idx = http_client
+        .post(format!("{http}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure via GWP.
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("GWP execute of search.text failed");
+
+    let rows = cursor.collect_rows().await.unwrap();
+    assert!(!rows.is_empty(), "expected at least one match for 'fox'");
+
+    session.close().await.unwrap();
+}
+
 #[cfg(feature = "gwp")]
 #[tokio::test]
 async fn gwp_transaction_commit() {
@@ -3199,6 +3245,50 @@ async fn bolt_language_dispatch() {
     session.close().await.unwrap();
 }
 
+#[cfg(all(feature = "bolt", feature = "text-index"))]
+#[tokio::test]
+async fn bolt_call_grafeo_search_text() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let http_client = Client::new();
+
+    // Seed text-indexable data via HTTP (same pattern as bolt_execute_query).
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // Create a text index via HTTP (no Bolt admin path for this in scope).
+    let idx = http_client
+        .post(format!("{http}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure via Bolt.
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let result = session
+        .run("CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score")
+        .await
+        .expect("Bolt run of search.text failed");
+
+    assert!(
+        !result.records.is_empty(),
+        "expected at least one match for 'fox'"
+    );
+
+    session.close().await.unwrap();
+}
+
 // ===========================================================================
 // Memory usage endpoint (v0.4.7)
 // ===========================================================================
@@ -3237,6 +3327,35 @@ async fn admin_memory_usage_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn admin_memory_usage_includes_buffer_manager_breakdown() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let body: Value = client
+        .get(format!("{base}/admin/default/memory"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Engine 0.5.41 expanded the buffer_manager block; assert the object is
+    // non-empty and contains at least one of the canonical numeric fields.
+    let bm = body["buffer_manager"]
+        .as_object()
+        .expect("buffer_manager object");
+    assert!(
+        bm.contains_key("allocated_bytes")
+            || bm.contains_key("budget_bytes")
+            || bm.contains_key("execution_buffers_bytes")
+            || bm.contains_key("graph_storage_bytes")
+            || bm.contains_key("index_buffers_bytes")
+            || bm.contains_key("spill_staging_bytes"),
+        "buffer_manager should expose breakdown fields; got {bm:?}"
+    );
 }
 
 // ===========================================================================

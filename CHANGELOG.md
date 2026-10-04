@@ -5,6 +5,27 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.42] - 2026-05-04
+
+Engine 0.5.42 alignment: storage tier introspection and control, end-to-end search procedure coverage. Lockstep version bump from 0.5.40 (0.5.41 was not released as a server version).
+
+### Added
+
+- **`GET /admin/{db}/storage-tiers`**: returns the current storage tier (`in_memory` / `on_disk` / `uninitialized`) of every section consumer in a database. Surfaces engine 0.5.42's `db.storage_tiers()` API.
+- **`POST /admin/{db}/reload-eligible`**: brings spilled sections back into RAM in priority order, stopping when projected memory usage exceeds `target_fraction * memory_limit`. Body: `{ "target_fraction": 0.7 }`. Returns `{ "reloaded": <count> }`. Surfaces `db.reload_eligible()`.
+- **`section_tiers` field on `DatabaseOptions`**: per-section tier override applied at db creation. Maps section names (`LpgStore`, `RdfStore`, `CompactStore`, `VectorStore`, `TextIndex`, `RdfRing`, `PropertyIndex`, `Catalog`) to tier strings (`auto` / `force_ram` / `force_disk`). Calls engine `Config::with_section_tier`.
+- **Search procedure smoke coverage**: HTTP, GWP, and Bolt integration tests now exercise `CALL grafeo.search.text` end-to-end; HTTP also covers `CALL grafeo.search.vector`.
+
+### Changed
+
+- **grafeo-engine 0.5.42**: tiered storage (mmap spill, paged HNSW, packed RDF Ring), per-block columnar zone maps for selective range scans, WAL overlay for mutable mmap'd LPG, streaming top-K operator (planner fuses `ORDER BY ... LIMIT k`), `var.prop IN [literals]` property-index fast path, filter pushdown through `LeftJoin`/`Apply`/`Union`/`Unwind`. Also picks up engine 0.5.41's `CALL grafeo.search.*` procedures, `RawI64` columnar codec, disk-backed compact base, RDF/CDC memory breakdown blocks, and the WAL/CDC search-wrapper fix that previously made text/vector search silently no-op on file-backed DBs.
+
+### Fixed
+
+- *(none server-side: every fix in 0.5.41 + 0.5.42 was inside the engine and reaches us through the dependency bump.)*
+
+---
+
 ## [0.5.40] - 2026-04-20
 
 Engine 0.5.40 alignment: catalog name validation, stats simplification.
