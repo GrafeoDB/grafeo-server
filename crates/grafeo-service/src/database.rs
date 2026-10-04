@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,19 @@ fn write_stored_options(db_dir: &Path, stored: &StoredOptions) -> Result<(), Ser
     std::fs::write(&tmp, json)
         .and_then(|()| std::fs::rename(&tmp, db_dir.join(OPTIONS_FILE)))
         .map_err(|e| ServiceError::Internal(format!("failed to write options.json: {e}")))
+}
+
+/// Releases a name reserved by [`DatabaseManager::reserve_name`] on drop, so
+/// early returns and `?` cannot leak a reservation.
+struct CreateReservation<'a> {
+    creating: &'a DashSet<String>,
+    name: &'a str,
+}
+
+impl Drop for CreateReservation<'_> {
+    fn drop(&mut self) {
+        self.creating.remove(self.name);
+    }
 }
 
 /// Undoes a failed [`DatabaseManager::create`] after the directory step.
@@ -343,6 +356,9 @@ impl DatabaseEntry {
 /// Thread-safe registry of named database instances.
 pub struct DatabaseManager {
     databases: DashMap<String, Arc<DatabaseEntry>>,
+    /// Names with a `create` in flight, so two creates of one name cannot both
+    /// pass the on-disk check and then roll back each other's files.
+    creating: DashSet<String>,
     /// If `Some`, databases are persisted under `{data_dir}/{name}/data.grafeo`.
     data_dir: Option<PathBuf>,
     /// When `true`, reject all write operations.
@@ -359,6 +375,7 @@ impl DatabaseManager {
     pub fn new(data_dir: Option<&str>, read_only: bool) -> Self {
         let mgr = Self {
             databases: DashMap::new(),
+            creating: DashSet::new(),
             data_dir: data_dir.map(PathBuf::from),
             read_only,
             #[cfg(feature = "cdc")]
@@ -582,6 +599,20 @@ impl DatabaseManager {
         }
     }
 
+    /// Reserves `name` for a `create` in flight; the guard releases it on drop.
+    fn reserve_name<'a>(&'a self, name: &'a str) -> Result<CreateReservation<'a>, ServiceError> {
+        if self.creating.insert(name.to_string()) {
+            Ok(CreateReservation {
+                creating: &self.creating,
+                name,
+            })
+        } else {
+            Err(ServiceError::Conflict(format!(
+                "database '{name}' is being created"
+            )))
+        }
+    }
+
     /// Creates a new named database from a full request.
     pub fn create(&self, req: &CreateDatabaseRequest) -> Result<(), ServiceError> {
         if self.read_only {
@@ -597,6 +628,14 @@ impl DatabaseManager {
             )));
         }
 
+        if self.databases.contains_key(name.as_str()) {
+            return Err(ServiceError::Conflict(format!(
+                "database '{name}' already exists"
+            )));
+        }
+
+        let _reservation = self.reserve_name(name)?;
+        // Re-check: another create may have finished between the two checks.
         if self.databases.contains_key(name.as_str()) {
             return Err(ServiceError::Conflict(format!(
                 "database '{name}' already exists"
@@ -656,9 +695,13 @@ impl DatabaseManager {
         // Never adopt or overwrite a database that is on disk but absent from
         // the map (skipped at startup because it is corrupt or its options
         // fail validation). An io error while checking counts as present.
+        // A leftover options.json alone is the remains of an interrupted
+        // create (options.json is written before data.grafeo), so create may
+        // replace it and a rollback may remove it.
         if let Some(ref dir) = db_dir
             && (dir.join("data.grafeo").try_exists().unwrap_or(true)
-                || dir.join("grafeo.db").try_exists().unwrap_or(true))
+                || dir.join("grafeo.db").try_exists().unwrap_or(true)
+                || dir.join("data.grafeo.wal").try_exists().unwrap_or(true))
         {
             return Err(ServiceError::Conflict(format!(
                 "database '{name}' already exists on disk"
@@ -1702,6 +1745,46 @@ mod tests {
             .into_iter()
             .collect(),
         );
+        mgr.create(&req).unwrap();
+    }
+
+    #[test]
+    fn create_refuses_a_leftover_wal_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("orphan");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.wal"), b"unreplayed").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let err = mgr
+            .create(&persistent_request("orphan", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::read(db_dir.join("data.grafeo.wal")).unwrap(),
+            b"unreplayed"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_name_being_created_and_releases_it_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let req = persistent_request("busy", DatabaseOptions::default());
+
+        {
+            let _held = mgr.reserve_name("busy").unwrap();
+            let err = mgr.create(&req).unwrap_err();
+            assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+            assert!(!dir.path().join("busy").exists(), "nothing is touched");
+        }
+
+        // The guard released the name, and a finished create releases it too.
+        mgr.create(&req).unwrap();
+        mgr.delete("busy").unwrap();
         mgr.create(&req).unwrap();
     }
 }
