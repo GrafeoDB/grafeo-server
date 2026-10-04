@@ -385,6 +385,17 @@ impl BackupService {
         // chain is replayed into a staging file before the live handle
         // closes. A chain that fails to replay leaves the live database
         // untouched.
+        // A leftover pre-restore copy can be the only copy of the original
+        // database (after a failed put-back and a restart), so it is never
+        // deleted: refuse to start and leave it for an operator.
+        if db_files_exist(&previous) {
+            entry.set_available();
+            return Err(ServiceError::Conflict(format!(
+                "a previous epoch restore left {} behind; an operator must inspect                  it and remove it before another restore can run",
+                previous.display()
+            )));
+        }
+
         clear_staging(&staged);
         let epoch_id = grafeo_common::types::EpochId::new(target_epoch);
         let staged_clone = staged.clone();
@@ -403,18 +414,6 @@ impl BackupService {
         }
         clear_replay_scratch(&staged);
 
-        // A stale pre-restore copy that cannot be deleted aborts the restore
-        // now, while the live handle is still open.
-        remove_db_files(&previous);
-        if db_files_exist(&previous) {
-            clear_staging(&staged);
-            entry.set_available();
-            return Err(ServiceError::Internal(format!(
-                "cannot clear the stale {}; remove it and retry",
-                previous.display()
-            )));
-        }
-
         // Release the live handle so its files can be moved aside. If the
         // close fails the old handle may still be open, so no file moves.
         let old_db = entry.db();
@@ -429,8 +428,17 @@ impl BackupService {
 
         if let Err(e) = swap_db_files(&db_file, &staged, &previous) {
             clear_staging(&staged);
-            // Reopens only when the original files are back in place.
-            Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
+            // Reopen only when the original is back in place and nothing is
+            // left at the pre-restore path.
+            if db_file.exists() && !db_files_exist(&previous) {
+                Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
+            } else {
+                tracing::error!(
+                    database = %db_name,
+                    original = %previous.display(),
+                    "Epoch restore swap failed and the original is not back in place;                      entry left in Restoring state, original may be at the pre-restore path"
+                );
+            }
             return Err(ServiceError::Internal(format!(
                 "failed to swap in the restored database: {e}"
             )));
@@ -461,6 +469,17 @@ impl BackupService {
                 // cannot be put back, the entry stays in Restoring and the
                 // original is left at the pre-restore path.
                 remove_db_files(&db_file);
+                if db_files_exist(&db_file) {
+                    // Moving the original in now would replay the restored
+                    // database's WAL into it.
+                    tracing::error!(
+                        database = %db_name,
+                        restored = %db_file.display(),
+                        original = %previous.display(),
+                        "Could not clear the restored files after a failed reopen; entry left                          in Restoring state, original kept at the pre-restore path"
+                    );
+                    return Err(e);
+                }
                 match move_db_files(&previous, &db_file) {
                     Ok(()) => {
                         Self::recover_after_failed_epoch_restore(&entry, &db_file, db_name).await;
@@ -1629,6 +1648,46 @@ mod tests {
         let db_dir = data_dir.path().join("default");
         assert!(!db_dir.join("data.grafeo.restoring").exists());
         assert!(!db_dir.join("data.grafeo.pre-restore").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_to_epoch_refuses_stale_pre_restore() {
+        // A leftover pre-restore copy may be the only copy of the original
+        // database, so the restore refuses to run and deletes nothing.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
+            .await
+            .unwrap();
+
+        let stale = data_dir
+            .path()
+            .join("default")
+            .join("data.grafeo.pre-restore");
+        std::fs::write(&stale, b"only copy").unwrap();
+
+        let err =
+            BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
+                .await
+                .expect_err("a stale pre-restore must block the restore");
+        assert!(matches!(err, ServiceError::Conflict(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("data.grafeo.pre-restore"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(std::fs::read(&stale).unwrap(), b"only copy");
+
+        let entry = mgr.get("default").unwrap();
+        assert!(!entry.is_restoring());
+        assert_eq!(entry.db().node_count(), 1);
     }
 
     #[tokio::test]
