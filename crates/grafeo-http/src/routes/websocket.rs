@@ -393,16 +393,27 @@ async fn process_query(
             id,
             response: query_result_to_response(&qr),
         },
-        Err(e) => {
-            let (error, detail) = match &e {
-                ServiceError::BadRequest(msg) => ("bad_request".to_string(), Some(msg.clone())),
-                ServiceError::Timeout => ("timeout".to_string(), None),
-                ServiceError::NotFound(msg) => ("not_found".to_string(), Some(msg.clone())),
-                _ => ("internal_error".to_string(), Some(e.to_string())),
-            };
-            WsServerMessage::Error { id, error, detail }
-        }
+        Err(e) => query_error(id, &e),
     }
+}
+
+/// The error message for a failed query. An internal error's text stays in
+/// the log, as in the HTTP and SSE error mapping.
+fn query_error(id: Option<String>, e: &ServiceError) -> WsServerMessage {
+    let (error, detail) = match e {
+        ServiceError::BadRequest(msg) => ("bad_request".to_string(), Some(msg.clone())),
+        ServiceError::Timeout => ("timeout".to_string(), None),
+        ServiceError::NotFound(msg) => ("not_found".to_string(), Some(msg.clone())),
+        ServiceError::Internal(_) => {
+            tracing::warn!(error = %e, "WebSocket query failed");
+            (
+                "internal_error".to_string(),
+                Some("internal error".to_string()),
+            )
+        }
+        _ => ("internal_error".to_string(), Some(e.to_string())),
+    };
+    WsServerMessage::Error { id, error, detail }
 }
 
 #[cfg(all(test, feature = "push-changefeed"))]
@@ -415,6 +426,20 @@ mod tests {
             "epoch": epoch, "timestamp": epoch,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn an_internal_query_error_hides_its_detail() {
+        let message = query_error(
+            Some("q1".to_string()),
+            &ServiceError::Internal("disk at /var/x full".to_string()),
+        );
+        let json = serde_json::to_value(message).unwrap();
+        assert_eq!(json["error"], "internal_error");
+        assert_eq!(json["detail"], "internal error");
+        let bad = serde_json::to_value(query_error(None, &ServiceError::BadRequest("nope".into())))
+            .unwrap();
+        assert_eq!(bad["detail"], "nope");
     }
 
     #[tokio::test]

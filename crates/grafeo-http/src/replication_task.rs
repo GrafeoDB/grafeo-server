@@ -122,7 +122,7 @@ async fn replicate_database(
     let last = replication_state.last_epoch(db_name);
     // `last` is the primary's resume cursor (`server_epoch`) of the last
     // batch applied: every event up to it is here, so continue after it.
-    let since = if last > 0 { last + 1 } else { 0 };
+    let since = if last > 0 { last.saturating_add(1) } else { 0 };
     let url = format!("{primary_url}/db/{db_name}/changes?since={since}&limit={BATCH_LIMIT}");
 
     debug!(db = %db_name, since = since, "Polling primary for changes");
