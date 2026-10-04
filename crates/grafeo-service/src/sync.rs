@@ -187,8 +187,10 @@ pub struct SyncChangeRequest {
     /// Property key targeted by `crdt_op`. Required when `crdt_op` is set.
     pub crdt_property: Option<String>,
     /// Graph to write to: a storage key as in `ChangeEventDto::graph`
-    /// (`name` or `schema/name`). Absent: the default graph. A missing graph
-    /// outside a schema is created; a missing graph inside one is a conflict.
+    /// (`name` or `schema/name`). Absent: the default graph. A create into a
+    /// missing graph outside a schema creates it; any other change to a
+    /// missing graph, and any change to a missing graph inside a schema, is a
+    /// conflict (`graph_unavailable:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<String>,
 }
@@ -366,7 +368,19 @@ impl SyncService {
         // mode is resolved (see replication_task spawn_blocking investigation).
 
         for (idx, change) in request.changes.iter().enumerate() {
-            let target = match sessions.get(change.graph.as_deref()) {
+            // Check the change before opening its graph: a malformed change
+            // opens, and so creates, no graph.
+            let op = match ChangeOp::parse(change) {
+                Ok(op) => op,
+                Err(reason) => {
+                    conflicts.push(ConflictRecord {
+                        request_index: idx,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            let target = match sessions.get(change.graph.as_deref(), op.creates()) {
                 Ok(session) => session,
                 Err(reason) => {
                     conflicts.push(ConflictRecord {
@@ -376,278 +390,23 @@ impl SyncService {
                     continue;
                 }
             };
-            match change.kind.as_str() {
-                "create" => match change.entity_type.as_str() {
-                    "node" => {
-                        let labels: Vec<&str> = change
-                            .labels
-                            .as_deref()
-                            .unwrap_or(&[])
-                            .iter()
-                            .map(String::as_str)
-                            .collect();
-                        let created = if let Some(after) = &change.after {
-                            let props: Vec<(String, grafeo_common::types::Value)> =
-                                json_to_props(after).collect();
-                            let props_refs: Vec<(&str, grafeo_common::types::Value)> =
-                                props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                            target.create_node_with_props(&labels, props_refs)
-                        } else {
-                            target.create_node(&labels)
-                        };
-                        match created {
-                            Ok(new_id) => {
-                                id_mappings.push(IdMapping {
-                                    request_index: idx,
-                                    server_id: new_id.as_u64(),
-                                });
-                                applied += 1;
-                            }
-                            Err(e) => conflicts.push(write_failed(idx, &e)),
-                        }
-                    }
-                    "edge" => match (change.src_id, change.dst_id, &change.edge_type) {
-                        (Some(src), Some(dst), Some(et)) => {
-                            let created = if let Some(after) = &change.after {
-                                let props: Vec<(String, grafeo_common::types::Value)> =
-                                    json_to_props(after).collect();
-                                let props_refs: Vec<(&str, grafeo_common::types::Value)> =
-                                    props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                                target.create_edge_with_props(
-                                    NodeId::new(src),
-                                    NodeId::new(dst),
-                                    et,
-                                    props_refs,
-                                )
-                            } else {
-                                target.create_edge(NodeId::new(src), NodeId::new(dst), et)
-                            };
-                            match created {
-                                Ok(new_id) => {
-                                    id_mappings.push(IdMapping {
-                                        request_index: idx,
-                                        server_id: new_id.as_u64(),
-                                    });
-                                    applied += 1;
-                                }
-                                Err(e) => conflicts.push(write_failed(idx, &e)),
-                            }
-                        }
-                        _ => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: "edge_create_missing_src_dst_or_type".to_string(),
-                            });
-                        }
-                    },
-                    _ => {
-                        conflicts.push(ConflictRecord {
-                            request_index: idx,
-                            reason: format!("unknown_entity_type:{}", change.entity_type),
-                        });
-                    }
-                },
-
-                "update" => {
-                    let raw_id = match change.id {
-                        Some(id) => id,
-                        None => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: "update_missing_id".to_string(),
-                            });
-                            continue;
-                        }
-                    };
-
-                    // CRDT path: apply counter operation directly, bypassing LWW.
-                    if let (Some(op), Some(prop_key)) = (&change.crdt_op, &change.crdt_property) {
-                        match change.entity_type.as_str() {
-                            "node" => {
-                                let node_id = NodeId::new(raw_id);
-                                let current = target
-                                    .get_node(node_id)
-                                    .and_then(|n| n.get_property(prop_key).cloned())
-                                    .unwrap_or(grafeo_common::types::Value::Null);
-                                let merged = crate::crdt::apply_op(&current, op);
-                                match target.set_node_property(node_id, prop_key, merged) {
-                                    Ok(()) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                            "edge" => {
-                                let edge_id = EdgeId::new(raw_id);
-                                let current = target
-                                    .get_edge(edge_id)
-                                    .and_then(|e| e.get_property(prop_key).cloned())
-                                    .unwrap_or(grafeo_common::types::Value::Null);
-                                let merged = crate::crdt::apply_op(&current, op);
-                                match target.set_edge_property(edge_id, prop_key, merged) {
-                                    Ok(()) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                            _ => {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: format!("unknown_entity_type:{}", change.entity_type),
-                                });
-                            }
-                        }
-                        continue;
-                    }
-
-                    // LWW path: apply `after` properties and label changes with
-                    // a timestamp conflict check.
-                    let is_node = change.entity_type == "node";
-                    let has_labels = is_node && change.labels.is_some();
-                    if change.after.is_none() && !has_labels {
-                        conflicts.push(ConflictRecord {
-                            request_index: idx,
-                            reason: "update_missing_after".to_string(),
-                        });
-                        continue;
-                    }
-
-                    match change.entity_type.as_str() {
-                        "node" => {
-                            let node_id = NodeId::new(raw_id);
-                            if server_is_newer(
-                                target,
-                                grafeo_engine::cdc::EntityId::Node(node_id),
-                                change.timestamp,
-                            ) {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: "server_newer".to_string(),
-                                });
-                                skipped += 1;
-                            } else {
-                                // Properties first, then labels (adds before removes).
-                                // Nothing is rolled back if a later step fails, so a
-                                // failed change can be partly applied (a superset of
-                                // the target labels, never a loss).
-                                let props = match &change.after {
-                                    Some(after) => {
-                                        json_to_props(after).try_for_each(|(key, val)| {
-                                            target.set_node_property(node_id, &key, val)
-                                        })
-                                    }
-                                    None => Ok(()),
-                                };
-                                let result = props.and_then(|()| match &change.labels {
-                                    Some(wanted) => sync_node_labels(target, node_id, wanted),
-                                    None => Ok(()),
-                                });
-                                match result {
-                                    Ok(()) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                        }
-                        "edge" => {
-                            let edge_id = EdgeId::new(raw_id);
-                            let Some(after) = &change.after else {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: "update_missing_after".to_string(),
-                                });
-                                continue;
-                            };
-                            if server_is_newer(
-                                target,
-                                grafeo_engine::cdc::EntityId::Edge(edge_id),
-                                change.timestamp,
-                            ) {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: "server_newer".to_string(),
-                                });
-                                skipped += 1;
-                            } else {
-                                match json_to_props(after).try_for_each(|(key, val)| {
-                                    target.set_edge_property(edge_id, &key, val)
-                                }) {
-                                    Ok(()) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                        }
-                        _ => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: format!("unknown_entity_type:{}", change.entity_type),
-                            });
-                        }
-                    }
+            match apply_op(target, op, change.timestamp) {
+                Outcome::Created(server_id) => {
+                    id_mappings.push(IdMapping {
+                        request_index: idx,
+                        server_id,
+                    });
+                    applied += 1;
                 }
-
-                "delete" => {
-                    let raw_id = match change.id {
-                        Some(id) => id,
-                        None => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: "delete_missing_id".to_string(),
-                            });
-                            continue;
-                        }
-                    };
-
-                    match change.entity_type.as_str() {
-                        "node" => {
-                            let node_id = NodeId::new(raw_id);
-                            if server_is_newer(
-                                target,
-                                grafeo_engine::cdc::EntityId::Node(node_id),
-                                change.timestamp,
-                            ) {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: "server_newer".to_string(),
-                                });
-                                skipped += 1;
-                            } else {
-                                match target.delete_node(node_id) {
-                                    Ok(_) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                        }
-                        "edge" => {
-                            let edge_id = EdgeId::new(raw_id);
-                            if server_is_newer(
-                                target,
-                                grafeo_engine::cdc::EntityId::Edge(edge_id),
-                                change.timestamp,
-                            ) {
-                                conflicts.push(ConflictRecord {
-                                    request_index: idx,
-                                    reason: "server_newer".to_string(),
-                                });
-                                skipped += 1;
-                            } else {
-                                match target.delete_edge(edge_id) {
-                                    Ok(_) => applied += 1,
-                                    Err(e) => conflicts.push(write_failed(idx, &e)),
-                                }
-                            }
-                        }
-                        _ => {
-                            conflicts.push(ConflictRecord {
-                                request_index: idx,
-                                reason: format!("unknown_entity_type:{}", change.entity_type),
-                            });
-                        }
-                    }
-                }
-
-                _ => {
+                Outcome::Applied => applied += 1,
+                Outcome::ServerNewer => {
                     conflicts.push(ConflictRecord {
                         request_index: idx,
-                        reason: format!("unknown_kind:{}", change.kind),
+                        reason: "server_newer".to_string(),
                     });
+                    skipped += 1;
                 }
+                Outcome::Failed(e) => conflicts.push(write_failed(idx, &e)),
             }
         }
 
@@ -715,6 +474,240 @@ fn resume_point<T>(
     (sorted.len(), cursor)
 }
 
+/// A node or an edge a change targets.
+#[derive(Clone, Copy)]
+enum Entity {
+    Node(NodeId),
+    Edge(EdgeId),
+}
+
+impl Entity {
+    /// The entity `raw_id` names for `entity_type`; the error is the
+    /// conflict reason.
+    fn of(entity_type: &str, raw_id: u64) -> Result<Self, String> {
+        match entity_type {
+            "node" => Ok(Self::Node(NodeId::new(raw_id))),
+            "edge" => Ok(Self::Edge(EdgeId::new(raw_id))),
+            other => Err(format!("unknown_entity_type:{other}")),
+        }
+    }
+
+    fn cdc_id(self) -> grafeo_engine::cdc::EntityId {
+        match self {
+            Self::Node(id) => grafeo_engine::cdc::EntityId::Node(id),
+            Self::Edge(id) => grafeo_engine::cdc::EntityId::Edge(id),
+        }
+    }
+}
+
+/// What a sync change asks for, once its fields are checked.
+enum ChangeOp<'a> {
+    CreateNode {
+        labels: Vec<&'a str>,
+        after: Option<&'a serde_json::Value>,
+    },
+    CreateEdge {
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &'a str,
+        after: Option<&'a serde_json::Value>,
+    },
+    /// A CRDT operation on one property, merged without the LWW check.
+    Crdt {
+        entity: Entity,
+        op: &'a CrdtOp,
+        property: &'a str,
+    },
+    /// An LWW update of a node: its properties, then its labels.
+    UpdateNode {
+        id: NodeId,
+        after: Option<&'a serde_json::Value>,
+        labels: Option<&'a [String]>,
+    },
+    /// An LWW update of an edge's properties.
+    UpdateEdge {
+        id: EdgeId,
+        after: &'a serde_json::Value,
+    },
+    Delete(Entity),
+}
+
+impl<'a> ChangeOp<'a> {
+    /// Checks `change` and reads what it asks for. The error is the conflict
+    /// reason. The checks run in the order the apply loop has always made
+    /// them, so a change with several faults reports the same one.
+    fn parse(change: &'a SyncChangeRequest) -> Result<Self, String> {
+        let unknown_type = || format!("unknown_entity_type:{}", change.entity_type);
+        let missing_after = || "update_missing_after".to_string();
+        match change.kind.as_str() {
+            "create" => match change.entity_type.as_str() {
+                "node" => Ok(Self::CreateNode {
+                    labels: change
+                        .labels
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                    after: change.after.as_ref(),
+                }),
+                "edge" => match (change.src_id, change.dst_id, &change.edge_type) {
+                    (Some(src), Some(dst), Some(edge_type)) => Ok(Self::CreateEdge {
+                        src: NodeId::new(src),
+                        dst: NodeId::new(dst),
+                        edge_type,
+                        after: change.after.as_ref(),
+                    }),
+                    _ => Err("edge_create_missing_src_dst_or_type".to_string()),
+                },
+                _ => Err(unknown_type()),
+            },
+            "update" => {
+                let id = change.id.ok_or_else(|| "update_missing_id".to_string())?;
+                if let (Some(op), Some(property)) = (&change.crdt_op, &change.crdt_property) {
+                    return Ok(Self::Crdt {
+                        entity: Entity::of(&change.entity_type, id)?,
+                        op,
+                        property,
+                    });
+                }
+                match change.entity_type.as_str() {
+                    "node" if change.after.is_none() && change.labels.is_none() => {
+                        Err(missing_after())
+                    }
+                    "node" => Ok(Self::UpdateNode {
+                        id: NodeId::new(id),
+                        after: change.after.as_ref(),
+                        labels: change.labels.as_deref(),
+                    }),
+                    "edge" => change
+                        .after
+                        .as_ref()
+                        .map(|after| Self::UpdateEdge {
+                            id: EdgeId::new(id),
+                            after,
+                        })
+                        .ok_or_else(missing_after),
+                    _ if change.after.is_none() => Err(missing_after()),
+                    _ => Err(unknown_type()),
+                }
+            }
+            "delete" => {
+                let id = change.id.ok_or_else(|| "delete_missing_id".to_string())?;
+                Ok(Self::Delete(Entity::of(&change.entity_type, id)?))
+            }
+            other => Err(format!("unknown_kind:{other}")),
+        }
+    }
+
+    /// Whether the change creates an entity: only such a change may create
+    /// the graph it writes to.
+    fn creates(&self) -> bool {
+        matches!(self, Self::CreateNode { .. } | Self::CreateEdge { .. })
+    }
+}
+
+/// What applying one change did.
+enum Outcome {
+    /// Created an entity with this server ID.
+    Created(u64),
+    /// Applied the change.
+    Applied,
+    /// Skipped: the server has a newer change to the entity (LWW).
+    ServerNewer,
+    /// The write failed.
+    Failed(grafeo_common::utils::error::Error),
+}
+
+/// Applies `op` through `target`, a session on the change's graph.
+/// `timestamp` is the client's, for the LWW check of updates and deletes.
+fn apply_op(target: &grafeo_engine::Session, op: ChangeOp<'_>, timestamp: u64) -> Outcome {
+    let done = |result: grafeo_common::utils::error::Result<()>| match result {
+        Ok(()) => Outcome::Applied,
+        Err(e) => Outcome::Failed(e),
+    };
+    let created = |result: grafeo_common::utils::error::Result<u64>| match result {
+        Ok(id) => Outcome::Created(id),
+        Err(e) => Outcome::Failed(e),
+    };
+    match op {
+        ChangeOp::CreateNode { labels, after } => created(
+            match after {
+                Some(after) => target.create_node_with_props(&labels, json_to_props(after)),
+                None => target.create_node(&labels),
+            }
+            .map(|id| id.as_u64()),
+        ),
+        ChangeOp::CreateEdge {
+            src,
+            dst,
+            edge_type,
+            after,
+        } => created(
+            match after {
+                Some(after) => {
+                    target.create_edge_with_props(src, dst, edge_type, json_to_props(after))
+                }
+                None => target.create_edge(src, dst, edge_type),
+            }
+            .map(|id| id.as_u64()),
+        ),
+        ChangeOp::Crdt {
+            entity,
+            op,
+            property,
+        } => {
+            let current = match entity {
+                Entity::Node(id) => target
+                    .get_node(id)
+                    .and_then(|n| n.get_property(property).cloned()),
+                Entity::Edge(id) => target
+                    .get_edge(id)
+                    .and_then(|e| e.get_property(property).cloned()),
+            }
+            .unwrap_or(grafeo_common::types::Value::Null);
+            let merged = crate::crdt::apply_op(&current, op);
+            done(match entity {
+                Entity::Node(id) => target.set_node_property(id, property, merged),
+                Entity::Edge(id) => target.set_edge_property(id, property, merged),
+            })
+        }
+        ChangeOp::UpdateNode { id, after, labels } => {
+            if server_is_newer(target, Entity::Node(id).cdc_id(), timestamp) {
+                return Outcome::ServerNewer;
+            }
+            // Properties first, then labels (adds before removes). Nothing is
+            // rolled back if a later step fails, so a failed change can be
+            // partly applied (a superset of the target labels, never a loss).
+            let props = after.map_or(Ok(()), |after| {
+                json_to_props(after)
+                    .try_for_each(|(key, val)| target.set_node_property(id, &key, val))
+            });
+            done(props.and_then(|()| {
+                labels.map_or(Ok(()), |wanted| sync_node_labels(target, id, wanted))
+            }))
+        }
+        ChangeOp::UpdateEdge { id, after } => {
+            if server_is_newer(target, Entity::Edge(id).cdc_id(), timestamp) {
+                return Outcome::ServerNewer;
+            }
+            done(
+                json_to_props(after)
+                    .try_for_each(|(key, val)| target.set_edge_property(id, &key, val)),
+            )
+        }
+        ChangeOp::Delete(entity) => {
+            if server_is_newer(target, entity.cdc_id(), timestamp) {
+                return Outcome::ServerNewer;
+            }
+            done(match entity {
+                Entity::Node(id) => target.delete_node(id).map(drop),
+                Entity::Edge(id) => target.delete_edge(id).map(drop),
+            })
+        }
+    }
+}
+
 /// Make the node's labels exactly `wanted`: add missing, remove extra.
 fn sync_node_labels(
     target: &grafeo_engine::Session,
@@ -773,14 +766,20 @@ impl<'db> GraphSessions<'db> {
         }
     }
 
-    /// The session for `graph` (`None`: the default graph). The error is a
-    /// conflict reason.
-    fn get(&mut self, graph: Option<&str>) -> Result<&grafeo_engine::Session, String> {
+    /// The session for `graph` (`None`: the default graph). A missing graph
+    /// is created only when `allow_create` (see [`open_graph_session`]). The
+    /// error is a conflict reason; it is not kept, so a later change can
+    /// still create the graph.
+    fn get(
+        &mut self,
+        graph: Option<&str>,
+        allow_create: bool,
+    ) -> Result<&grafeo_engine::Session, String> {
         let key = graph.map(str::to_owned);
         if let std::collections::hash_map::Entry::Vacant(slot) = self.sessions.entry(key.clone()) {
             let session = match graph {
                 None => self.db.session(),
-                Some(storage_key) => open_graph_session(self.db, storage_key)?,
+                Some(storage_key) => open_graph_session(self.db, storage_key, allow_create)?,
             };
             slot.insert(session);
         }
@@ -789,11 +788,14 @@ impl<'db> GraphSessions<'db> {
 }
 
 /// Opens a session on the graph a CDC storage key names (`name` or
-/// `schema/name`). A missing graph outside a schema is created, so a replica
-/// follows a primary's `CREATE GRAPH`; schemas are not created.
+/// `schema/name`). A missing graph outside a schema is created when
+/// `allow_create` (a create change), so a replica follows a primary's
+/// `CREATE GRAPH` with the graph's first creates. Otherwise a missing graph
+/// is a conflict and nothing is created; schemas are never created.
 fn open_graph_session(
     db: &grafeo_engine::GrafeoDB,
     storage_key: &str,
+    allow_create: bool,
 ) -> Result<grafeo_engine::Session, String> {
     let (schema, name) = match storage_key.split_once('/') {
         Some((schema, "__default__")) => (Some(schema), "default"),
@@ -805,7 +807,7 @@ fn open_graph_session(
         validate_catalog_name("schema", schema).map_err(|e| unavailable(&e))?;
     }
     validate_catalog_name("graph", name).map_err(|e| unavailable(&e))?;
-    if schema.is_none() && db.graph_in(None, name).is_err() {
+    if allow_create && schema.is_none() && db.graph_in(None, name).is_err() {
         db.create_graph(name)
             .map_err(|e| format!("graph_unavailable:{storage_key}: {e}"))?;
     }
@@ -1885,6 +1887,183 @@ mod tests {
             resp.conflicts[0].reason
         );
         assert_eq!(mgr.get("default").unwrap().db().list_graphs(), before);
+    }
+
+    /// A change of `kind` and `entity_type` with every other field empty.
+    fn bare_change(kind: &str, entity_type: &str) -> SyncChangeRequest {
+        SyncChangeRequest {
+            kind: kind.to_string(),
+            entity_type: entity_type.to_string(),
+            id: None,
+            timestamp: 0,
+            labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            after: None,
+            crdt_op: None,
+            crdt_property: None,
+            graph: None,
+        }
+    }
+
+    fn apply_changes(mgr: &DatabaseManager, changes: Vec<SyncChangeRequest>) -> SyncResponse {
+        SyncService::apply(
+            mgr,
+            "default",
+            SyncRequest {
+                client_id: "device-1".to_string(),
+                last_seen_epoch: 0,
+                changes,
+                schema_version: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn malformed_changes_report_the_same_reasons() {
+        let after = Some(serde_json::json!({"k": {"Int64": 1}}));
+        let crdt = |entity_type: &str| SyncChangeRequest {
+            id: Some(1),
+            crdt_op: Some(CrdtOp::Increment {
+                amount: 1,
+                replica_id: "r".to_string(),
+            }),
+            crdt_property: Some("n".to_string()),
+            ..bare_change("update", entity_type)
+        };
+        let cases = [
+            (bare_change("bogus", "node"), "unknown_kind:bogus"),
+            (bare_change("create", "bogus"), "unknown_entity_type:bogus"),
+            (
+                bare_change("create", "edge"),
+                "edge_create_missing_src_dst_or_type",
+            ),
+            (bare_change("update", "bogus"), "update_missing_id"),
+            (crdt("bogus"), "unknown_entity_type:bogus"),
+            (
+                SyncChangeRequest {
+                    id: Some(1),
+                    ..bare_change("update", "bogus")
+                },
+                "update_missing_after",
+            ),
+            (
+                SyncChangeRequest {
+                    id: Some(1),
+                    after: after.clone(),
+                    ..bare_change("update", "bogus")
+                },
+                "unknown_entity_type:bogus",
+            ),
+            (
+                SyncChangeRequest {
+                    id: Some(1),
+                    ..bare_change("update", "node")
+                },
+                "update_missing_after",
+            ),
+            (
+                SyncChangeRequest {
+                    id: Some(1),
+                    labels: Some(vec!["L".to_string()]),
+                    ..bare_change("update", "edge")
+                },
+                "update_missing_after",
+            ),
+            (bare_change("delete", "bogus"), "delete_missing_id"),
+            (
+                SyncChangeRequest {
+                    id: Some(1),
+                    ..bare_change("delete", "bogus")
+                },
+                "unknown_entity_type:bogus",
+            ),
+        ];
+        for (change, reason) in cases {
+            let what = format!("{} {}", change.kind, change.entity_type);
+            assert_eq!(
+                ChangeOp::parse(&change).err().as_deref(),
+                Some(reason),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_change_creates_no_graph() {
+        let mgr = make_manager();
+        let before = mgr.get("default").unwrap().db().list_graphs();
+        let resp = apply_changes(
+            &mgr,
+            vec![
+                SyncChangeRequest {
+                    graph: Some("newgraph".to_string()),
+                    ..bare_change("bogus", "node")
+                },
+                SyncChangeRequest {
+                    graph: Some("newgraph".to_string()),
+                    ..bare_change("create", "bogus")
+                },
+            ],
+        );
+        assert_eq!(resp.applied, 0);
+        assert_eq!(resp.conflicts[0].reason, "unknown_kind:bogus");
+        assert_eq!(resp.conflicts[1].reason, "unknown_entity_type:bogus");
+        assert_eq!(mgr.get("default").unwrap().db().list_graphs(), before);
+    }
+
+    #[test]
+    fn only_a_create_creates_a_missing_graph() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        let before = db.list_graphs();
+        let resp = apply_changes(
+            &mgr,
+            vec![
+                SyncChangeRequest {
+                    id: Some(0),
+                    timestamp: u64::MAX,
+                    after: Some(serde_json::json!({"k": {"Int64": 1}})),
+                    graph: Some("newgraph".to_string()),
+                    ..bare_change("update", "node")
+                },
+                SyncChangeRequest {
+                    id: Some(0),
+                    timestamp: u64::MAX,
+                    graph: Some("newgraph".to_string()),
+                    ..bare_change("delete", "node")
+                },
+            ],
+        );
+        assert_eq!(resp.applied, 0);
+        for conflict in &resp.conflicts {
+            assert!(
+                conflict.reason.starts_with("graph_unavailable:newgraph"),
+                "reason: {}",
+                conflict.reason
+            );
+        }
+        assert_eq!(resp.conflicts.len(), 2);
+        assert_eq!(db.list_graphs(), before, "nothing is created");
+
+        let resp = apply_changes(
+            &mgr,
+            vec![SyncChangeRequest {
+                labels: Some(vec!["X".to_string()]),
+                graph: Some("newgraph".to_string()),
+                ..bare_change("create", "node")
+            }],
+        );
+        assert_eq!(resp.applied, 1, "{:?}", resp.conflicts);
+        assert!(db.list_graphs().iter().any(|g| g == "newgraph"));
+        let count = db
+            .graph("newgraph")
+            .unwrap()
+            .execute("MATCH (n:X) RETURN count(n)")
+            .unwrap();
+        assert_eq!(count.rows()[0][0], grafeo_common::Value::Int64(1));
     }
 
     #[test]
