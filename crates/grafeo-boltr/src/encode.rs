@@ -307,6 +307,31 @@ pub fn convert_params(
         .collect()
 }
 
+/// Neo4j's `stats` dict for a PULL summary: the non-zero write counters under
+/// their Bolt names, plus `contains-updates`. Drivers expose it as
+/// `summary.counters`.
+pub fn write_stats(written: &grafeo_service::types::WriteCountersInfo) -> BoltDict {
+    let mut stats: BoltDict = written
+        .non_zero()
+        .into_iter()
+        .map(|(name, value)| {
+            let bolt_name = match name {
+                "nodes_created" => "nodes-created",
+                "nodes_deleted" => "nodes-deleted",
+                "edges_created" => "relationships-created",
+                "edges_deleted" => "relationships-deleted",
+                "properties_set" => "properties-set",
+                "labels_added" => "labels-added",
+                "labels_removed" => "labels-removed",
+                other => other,
+            };
+            (bolt_name.to_string(), BoltValue::Integer(value as i64))
+        })
+        .collect();
+    stats.insert("contains-updates".to_string(), BoltValue::Boolean(true));
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,5 +797,27 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains_key("name"));
         assert!(result.contains_key("date"));
+    }
+
+    #[test]
+    fn write_stats_uses_neo4j_counter_names() {
+        let written = grafeo_service::types::WriteCountersInfo {
+            nodes_created: 2,
+            edges_created: 1,
+            labels_added: 2,
+            ..Default::default()
+        };
+        let stats = write_stats(&written);
+        assert_eq!(stats.get("nodes-created"), Some(&BoltValue::Integer(2)));
+        assert_eq!(
+            stats.get("relationships-created"),
+            Some(&BoltValue::Integer(1))
+        );
+        assert_eq!(stats.get("labels-added"), Some(&BoltValue::Integer(2)));
+        assert_eq!(
+            stats.get("contains-updates"),
+            Some(&BoltValue::Boolean(true))
+        );
+        assert!(!stats.contains_key("nodes-deleted"));
     }
 }

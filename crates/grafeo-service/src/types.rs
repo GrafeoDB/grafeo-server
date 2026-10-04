@@ -752,6 +752,64 @@ pub struct ReloadEligibleResponse {
     pub reloaded: usize,
 }
 
+// ============================================================================
+// Write counters (engine 0.5.44)
+// ============================================================================
+
+/// What a statement's writes changed (engine 0.5.44 `QueryResult::counters`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WriteCountersInfo {
+    /// Nodes created by `INSERT`, `CREATE` or `MERGE`.
+    pub nodes_created: u64,
+    /// Nodes deleted.
+    pub nodes_deleted: u64,
+    /// Edges created.
+    pub edges_created: u64,
+    /// Edges deleted, including those `DETACH DELETE` removes.
+    pub edges_deleted: u64,
+    /// Property values written or removed, including those of created entities.
+    pub properties_set: u64,
+    /// Labels added, including those of created nodes.
+    pub labels_added: u64,
+    /// Labels removed.
+    pub labels_removed: u64,
+}
+
+impl WriteCountersInfo {
+    /// The counters of a query result, or `None` when the statement wrote nothing.
+    #[must_use]
+    pub fn from_result(result: &grafeo_engine::database::QueryResult) -> Option<Self> {
+        let c = &result.counters;
+        c.contains_updates().then_some(Self {
+            nodes_created: c.nodes_created,
+            nodes_deleted: c.nodes_deleted,
+            edges_created: c.edges_created,
+            edges_deleted: c.edges_deleted,
+            properties_set: c.properties_set,
+            labels_added: c.labels_added,
+            labels_removed: c.labels_removed,
+        })
+    }
+
+    /// The non-zero counters as `(name, value)` pairs, in field order.
+    #[must_use]
+    pub fn non_zero(&self) -> Vec<(&'static str, u64)> {
+        [
+            ("nodes_created", self.nodes_created),
+            ("nodes_deleted", self.nodes_deleted),
+            ("edges_created", self.edges_created),
+            ("edges_deleted", self.edges_deleted),
+            ("properties_set", self.properties_set),
+            ("labels_added", self.labels_added),
+            ("labels_removed", self.labels_removed),
+        ]
+        .into_iter()
+        .filter(|&(_, n)| n > 0)
+        .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,5 +971,19 @@ mod tests {
     fn reload_eligible_request_default_target_fraction() {
         let req: ReloadEligibleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!((req.target_fraction.unwrap_or(0.7) - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn write_counters_info_is_none_for_reads() {
+        let mut result = grafeo_engine::database::QueryResult::empty();
+        assert_eq!(WriteCountersInfo::from_result(&result), None);
+        result.counters.nodes_created = 2;
+        result.counters.labels_added = 2;
+        let info = WriteCountersInfo::from_result(&result).unwrap();
+        assert_eq!(info.nodes_created, 2);
+        assert_eq!(
+            info.non_zero(),
+            vec![("nodes_created", 2), ("labels_added", 2)]
+        );
     }
 }

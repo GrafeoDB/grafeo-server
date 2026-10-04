@@ -353,6 +353,12 @@ impl BoltBackend for GrafeoBackend {
             "type".to_string(),
             BoltValue::String(query_type.to_string()),
         );
+        if let Some(written) = grafeo_service::types::WriteCountersInfo::from_result(&result) {
+            summary.insert(
+                "stats".to_string(),
+                BoltValue::Dict(crate::encode::write_stats(&written)),
+            );
+        }
 
         Ok(ResultStream {
             metadata: ResultMetadata {

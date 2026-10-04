@@ -7856,3 +7856,112 @@ async fn call_grafeo_search_vector_via_http() {
         rows.len()
     );
 }
+
+// ===========================================================================
+// Write counters (engine 0.5.44)
+// ===========================================================================
+
+#[tokio::test]
+async fn query_reports_write_counters() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let body: Value = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Counted {name: 'Alix'})-[:KNOWS]->(:Counted {name: 'Gus'})"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["counters"]["nodes_created"], 2, "{body}");
+    assert_eq!(body["counters"]["edges_created"], 1);
+    assert_eq!(body["counters"]["labels_added"], 2);
+    assert_eq!(body["counters"]["properties_set"], 2);
+
+    let body: Value = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Counted) RETURN n.name"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body.get("counters").is_none(),
+        "reads carry no counters: {body}"
+    );
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_summary_reports_write_counters() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "INSERT (:GwpCounted {name: 'Alix'})",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let summary = cursor
+        .summary()
+        .await
+        .unwrap()
+        .expect("summary frame")
+        .clone();
+    assert_eq!(summary.counters.get("nodes_created"), Some(&1));
+    assert_eq!(summary.counters.get("labels_added"), Some(&1));
+    assert!(
+        !summary.counters.contains_key("nodes_deleted"),
+        "zero counters are omitted"
+    );
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_summary_reports_write_stats() {
+    use boltr::types::BoltValue;
+
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let result = session
+        .run("INSERT (:BoltCounted {name: 'Alix'})-[:KNOWS]->(:BoltCounted {name: 'Gus'})")
+        .await
+        .unwrap();
+    let Some(BoltValue::Dict(stats)) = result.summary.get("stats") else {
+        panic!("expected a stats dict in {:?}", result.summary);
+    };
+    assert_eq!(stats.get("nodes-created"), Some(&BoltValue::Integer(2)));
+    assert_eq!(
+        stats.get("relationships-created"),
+        Some(&BoltValue::Integer(1))
+    );
+    assert_eq!(
+        stats.get("contains-updates"),
+        Some(&BoltValue::Boolean(true))
+    );
+
+    let result = session
+        .run("MATCH (n:BoltCounted) RETURN n.name")
+        .await
+        .unwrap();
+    assert!(
+        !result.summary.contains_key("stats"),
+        "reads carry no stats"
+    );
+
+    session.close().await.unwrap();
+}

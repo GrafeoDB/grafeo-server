@@ -964,6 +964,13 @@ impl ResultStream for GrafeoResultStream {
                 if let Some(scanned) = self.result.rows_scanned {
                     counters.insert("rows_scanned".to_owned(), scanned as i64);
                 }
+                if let Some(written) =
+                    grafeo_service::types::WriteCountersInfo::from_result(&self.result)
+                {
+                    for (name, value) in written.non_zero() {
+                        counters.insert(name.to_owned(), value as i64);
+                    }
+                }
 
                 let summary = ResultFrame::Summary(proto::ResultSummary {
                     status: Some(status::success()),

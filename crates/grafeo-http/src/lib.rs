@@ -108,7 +108,7 @@ pub use state::AppState;
     ),
     components(
         schemas(
-            types::QueryRequest, types::QueryResponse, types::TxBeginRequest,
+            types::QueryRequest, types::QueryResponse, grafeo_service::types::WriteCountersInfo, types::TxBeginRequest,
             types::TransactionResponse, types::HealthResponse, types::EnabledFeatures, ErrorBody,
             types::CreateDatabaseRequest, types::DatabaseType, types::StorageMode,
             types::DatabaseOptions, types::ListDatabasesResponse, DatabaseSummary,
