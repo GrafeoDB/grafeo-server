@@ -107,8 +107,9 @@ impl ChangeHub {
     ///
     /// The first subscriber of a database starts its poll task at
     /// `since_epoch`, but never past the first epoch that can still gain
-    /// events (see [`first_cursor`]), so a client that asks for a far epoch
-    /// cannot hold the feed back for everyone. Later subscribers leave the
+    /// events (the current epoch while none of its events are recorded, else
+    /// the next one), so a client that asks for a far epoch cannot hold the
+    /// feed back for everyone. Later subscribers leave the
     /// polls where they are: moving them ahead would skip events the
     /// subscribers already listening still wait for.
     ///

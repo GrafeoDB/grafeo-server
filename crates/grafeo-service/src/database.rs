@@ -1012,7 +1012,7 @@ impl DatabaseManager {
     ///
     /// Returns the owned `DatabaseEntry` after verifying exclusive ownership
     /// of both the outer and inner Arcs. The entry is removed from the
-    /// registry, so the caller **must** re-insert it via [`reinsert`] when
+    /// registry, so the caller **must** re-insert it via [`reinsert`](Self::reinsert) when
     /// done, even on failure.
     #[cfg(feature = "compact-store")]
     pub fn take_exclusive(&self, name: &str) -> Result<DatabaseEntry, ServiceError> {
@@ -1046,7 +1046,8 @@ impl DatabaseManager {
         }
     }
 
-    /// Re-inserts a database entry previously removed via [`take_exclusive`].
+    /// Re-inserts a database entry previously removed via
+    /// [`take_exclusive`](Self::take_exclusive).
     #[cfg(feature = "compact-store")]
     pub fn reinsert(&self, name: String, entry: DatabaseEntry) {
         self.databases.insert(name, Arc::new(entry));

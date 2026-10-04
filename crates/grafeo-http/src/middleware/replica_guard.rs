@@ -6,7 +6,7 @@
 //! the replica diverge from its primary and shift the IDs that replicated
 //! changes refer to. GET and HEAD requests are always allowed (the
 //! changefeed `GET /db/{name}/changes` and its stream among them), and so are
-//! the requests [`write_allowed_on_replica`] lists.
+//! the requests `write_allowed_on_replica` lists.
 
 use axum::body::Body;
 use axum::extract::Request;

@@ -282,7 +282,7 @@ impl SyncService {
     /// counts as 1), but an epoch is never split: past `limit` the response
     /// runs to the end of the epoch of the `limit`-th event, so a single
     /// epoch with more events than `limit` is returned whole. See
-    /// [`resume_point`] for the cursor.
+    /// [`ChangesResponse::server_epoch`] for the cursor.
     ///
     /// # CDC activation
     ///
