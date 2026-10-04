@@ -22,7 +22,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
 
@@ -46,10 +46,34 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Run clippy (workspace, all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: Check docs
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: MSRV (1.91.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      # Create empty client/dist so rust-embed compiles
+      - run: mkdir -p client/dist
+
+      - name: Check on the MSRV
+        run: cargo +1.91.1 check --workspace
+
+      - name: Check on the MSRV (all features, all targets)
+        run: cargo +1.91.1 check --workspace --all-features --all-targets
 
   # Per-crate unit tests (fast, no integration deps)
   crate-tests:
@@ -58,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [grafeo-service, grafeo-http, grafeo-gwp]
+        crate: [grafeo-service, grafeo-http, grafeo-gwp, grafeo-boltr, grafeo-sync]
     steps:
       - uses: actions/checkout@v4
 
@@ -66,7 +90,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -83,7 +107,18 @@ jobs:
       - run: mkdir -p client/dist
 
       - name: Run unit tests
-        run: cargo test -p ${{ matrix.crate }}
+        run: cargo test -p ${{ matrix.crate }} --all-features
+
+      # The crate's own defaults leave the triple store off, which runs the
+      # tests for builds without RDF support.
+      - name: Run unit tests (default features)
+        if: matrix.crate == 'grafeo-service'
+        run: cargo test -p grafeo-service
+
+      # The replica guard on a build without `auth`.
+      - name: Run unit tests (replication without auth)
+        if: matrix.crate == 'grafeo-http'
+        run: cargo test -p grafeo-http --no-default-features --features replication
 
   # Rust tests (workspace + integration)
   rust-test:
@@ -102,7 +137,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -122,6 +157,11 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      # tests/replication.rs needs the http, sync and replication features.
+      - name: Run replication tests
+        if: runner.os == 'Linux'
+        run: cargo test --test replication --features sync,replication
+
       - name: Run tests (release)
         run: cargo test --release
 
@@ -132,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run security audit
@@ -189,7 +229,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -225,7 +265,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: llvm-tools-preview
 
@@ -261,7 +301,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4

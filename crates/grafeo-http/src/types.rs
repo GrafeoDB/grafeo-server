@@ -49,6 +49,9 @@ pub struct QueryResponse {
     /// GQLSTATUS code per ISO/IEC 39075 (e.g. "00000" for success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gql_status: Option<String>,
+    /// What the statement's writes changed. Omitted when it wrote nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counters: Option<grafeo_service::types::WriteCountersInfo>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -247,7 +250,8 @@ pub enum WsClientMessage {
     /// Subscribe to live change events for a database.
     ///
     /// Requires the `push-changefeed` server feature. Historical events since
-    /// `since` are delivered first, then live events as they are committed.
+    /// `since` are delivered first, then live events as they are committed,
+    /// with no gap and no repeat between them.
     #[cfg(feature = "push-changefeed")]
     #[serde(rename = "subscribe")]
     Subscribe {

@@ -419,7 +419,7 @@ mod tests {
         let p = AuthProvider::new(Some("secret-token".into()), None, None).unwrap();
         let info = p.check_bearer("secret-token").unwrap();
         assert_eq!(info.scope.role, Role::Admin);
-        assert!(info.scope.databases.is_empty());
+        assert_eq!(info.scope.databases, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -546,7 +546,7 @@ mod tests {
     fn token_scope_default_is_admin_all_dbs() {
         let scope = TokenScope::default();
         assert_eq!(scope.role, Role::Admin);
-        assert!(scope.databases.is_empty());
+        assert_eq!(scope.databases, [] as [std::string::String; 0]);
     }
 
     // -----------------------------------------------------------------------

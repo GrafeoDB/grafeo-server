@@ -150,6 +150,7 @@ mod tests {
                 ],
             ],
         )
+        .unwrap()
         .with_metrics(1.0, 2)
     }
 
@@ -174,7 +175,8 @@ mod tests {
     #[test]
     fn ask_result_has_boolean() {
         let result =
-            QueryResult::from_rows(vec!["_ask".to_string()], vec![vec![Value::Bool(true)]]);
+            QueryResult::from_rows(vec!["_ask".to_string()], vec![vec![Value::Bool(true)]])
+                .unwrap();
         let json_str = sparql_results_json(&result);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -190,7 +192,8 @@ mod tests {
                 Value::String("http://example.org/s".into()),
                 Value::Null,
             ]],
-        );
+        )
+        .unwrap();
         let json_str = sparql_results_json(&result);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -202,7 +205,8 @@ mod tests {
     #[test]
     fn numeric_literals_have_datatype() {
         let result =
-            QueryResult::from_rows(vec!["count".to_string()], vec![vec![Value::Int64(42)]]);
+            QueryResult::from_rows(vec!["count".to_string()], vec![vec![Value::Int64(42)]])
+                .unwrap();
         let json_str = sparql_results_json(&result);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 

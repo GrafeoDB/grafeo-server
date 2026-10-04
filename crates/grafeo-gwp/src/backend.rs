@@ -551,6 +551,7 @@ impl GqlBackend for GrafeoBackend {
                 wal_enabled: config.wal_enabled,
                 wal_durability: config.wal_durability,
                 spill_path: None,
+                section_tiers: None,
             },
             schema_file: None,
             schema_filename: None,
@@ -963,6 +964,16 @@ impl ResultStream for GrafeoResultStream {
                 if let Some(scanned) = self.result.rows_scanned {
                     counters.insert("rows_scanned".to_owned(), scanned as i64);
                 }
+                if let Some(written) =
+                    grafeo_service::types::WriteCountersInfo::from_result(&self.result)
+                {
+                    for (name, value) in written.non_zero() {
+                        counters.insert(
+                            name.to_owned(),
+                            grafeo_service::types::saturating_i64(value),
+                        );
+                    }
+                }
 
                 let summary = ResultFrame::Summary(proto::ResultSummary {
                     status: Some(status::success()),
@@ -993,8 +1004,9 @@ mod tests {
         let rows = (0..num_rows)
             .map(|i| vec![Value::Int64(i as i64)])
             .collect();
-        let mut result =
-            QueryResult::from_rows(vec!["x".to_string()], rows).with_metrics(1.0, num_rows as u64);
+        let mut result = QueryResult::from_rows(vec!["x".to_string()], rows)
+            .unwrap()
+            .with_metrics(1.0, num_rows as u64);
         result.column_types = vec![LogicalType::Int64];
         result
     }

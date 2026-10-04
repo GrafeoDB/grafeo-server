@@ -14,6 +14,7 @@ use axum::response::Response;
 use futures_util::Stream;
 use grafeo_engine::database::QueryResult;
 use grafeo_service::stream::DEFAULT_BATCH_SIZE;
+use grafeo_service::types::WriteCountersInfo;
 
 use crate::error::ApiError;
 use crate::types::QueryResponse;
@@ -82,6 +83,7 @@ pub fn query_result_to_response(result: &QueryResult) -> QueryResponse {
         execution_time_ms: result.execution_time_ms,
         rows_scanned: result.rows_scanned,
         gql_status,
+        counters: WriteCountersInfo::from_result(result),
     }
 }
 
@@ -215,6 +217,13 @@ impl Stream for StreamingQueryBody {
                         suffix.push('"');
                     }
                 }
+                if let Some(counters) = WriteCountersInfo::from_result(&this.result) {
+                    suffix.push_str(r#","counters":"#);
+                    suffix.push_str(
+                        &serde_json::to_string(&counters)
+                            .expect("WriteCountersInfo is always serializable"),
+                    );
+                }
                 suffix.push('}');
 
                 this.phase = JsonStreamPhase::Done;
@@ -314,7 +323,7 @@ mod tests {
 
     #[test]
     fn query_response_includes_gql_status_when_non_success() {
-        let mut result = QueryResult::from_rows(vec!["x".to_string()], vec![]);
+        let mut result = QueryResult::from_rows(vec!["x".to_string()], vec![]).unwrap();
         result.gql_status = grafeo_common::utils::GqlStatus::from_str("02000").unwrap();
         let resp = query_result_to_response(&result);
         assert_eq!(resp.gql_status.as_deref(), Some("02000"));
@@ -334,6 +343,7 @@ mod tests {
             vec!["name".to_string()],
             vec![vec![Value::String("Alice".into())]],
         )
+        .unwrap()
         .with_metrics(1.5, 10);
         let resp = query_result_to_response(&result);
         assert_eq!(resp.columns, vec!["name"]);
@@ -359,6 +369,7 @@ mod tests {
                 .map(|i| vec![Value::Int64(i as i64)])
                 .collect(),
         )
+        .unwrap()
         .with_metrics(1.0, num_rows as u64)
     }
 
@@ -413,5 +424,25 @@ mod tests {
         // Verify valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&full).unwrap();
         assert_eq!(parsed["rows"].as_array().unwrap().len(), 2500);
+    }
+
+    #[tokio::test]
+    async fn streaming_counters_match_materialized_output() {
+        let mut result = make_result(1);
+        result.counters.nodes_created = 1;
+        result.counters.properties_set = 2;
+        let expected = serde_json::to_string(&query_result_to_response(&result)).unwrap();
+        let actual = collect_stream(StreamingQueryBody::new(result)).await;
+        assert_eq!(actual, expected);
+        assert!(
+            actual.contains(r#""counters":{"nodes_created":1"#),
+            "{actual}"
+        );
+    }
+
+    #[test]
+    fn query_response_omits_counters_for_reads() {
+        let json = serde_json::to_value(query_result_to_response(&make_result(1))).unwrap();
+        assert!(json.get("counters").is_none(), "{json}");
     }
 }

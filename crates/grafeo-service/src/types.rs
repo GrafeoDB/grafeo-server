@@ -95,7 +95,7 @@ impl StorageMode {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DatabaseOptions {
     /// Memory limit in bytes. Default: 512 MB.
@@ -116,6 +116,14 @@ pub struct DatabaseOptions {
     /// Optional path for out-of-core spill processing.
     #[serde(default)]
     pub spill_path: Option<String>,
+    /// Per-section storage tier overrides applied at db open (engine 0.5.42).
+    ///
+    /// Map of section name to tier override string. Recognised section names:
+    /// `LpgStore`, `RdfStore`, `CompactStore`, `VectorStore`, `TextIndex`,
+    /// `RdfRing`, `PropertyIndex`, `Catalog`. Recognised tier values:
+    /// `auto` (default), `force_ram`, `force_disk`.
+    #[serde(default)]
+    pub section_tiers: Option<std::collections::HashMap<String, String>>,
 }
 
 // --- Output types ---
@@ -524,7 +532,8 @@ impl Default for TokenScopeRequest {
 }
 
 impl TokenScopeRequest {
-    /// Parse the wire-format role string into the engine's [`Role`] enum.
+    /// Parse the wire-format role string into the engine's
+    /// [`Role`](grafeo_engine::auth::Role) enum.
     pub fn to_role(&self) -> Result<grafeo_engine::auth::Role, crate::error::ServiceError> {
         crate::auth::str_to_role(&self.role).map_err(crate::error::ServiceError::BadRequest)
     }
@@ -705,6 +714,281 @@ pub struct ShaclViolation {
     pub message: Option<String>,
 }
 
+// ============================================================================
+// Storage tier types (engine 0.5.42)
+// ============================================================================
+
+/// One section's current storage tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SectionTierInfo {
+    /// Section name (e.g. `"LpgStore"`, `"VectorStore"`, `"CompactStore"`).
+    pub section: String,
+    /// Current tier (`"in_memory"`, `"on_disk"`, `"uninitialized"`).
+    pub tier: String,
+}
+
+/// Response for `GET /admin/{db}/storage-tiers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StorageTiersResponse {
+    pub tiers: Vec<SectionTierInfo>,
+}
+
+/// Request for `POST /admin/{db}/reload-eligible`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReloadEligibleRequest {
+    /// Target fraction of memory budget to occupy after reload, in `[0.0, 1.0]`.
+    /// Default: `0.7`.
+    #[serde(default)]
+    pub target_fraction: Option<f64>,
+}
+
+/// Response for `POST /admin/{db}/reload-eligible`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReloadEligibleResponse {
+    /// Number of sections that were reloaded from disk into RAM.
+    pub reloaded: usize,
+}
+
+// ============================================================================
+// Write counters (engine 0.5.44)
+// ============================================================================
+
+/// What a statement's writes changed (engine 0.5.44 `QueryResult::counters`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WriteCountersInfo {
+    /// Nodes created by `INSERT`, `CREATE` or `MERGE`.
+    pub nodes_created: u64,
+    /// Nodes deleted.
+    pub nodes_deleted: u64,
+    /// Edges created.
+    pub edges_created: u64,
+    /// Edges deleted, including those `DETACH DELETE` removes.
+    pub edges_deleted: u64,
+    /// Property values written or removed, including those of created entities.
+    pub properties_set: u64,
+    /// Labels added, including those of created nodes.
+    pub labels_added: u64,
+    /// Labels removed.
+    pub labels_removed: u64,
+}
+
+impl WriteCountersInfo {
+    /// The counters of a query result, or `None` when the statement wrote nothing.
+    #[must_use]
+    pub fn from_result(result: &grafeo_engine::database::QueryResult) -> Option<Self> {
+        let c = &result.counters;
+        c.contains_updates().then_some(Self {
+            nodes_created: c.nodes_created,
+            nodes_deleted: c.nodes_deleted,
+            edges_created: c.edges_created,
+            edges_deleted: c.edges_deleted,
+            properties_set: c.properties_set,
+            labels_added: c.labels_added,
+            labels_removed: c.labels_removed,
+        })
+    }
+
+    /// The value of one counter.
+    #[must_use]
+    pub fn get(&self, counter: WriteCounter) -> u64 {
+        match counter {
+            WriteCounter::NodesCreated => self.nodes_created,
+            WriteCounter::NodesDeleted => self.nodes_deleted,
+            WriteCounter::EdgesCreated => self.edges_created,
+            WriteCounter::EdgesDeleted => self.edges_deleted,
+            WriteCounter::PropertiesSet => self.properties_set,
+            WriteCounter::LabelsAdded => self.labels_added,
+            WriteCounter::LabelsRemoved => self.labels_removed,
+        }
+    }
+
+    /// The non-zero counters, in field order.
+    #[must_use]
+    pub fn non_zero_counters(&self) -> Vec<(WriteCounter, u64)> {
+        WriteCounter::ALL
+            .into_iter()
+            .map(|c| (c, self.get(c)))
+            .filter(|&(_, n)| n > 0)
+            .collect()
+    }
+
+    /// The non-zero counters as `(name, value)` pairs, in field order.
+    #[must_use]
+    pub fn non_zero(&self) -> Vec<(&'static str, u64)> {
+        self.non_zero_counters()
+            .into_iter()
+            .map(|(c, n)| (c.name(), n))
+            .collect()
+    }
+
+    /// The non-zero counters under their Bolt (Neo4j `stats`) names, with
+    /// values saturated to `i64`.
+    #[must_use]
+    pub fn non_zero_bolt(&self) -> Vec<(&'static str, i64)> {
+        self.non_zero_counters()
+            .into_iter()
+            .map(|(c, n)| (c.bolt_name(), saturating_i64(n)))
+            .collect()
+    }
+}
+
+/// A counter value as `i64`, saturating at `i64::MAX` (GWP and Bolt carry
+/// signed integers).
+#[must_use]
+pub fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The kinds of write counter. Matches are exhaustive, so a new counter must
+/// be named for every transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCounter {
+    /// `nodes_created`.
+    NodesCreated,
+    /// `nodes_deleted`.
+    NodesDeleted,
+    /// `edges_created`.
+    EdgesCreated,
+    /// `edges_deleted`.
+    EdgesDeleted,
+    /// `properties_set`.
+    PropertiesSet,
+    /// `labels_added`.
+    LabelsAdded,
+    /// `labels_removed`.
+    LabelsRemoved,
+}
+
+impl WriteCounter {
+    /// Every counter, in field order.
+    pub const ALL: [Self; 7] = [
+        Self::NodesCreated,
+        Self::NodesDeleted,
+        Self::EdgesCreated,
+        Self::EdgesDeleted,
+        Self::PropertiesSet,
+        Self::LabelsAdded,
+        Self::LabelsRemoved,
+    ];
+
+    /// The snake_case name used by HTTP and GWP.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NodesCreated => "nodes_created",
+            Self::NodesDeleted => "nodes_deleted",
+            Self::EdgesCreated => "edges_created",
+            Self::EdgesDeleted => "edges_deleted",
+            Self::PropertiesSet => "properties_set",
+            Self::LabelsAdded => "labels_added",
+            Self::LabelsRemoved => "labels_removed",
+        }
+    }
+
+    /// The name Neo4j drivers know in `stats`.
+    #[must_use]
+    pub const fn bolt_name(self) -> &'static str {
+        match self {
+            Self::NodesCreated => "nodes-created",
+            Self::NodesDeleted => "nodes-deleted",
+            Self::EdgesCreated => "relationships-created",
+            Self::EdgesDeleted => "relationships-deleted",
+            Self::PropertiesSet => "properties-set",
+            Self::LabelsAdded => "labels-added",
+            Self::LabelsRemoved => "labels-removed",
+        }
+    }
+}
+
+// ============================================================================
+// Upsert types (engine 0.5.44)
+// ============================================================================
+
+fn default_upsert_key() -> String {
+    "id".to_owned()
+}
+
+fn default_src_field() -> String {
+    "src".to_owned()
+}
+
+fn default_dst_field() -> String {
+    "dst".to_owned()
+}
+
+/// Request for `POST /db/{name}/upsert/nodes`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertNodesRequest {
+    /// Labels every node has; a node matches by all of them plus its key.
+    pub labels: Vec<String>,
+    /// Property that identifies a node. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub key: String,
+    /// One plain JSON object per node. A row without the key is skipped.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Object>))]
+    pub rows: Vec<serde_json::Value>,
+    /// Replace a node's properties with the row's instead of merging. Default: false.
+    #[serde(default)]
+    pub replace: bool,
+    /// Named graph to write to. Default: the default graph.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// Request for `POST /db/{name}/upsert/edges`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertEdgesRequest {
+    /// Edge type of every edge.
+    pub edge_type: String,
+    /// Property that identifies an edge between two nodes. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub key: String,
+    /// Node property the source and target fields hold. Default: `id`.
+    #[serde(default = "default_upsert_key")]
+    pub endpoint_key: String,
+    /// Labels an endpoint must have. Default: none.
+    #[serde(default)]
+    pub endpoint_labels: Vec<String>,
+    /// Row field with the source node's key. Default: `src`.
+    #[serde(default = "default_src_field")]
+    pub src_field: String,
+    /// Row field with the target node's key. Default: `dst`.
+    #[serde(default = "default_dst_field")]
+    pub dst_field: String,
+    /// One plain JSON object per edge. Every other field is an edge property.
+    /// A row is skipped when it lacks the key or an endpoint field, or when
+    /// no node or more than one node has its endpoint key.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Object>))]
+    pub rows: Vec<serde_json::Value>,
+    /// Replace an edge's properties with the row's instead of merging. Default: false.
+    #[serde(default)]
+    pub replace: bool,
+    /// Named graph to write to. Default: the default graph.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// What an upsert did with its rows.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UpsertResponse {
+    /// Rows that created a node or edge.
+    pub created: usize,
+    /// Rows that updated an existing node or edge.
+    pub updated: usize,
+    /// Rows that were not written.
+    pub skipped: usize,
+    /// Indices of the skipped rows, in order (at most 1,000).
+    pub skipped_rows: Vec<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,7 +1069,7 @@ mod tests {
     fn token_scope_request_default_fields() {
         let req = TokenScopeRequest::default();
         assert_eq!(req.role, "read-only");
-        assert!(req.databases.is_empty());
+        assert_eq!(req.databases, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -836,5 +1120,83 @@ mod tests {
     fn storage_mode_as_str() {
         assert_eq!(StorageMode::InMemory.as_str(), "in-memory");
         assert_eq!(StorageMode::Persistent.as_str(), "persistent");
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage tier types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn storage_tiers_response_serializes_section_keys_as_strings() {
+        let resp = StorageTiersResponse {
+            tiers: vec![
+                SectionTierInfo {
+                    section: "VectorStore".to_string(),
+                    tier: "in_memory".to_string(),
+                },
+                SectionTierInfo {
+                    section: "CompactStore".to_string(),
+                    tier: "on_disk".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["tiers"][0]["section"], "VectorStore");
+        assert_eq!(json["tiers"][0]["tier"], "in_memory");
+        assert_eq!(json["tiers"][1]["tier"], "on_disk");
+    }
+
+    #[test]
+    fn reload_eligible_request_target_fraction_is_optional() {
+        // The 0.7 default is applied by AdminService::reload_eligible, not by
+        // deserialization; an empty body leaves the field unset.
+        let req: ReloadEligibleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(req.target_fraction, None);
+    }
+
+    #[test]
+    fn write_counter_saturates_and_names_are_distinct() {
+        assert_eq!(saturating_i64(u64::MAX), i64::MAX);
+        assert_eq!(saturating_i64(5), 5);
+        let info = WriteCountersInfo {
+            nodes_created: u64::MAX,
+            edges_deleted: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            info.non_zero_bolt(),
+            vec![("nodes-created", i64::MAX), ("relationships-deleted", 3)]
+        );
+        let mut names: Vec<_> = WriteCounter::ALL.iter().map(|c| c.bolt_name()).collect();
+        assert_eq!(
+            names,
+            [
+                "nodes-created",
+                "nodes-deleted",
+                "relationships-created",
+                "relationships-deleted",
+                "properties-set",
+                "labels-added",
+                "labels-removed",
+            ]
+        );
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 7);
+        assert!(WriteCounter::ALL.iter().all(|c| !c.name().contains('-')));
+    }
+
+    #[test]
+    fn write_counters_info_is_none_for_reads() {
+        let mut result = grafeo_engine::database::QueryResult::empty();
+        assert_eq!(WriteCountersInfo::from_result(&result), None);
+        result.counters.nodes_created = 2;
+        result.counters.labels_added = 2;
+        let info = WriteCountersInfo::from_result(&result).unwrap();
+        assert_eq!(info.nodes_created, 2);
+        assert_eq!(
+            info.non_zero(),
+            vec![("nodes_created", 2), ("labels_added", 2)]
+        );
     }
 }

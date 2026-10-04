@@ -3,6 +3,8 @@
 pub mod admin;
 pub mod backup;
 pub mod batch;
+#[cfg(feature = "push-changefeed")]
+pub(crate) mod change_stream;
 pub mod database;
 pub mod graph_store;
 pub mod query;

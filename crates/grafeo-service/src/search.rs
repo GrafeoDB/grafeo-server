@@ -51,15 +51,14 @@ impl SearchService {
 
     /// Vector search stub when feature is disabled.
     #[cfg(not(feature = "vector-index"))]
-    #[allow(clippy::unused_async)]
-    pub async fn vector_search(
+    pub fn vector_search(
         _databases: &DatabaseManager,
         _db_name: &str,
         _req: types::VectorSearchReq,
-    ) -> Result<Vec<types::SearchHit>, ServiceError> {
-        Err(ServiceError::BadRequest(
+    ) -> impl Future<Output = Result<Vec<types::SearchHit>, ServiceError>> {
+        std::future::ready(Err(ServiceError::BadRequest(
             "vector-index feature not enabled".to_owned(),
-        ))
+        )))
     }
 
     /// Full-text search (BM25 scoring).
@@ -92,15 +91,14 @@ impl SearchService {
 
     /// Text search stub when feature is disabled.
     #[cfg(not(feature = "text-index"))]
-    #[allow(clippy::unused_async)]
-    pub async fn text_search(
+    pub fn text_search(
         _databases: &DatabaseManager,
         _db_name: &str,
         _req: types::TextSearchReq,
-    ) -> Result<Vec<types::SearchHit>, ServiceError> {
-        Err(ServiceError::BadRequest(
+    ) -> impl Future<Output = Result<Vec<types::SearchHit>, ServiceError>> {
+        std::future::ready(Err(ServiceError::BadRequest(
             "text-index feature not enabled".to_owned(),
-        ))
+        )))
     }
 
     /// Hybrid search (vector + text with rank fusion).
@@ -144,15 +142,14 @@ impl SearchService {
 
     /// Hybrid search stub when feature is disabled.
     #[cfg(not(feature = "hybrid-search"))]
-    #[allow(clippy::unused_async)]
-    pub async fn hybrid_search(
+    pub fn hybrid_search(
         _databases: &DatabaseManager,
         _db_name: &str,
         _req: types::HybridSearchReq,
-    ) -> Result<Vec<types::SearchHit>, ServiceError> {
-        Err(ServiceError::BadRequest(
+    ) -> impl Future<Output = Result<Vec<types::SearchHit>, ServiceError>> {
+        std::future::ready(Err(ServiceError::BadRequest(
             "hybrid-search feature not enabled".to_owned(),
-        ))
+        )))
     }
 }
 

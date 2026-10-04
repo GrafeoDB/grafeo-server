@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use boltr::types::{BoltDict, BoltValue};
+use grafeo_common::PropertyKey;
 
 /// Converts a Grafeo value to a Bolt value.
 pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
@@ -38,6 +39,27 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
             })
         }
         Value::List(items) => BoltValue::List(items.iter().map(grafeo_to_bolt).collect()),
+        // Engine emits nodes as `Value::Map { _id, _labels, ...props }` and
+        // edges as `Value::Map { _id, _type, _source, _target, ...props }`
+        // (see grafeo-core `node_to_map` / `edge_to_map`). Detect those
+        // shapes so Bolt clients receive proper Relationship/Node structures
+        // instead of a generic dict (issue #341). The edge shape is checked
+        // first, and both need `_id`, so a user map or an edge property that
+        // happens to be called `_labels` is not mistaken for a node.
+        Value::Map(map)
+            if map.contains_key(&PropertyKey::new("_id"))
+                && map.contains_key(&PropertyKey::new("_type"))
+                && map.contains_key(&PropertyKey::new("_source"))
+                && map.contains_key(&PropertyKey::new("_target")) =>
+        {
+            BoltValue::Relationship(value_to_bolt_relationship(value))
+        }
+        Value::Map(map)
+            if map.contains_key(&PropertyKey::new("_id"))
+                && map.contains_key(&PropertyKey::new("_labels")) =>
+        {
+            BoltValue::Node(value_to_bolt_node(value))
+        }
         Value::Map(map) => {
             let dict: BoltDict = map
                 .iter()
@@ -143,6 +165,62 @@ fn value_to_bolt_node(value: &grafeo_common::Value) -> boltr::types::BoltNode {
     }
 }
 
+/// Extracts a bound `BoltRelationship` from a Grafeo edge map (with
+/// `_id`, `_type`, `_source`, `_target`, and properties). Used when an
+/// edge appears as a top-level value rather than inside a `Path`, where
+/// it must include start/end node IDs.
+fn value_to_bolt_relationship(value: &grafeo_common::Value) -> boltr::types::BoltRelationship {
+    use grafeo_common::Value;
+    if let Value::Map(map) = value {
+        let id = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_id")
+            .and_then(|(_, v)| v.as_int64())
+            .unwrap_or(0);
+        let start_node_id = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_source")
+            .and_then(|(_, v)| v.as_int64())
+            .unwrap_or(0);
+        let end_node_id = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_target")
+            .and_then(|(_, v)| v.as_int64())
+            .unwrap_or(0);
+        let rel_type = map
+            .iter()
+            .find(|(k, _)| k.as_str() == "_type")
+            .and_then(|(_, v)| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let properties: BoltDict = map
+            .iter()
+            .filter(|(k, _)| !k.as_str().starts_with('_'))
+            .map(|(k, v)| (k.to_string(), grafeo_to_bolt(v)))
+            .collect();
+        boltr::types::BoltRelationship {
+            id,
+            start_node_id,
+            end_node_id,
+            rel_type,
+            properties,
+            element_id: format!("0:default:{id}"),
+            start_element_id: format!("0:default:{start_node_id}"),
+            end_element_id: format!("0:default:{end_node_id}"),
+        }
+    } else {
+        boltr::types::BoltRelationship {
+            id: 0,
+            start_node_id: 0,
+            end_node_id: 0,
+            rel_type: String::new(),
+            properties: BoltDict::new(),
+            element_id: String::new(),
+            start_element_id: String::new(),
+            end_element_id: String::new(),
+        }
+    }
+}
+
 /// Extracts a `BoltUnboundRelationship` from a Grafeo path edge value.
 fn value_to_bolt_rel(value: &grafeo_common::Value) -> boltr::types::BoltUnboundRelationship {
     use grafeo_common::Value;
@@ -233,6 +311,19 @@ pub fn convert_params(
         .iter()
         .filter_map(|(k, v)| bolt_to_grafeo(v).map(|gv| (k.clone(), gv)))
         .collect()
+}
+
+/// Neo4j's `stats` dict for a PULL summary: the non-zero write counters under
+/// their Bolt names, plus `contains-updates`. Drivers expose it as
+/// `summary.counters`.
+pub fn write_stats(written: &grafeo_service::types::WriteCountersInfo) -> BoltDict {
+    let mut stats: BoltDict = written
+        .non_zero_bolt()
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), BoltValue::Integer(value)))
+        .collect();
+    stats.insert("contains-updates".to_string(), BoltValue::Boolean(true));
+    stats
 }
 
 #[cfg(test)]
@@ -473,6 +564,96 @@ mod tests {
         assert_eq!(dict.get("key"), Some(&BoltValue::Integer(42)));
     }
 
+    // Regression test for issue #341: a map shaped like a node (containing
+    // `_id` + `_labels`) must encode as BoltValue::Node, not BoltValue::Dict,
+    // so Bolt clients receive a Node structure (tag 0x4E) per the protocol.
+    #[test]
+    fn node_shaped_map_encodes_as_bolt_node() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(2),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_labels"),
+                grafeo_common::Value::List(
+                    vec![grafeo_common::Value::String("Test".into())].into(),
+                ),
+            ),
+            (
+                grafeo_common::PropertyKey::new("name"),
+                grafeo_common::Value::String("Transaction Test".into()),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        let BoltValue::Node(node) = grafeo_to_bolt(&val) else {
+            panic!("expected BoltValue::Node");
+        };
+        assert_eq!(node.id, 2);
+        assert_eq!(node.labels, vec!["Test"]);
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&BoltValue::String("Transaction Test".into()))
+        );
+        assert!(!node.properties.contains_key("_id"));
+        assert!(!node.properties.contains_key("_labels"));
+    }
+
+    // Regression test for issue #341: a map shaped like an edge (containing
+    // `_id` + `_type` + `_source` + `_target`) must encode as
+    // BoltValue::Relationship, not BoltValue::Dict.
+    #[test]
+    fn edge_shaped_map_encodes_as_bolt_relationship() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(10),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_type"),
+                grafeo_common::Value::String("KNOWS".into()),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_source"),
+                grafeo_common::Value::Int64(1),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_target"),
+                grafeo_common::Value::Int64(2),
+            ),
+            (
+                grafeo_common::PropertyKey::new("since"),
+                grafeo_common::Value::Int64(2020),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        let BoltValue::Relationship(rel) = grafeo_to_bolt(&val) else {
+            panic!("expected BoltValue::Relationship");
+        };
+        assert_eq!(rel.id, 10);
+        assert_eq!(rel.start_node_id, 1);
+        assert_eq!(rel.end_node_id, 2);
+        assert_eq!(rel.rel_type, "KNOWS");
+        assert_eq!(rel.properties.get("since"), Some(&BoltValue::Integer(2020)));
+        assert!(!rel.properties.contains_key("_id"));
+        assert!(!rel.properties.contains_key("_type"));
+    }
+
+    // Plain maps without the synthetic node/edge metadata keys still encode
+    // as Dict, so user data shaped like `{ name: 'x' }` is unaffected.
+    #[test]
+    fn plain_map_without_meta_keys_stays_dict() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([(
+            grafeo_common::PropertyKey::new("name"),
+            grafeo_common::Value::String("hello".into()),
+        )]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        assert!(matches!(grafeo_to_bolt(&val), BoltValue::Dict(_)));
+    }
+
     #[test]
     fn grafeo_to_bolt_gcounter() {
         use std::sync::Arc;
@@ -610,5 +791,87 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains_key("name"));
         assert!(result.contains_key("date"));
+    }
+
+    #[test]
+    fn write_stats_uses_neo4j_counter_names() {
+        let written = grafeo_service::types::WriteCountersInfo {
+            nodes_created: 2,
+            edges_created: 1,
+            labels_added: 2,
+            ..Default::default()
+        };
+        let stats = write_stats(&written);
+        assert_eq!(stats.get("nodes-created"), Some(&BoltValue::Integer(2)));
+        assert_eq!(
+            stats.get("relationships-created"),
+            Some(&BoltValue::Integer(1))
+        );
+        assert_eq!(stats.get("labels-added"), Some(&BoltValue::Integer(2)));
+        assert_eq!(
+            stats.get("contains-updates"),
+            Some(&BoltValue::Boolean(true))
+        );
+        assert!(!stats.contains_key("nodes-deleted"));
+    }
+
+    #[test]
+    fn write_stats_saturates_huge_counters() {
+        let written = grafeo_service::types::WriteCountersInfo {
+            properties_set: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            write_stats(&written).get("properties-set"),
+            Some(&BoltValue::Integer(i64::MAX))
+        );
+    }
+
+    // PR #69 review: `_labels` alone does not make a node.
+    #[test]
+    fn map_with_labels_key_but_no_id_stays_dict() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_labels"),
+                grafeo_common::Value::List(vec![grafeo_common::Value::String("X".into())].into()),
+            ),
+            (
+                grafeo_common::PropertyKey::new("name"),
+                grafeo_common::Value::String("n".into()),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        assert!(matches!(grafeo_to_bolt(&val), BoltValue::Dict(_)));
+    }
+
+    // PR #69 review: an edge with a `_labels` property is still an edge.
+    #[test]
+    fn edge_shaped_map_with_labels_property_encodes_as_relationship() {
+        use std::sync::Arc;
+        let map = std::collections::BTreeMap::from([
+            (
+                grafeo_common::PropertyKey::new("_id"),
+                grafeo_common::Value::Int64(10),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_type"),
+                grafeo_common::Value::String("KNOWS".into()),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_source"),
+                grafeo_common::Value::Int64(1),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_target"),
+                grafeo_common::Value::Int64(2),
+            ),
+            (
+                grafeo_common::PropertyKey::new("_labels"),
+                grafeo_common::Value::List(vec![grafeo_common::Value::String("X".into())].into()),
+            ),
+        ]);
+        let val = grafeo_common::Value::Map(Arc::new(map));
+        assert!(matches!(grafeo_to_bolt(&val), BoltValue::Relationship(_)));
     }
 }

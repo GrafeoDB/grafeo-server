@@ -5,6 +5,86 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.44] - 2026-10-05
+
+Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation options survive a restart, write counters on every transport, upserts by key, graph-aware sync and replication, and storage tiers in Studio. Replicas no longer lose events, the sync endpoints check authorization, and creating a database never touches an existing one. Lockstep from 0.5.40: also ships the unreleased 0.5.42 changes below.
+
+> **Heads-up: the next engine release, grafeo 0.6.0, changes the on-disk format.** The first server built on it (grafeo-server 0.6.0) migrates a database on first open; after that, 0.5.44 and older can no longer open it, so keep a backup if you may need to go back.
+
+### Added
+
+- **Write counters**: `/query` and the other HTTP query endpoints return `counters` (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`) for statements that write, also when streaming; GWP puts them in `ResultSummary.counters`; Bolt returns Neo4j's `stats`, which drivers expose as `summary.counters`. Values above `i64::MAX` are sent as `i64::MAX` on GWP and Bolt.
+- **`POST /db/{name}/upsert/nodes` and `/upsert/edges`**: create or update many nodes or edges by a key property in one all-or-nothing statement, optionally in a named graph. Rows are plain JSON objects. Returns `created`, `updated`, `skipped` and `skipped_rows`. A request the engine rejects (bad rows, a constraint or schema violation) is a 400, a missing graph a 404, a write conflict with a concurrent transaction a 409 (retry it), and an internal engine failure a 500.
+- **Change events name their graph and previous labels**: `ChangeEventDto` has `graph` (absent for the default graph) and `before_labels` (on label changes), on the pull feed, SSE and WebSocket.
+- **Graph-aware sync and replication**: `SyncChangeRequest` takes `graph`; replicas replay each write into the graph it came from and create a missing graph (outside schemas) on its first create. Label changes replicate.
+- **Studio: storage tiers** ([#70](https://github.com/GrafeoDB/grafeo-server/issues/70)): persistent databases show each section's tier with a "Reload spilled sections" action, and the create dialog takes per-section tier overrides.
+
+### Changed
+
+- **grafeo-engine 0.5.44** (from 0.5.42, including 0.5.43): crash-safe checkpoints and WAL recovery (edges no longer doubled after a checkpoint and a restart, [grafeo#417](https://github.com/GrafeoDB/grafeo/issues/417)), indexes and constraints that survive a reopen, schema checks on every write path, commit and rollback in O(changes), and fixes to `ORDER BY`, `UNION`, aggregates, subqueries, `OPTIONAL MATCH`, `MERGE`, shortest paths and variable-length edges. See the engine changelog.
+- **Some queries that ran now fail**, as in openCypher: trailing input or `stmt; stmt` in one query string, an unnamed expression in `WITH`, `UNION` mixed with `UNION ALL`, and others listed in the engine's 0.5.44 changelog. Unaliased columns are named after their expression (`count(n)` instead of `count(...)`).
+- **Breaking (sync clients): the change feed cursor**: `GET /db/{name}/changes` never splits an epoch across responses. When a response is cut at `limit`, `server_epoch` is the epoch of its last event; otherwise it is the newest epoch whose events are all recorded, which can be one below the current epoch while a write is in flight, and it never goes below `since - 1`. Resume with `since = server_epoch + 1` and keep the larger cursor. A client that passed `server_epoch` back as an inclusive `since` now sees repeats, and can loop on an epoch larger than `limit`. `grafeo-sync` and the built-in replica follow the new contract. Engine 0.5.44 records RDF triple changes without starting a new epoch, so a reader can still miss one that lands in an epoch it was just told is complete.
+- **Sync**: a pushed change the engine rejects (missing entity or endpoint, a node that still has edges, a schema violation) is reported in `conflicts` with a `write_failed:` reason instead of counting as applied; `labels` on a node `update` replaces the node's labels; and `POST /db/{name}/sync` on a read-only server returns 403.
+- **Change streams end with a terminal event when they cannot keep up**: an SSE subscriber that falls behind gets `event: lagged` with `{"skipped": n, "since": e}` and a WebSocket subscription a `lagged` error with the same `detail` (the socket stays open): resume with `since=e`, the first epoch not delivered in full. A failed history read sends `event: error` (an internal failure reads "internal error", with the detail in the server log). A failed WebSocket query reads "internal error" in `detail` for an internal failure, with the real error in the server log. A browser `EventSource` reconnects with its original `?since=` unless the client closes it and resumes from the cursor it got. WebSocket subscriptions deliver the history from `since` first, then live changes, with no gap or repeat between them, like the SSE stream; before, they got history only when they started the database's feed. A WebSocket subscribe to a missing database, or one without CDC, is answered with an error.
+- **Replicas reject writes over HTTP**: POST routes that write (create database, graphs, schemas, import, upserts, compact, index changes, restore) and client `POST /db/{name}/sync` return 503 `replica_mode` on a replica, as PUT, PATCH and DELETE already did; the replica applies the primary's changes internally. Queries, search, the change feed, backups, WAL checkpoints and token management (on builds with `auth`) stay available.
+- **Tier overrides**: `force_disk` is rejected (400) for `Catalog`, `LpgStore` and `RdfStore`, which engine 0.5.44 cannot spill; Studio offers only Auto and Keep in RAM for them.
+- **Upserts reject integers above `i64::MAX`** (400, naming the row and property) instead of rounding them to floats, so large keys no longer collide. serde_json still reads integers beyond `u64::MAX` or below `i64::MIN` as floats.
+- **Epoch restore replays into a staging file**: the database is in Restoring (503) while the backup chain replays into `data.grafeo.restoring`, which is swapped in when ready; a chain that fails leaves the database untouched. An epoch the chain does not cover returns 400 with its own message instead of 500.
+- **OpenAPI**: the upsert endpoints document `rows` as an array of objects and the 409 of a write conflict, and say that one call is one statement and that the body is limited by `GRAFEO_MAX_BODY_SIZE` (2 MiB by default, 413 above it).
+- **`POST /admin/{db}/reload-eligible` takes an optional body** (the target fraction defaults to 0.7); an empty body with `Content-Type: application/json` counts as no body.
+- **Build**: Rust toolchain pinned to 1.99.0 for local builds and CI; the MSRV stays 1.91.1 and CI checks it, with all features too. CI runs each crate's unit tests with all features (now including `grafeo-boltr` and `grafeo-sync`), the replication tests, the replica guard on a build without `auth`, the service tests on a build without the triple store, and clippy with all features.
+
+### Fixed
+
+- **Creation options were lost after a restart** ([#67](https://github.com/GrafeoDB/grafeo-server/issues/67)): `memory_limit_bytes`, `threads`, `backward_edges`, WAL settings, `spill_path` and `section_tiers` are stored in `options.json` next to the database and applied on every reopen, including after a restore. Databases created before 0.5.44 open as before. This is a server-side workaround; the engine stores these settings itself from grafeo 0.6.0 ([grafeo#551](https://github.com/GrafeoDB/grafeo/issues/551)), the release that also starts enforcing the memory limit ([grafeo#398](https://github.com/GrafeoDB/grafeo/issues/398)).
+- **Stored options the engine rejects kept a database closed**: an `options.json` with a value the engine refuses (for example `threads: 0`) now opens the database with engine defaults and logs a warning. Value errors, unknown names and mistyped values (`"threads": "8"`) fall back, and the fallback keeps the stored database type (its graph model, and the schema checks of a JSON Schema database). A file that cannot be read as JSON, or one from before 0.5.44 (which has none), opens with the engine defaults as before. A graph model the build lacks keeps the database closed with its files untouched, and the error names the missing feature: this is an RDF database on a server built without the triple store (for example the GWP-only and Bolt-only images), because opening it as a property graph would rewrite the file without its RDF data.
+- **Replicas and change streams lost events past the batch limit**: a burst of more than 500 events (one upsert or import of 1,000 rows is enough) was cut and the rest skipped.
+- **A replica could skip a write recorded just after its poll**: the engine publishes an epoch before it records that write's change events, and the feed handed out that epoch as complete.
+- **Replicas with `--data-dir` hung on their first epoch update** (a lock held while saving the replication epoch).
+- **Change events of one transaction came back in arbitrary order**, so a replica could replay an edge before its endpoints.
+- **The sync endpoints skipped authorization**: with `auth` on, any token could read every database's change feed and write through `POST /db/{name}/sync`. They now check the token's database scope, and `/sync` needs write access.
+- **Replica apply conflicts were discarded**: they are logged and shown in `/admin/replication` until a restart.
+- **One subscriber could stall or skip the live change feed for the others**: a `since` far ahead held the shared feed back until a restart, and a new subscriber could make it skip events earlier ones still waited for. Later subscribers no longer move the shared feed, and the first one starts it no later than the first epoch that can still gain events.
+- **Live subscriptions hung when their database went away**: when a database is dropped, restored, compacted or created again under the same name, or its CDC is turned off, an SSE stream now ends with an `error` event and a WebSocket subscription with a `closed` error; the socket stays open. This holds also when a restore, or a drop and create, falls between two polls of the feed, or while a stream is still sending history: it ends instead of joining two histories.
+- **Reusing a WebSocket `sub_id` left the old subscription running**, so changes arrived twice; subscribing again now replaces it, also when the new subscribe fails.
+- **`DELETE /db/sync` on a replica deleted the database named `sync`**: the guard let through any path ending in `/sync` or `/changes`.
+- **A malformed sync change could create a named graph** before it was rejected, and an `update` or `delete` aimed at a missing graph created it empty; only creates create graphs now.
+- **Creating a database could adopt or delete an existing one on disk**: a database skipped at startup, one left with only its WAL (also a legacy `grafeo.db.wal`) or a dangling `data.grafeo` link was taken over by a new create, and a create that failed deleted its directory. Two creates of one name could also remove each other's files. `create` now refuses (409) and rolls back only what it made.
+- **`POST /admin/{db}/restore/epoch` failed on engine 0.5.43+**, which refuses to restore over an existing database.
+- **An interrupted epoch restore could leave a database without its file**: startup moves an orphaned `data.grafeo.pre-restore` back before opening and before creating an empty `default`. When a `data.grafeo` or a WAL is at the database path too, nothing moves and the log names both paths. When the copy cannot be moved back, startup stops with the path in the error for `default`, instead of creating an empty one next to the orphaned copy, and other databases stay closed. When a `data.grafeo` is present the database opens normally, `default` included. `POST /db` refuses a directory that holds an orphaned copy.
+- **A dropped compaction request could remove the database until a restart (an in-memory one for good)**, and a dropped restore request could leave it in Restoring (503) until a restart: the database was put back only if the request waited. Compaction and both restores now run in a task of their own, which finishes and puts the database back whatever the request does.
+- **CDC stopped after a restore on a primary** until a restart.
+- **A full restore went on after the old database failed to close**; it now stops and keeps the database online.
+- **Bolt: a map with a `_labels` key was sent as a node**, and an edge carrying a `_labels` property as a node; only engine node and edge shapes (with `_id`) become Bolt structures.
+- **Studio**: storage tiers can be retried after a failed load; the backups section says when the server has no backup directory, shows load errors instead of an empty list, and no longer shows another database's backups when a slow answer arrives after switching databases.
+
+### Security
+
+- h2 0.4.19 (RUSTSEC-2026-0258), rustls 0.23.45 (RUSTSEC-2026-0285), crossbeam-epoch 0.9.21 (RUSTSEC-2026-0204), quinn-proto 0.11.19 (RUSTSEC-2026-0185), anyhow 1.0.104 (RUSTSEC-2026-0190), memmap2 0.9.11 (RUSTSEC-2026-0186), and the yanked chacha20 0.10.0 replaced by 0.10.2.
+
+---
+
+## [0.5.42] - Unreleased (ships in 0.5.44)
+
+Engine 0.5.42 alignment: storage tier introspection and control, end-to-end search procedure coverage. Lockstep version bump from 0.5.40 (0.5.41 was not released as a server version).
+
+### Added
+
+- **`GET /admin/{db}/storage-tiers`**: returns the current storage tier (`in_memory` / `on_disk` / `uninitialized`) of every section consumer in a database. Surfaces engine 0.5.42's `db.storage_tiers()` API.
+- **`POST /admin/{db}/reload-eligible`**: brings spilled sections back into RAM in priority order, stopping when projected memory usage exceeds `target_fraction * memory_limit`. Body: `{ "target_fraction": 0.7 }`. Returns `{ "reloaded": <count> }`. Surfaces `db.reload_eligible()`.
+- **`section_tiers` field on `DatabaseOptions`**: per-section tier override applied at db creation. Maps section names (`LpgStore`, `RdfStore`, `CompactStore`, `VectorStore`, `TextIndex`, `RdfRing`, `PropertyIndex`, `Catalog`) to tier strings (`auto` / `force_ram` / `force_disk`). Calls engine `Config::with_section_tier`.
+- **Search procedure smoke coverage**: HTTP, GWP, and Bolt integration tests now exercise `CALL grafeo.search.text` end-to-end; HTTP also covers `CALL grafeo.search.vector`.
+
+### Changed
+
+- **grafeo-engine 0.5.42**: tiered storage (mmap spill, paged HNSW, packed RDF Ring), per-block columnar zone maps for selective range scans, WAL overlay for mutable mmap'd LPG, streaming top-K operator (planner fuses `ORDER BY ... LIMIT k`), `var.prop IN [literals]` property-index fast path, filter pushdown through `LeftJoin`/`Apply`/`Union`/`Unwind`. Also picks up engine 0.5.41's `CALL grafeo.search.*` procedures, `RawI64` columnar codec, disk-backed compact base, RDF/CDC memory breakdown blocks, and the WAL/CDC search-wrapper fix that previously made text/vector search silently no-op on file-backed DBs.
+
+### Fixed
+
+- **Bolt clients received nodes and relationships as plain dicts** ([grafeo#341](https://github.com/GrafeoDB/grafeo/issues/341)): node- and edge-shaped engine values now encode as Bolt `Node` and `Relationship` structures.
+
+---
+
 ## [0.5.40] - 2026-04-20
 
 Engine 0.5.40 alignment: catalog name validation, stats simplification.

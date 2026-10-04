@@ -7,7 +7,7 @@
 //! cargo test --features "full" --test replication -- --nocapture
 //! ```
 
-#![cfg(all(feature = "http", feature = "sync"))]
+#![cfg(all(feature = "http", feature = "sync", feature = "replication"))]
 
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -35,7 +35,6 @@ async fn spawn_primary() -> String {
         auth_password: None,
         #[cfg(feature = "auth")]
         token_store_path: None,
-        #[cfg(feature = "replication")]
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
         backup_dir: None,
         backup_retention: None,
@@ -49,10 +48,12 @@ async fn spawn_primary() -> String {
     spawn_server(state).await
 }
 
-/// Boots a replica in-memory server on an ephemeral port.
-/// The `primary_url` is used for the replica guard middleware (write rejection),
-/// but we don't start the background replication task in tests.
-async fn spawn_replica(primary_url: &str) -> String {
+/// Boots a replica in-memory server on an ephemeral port and returns its URL
+/// and its service state. The `primary_url` is used for the replica guard
+/// middleware (write rejection), but we don't start the background
+/// replication task in tests: [`replicate`] applies the primary's changes
+/// to the state directly, as that task does.
+async fn spawn_replica(primary_url: &str) -> (String, grafeo_service::ServiceState) {
     let config = grafeo_service::ServiceConfig {
         data_dir: None,
         read_only: false,
@@ -68,7 +69,6 @@ async fn spawn_replica(primary_url: &str) -> String {
         auth_password: None,
         #[cfg(feature = "auth")]
         token_store_path: None,
-        #[cfg(feature = "replication")]
         replication_mode: grafeo_service::replication::ReplicationMode::Replica {
             primary_url: primary_url.to_string(),
         },
@@ -77,11 +77,11 @@ async fn spawn_replica(primary_url: &str) -> String {
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
-        service,
+        service.clone(),
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
     );
-    spawn_server(state).await
+    (spawn_server(state).await, service)
 }
 
 async fn spawn_server(state: grafeo_server::AppState) -> String {
@@ -119,9 +119,16 @@ async fn node_count(client: &Client, base: &str) -> i64 {
     resp["rows"][0][0].as_i64().unwrap_or(0)
 }
 
-/// Pulls changes from primary and applies to replica.
+/// Pulls changes from primary and applies them to the replica the way the
+/// replication task does: through `SyncService::apply`, since a replica
+/// rejects `POST /db/{name}/sync`.
 /// Returns the new server epoch after applying.
-async fn replicate(client: &Client, primary: &str, replica: &str, since: u64) -> u64 {
+async fn replicate(
+    client: &Client,
+    primary: &str,
+    replica: &grafeo_service::ServiceState,
+    since: u64,
+) -> u64 {
     // Pull changes from primary (since is exclusive: start from since+1)
     let fetch_since = if since > 0 { since + 1 } else { 0 };
     let changes_resp: Value = client
@@ -163,27 +170,26 @@ async fn replicate(client: &Client, primary: &str, replica: &str, since: u64) ->
         })
         .collect();
 
-    // Apply to replica
-    let apply_resp: Value = client
-        .post(format!("{replica}/db/default/sync"))
-        .json(&json!({
-            "client_id": "test-replicator",
-            "last_seen_epoch": since,
-            "changes": sync_changes,
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    // Apply to replica, on a blocking thread as the replication task does:
+    // `apply` writes to the engine synchronously.
+    let request: grafeo_service::sync::SyncRequest = serde_json::from_value(json!({
+        "client_id": "test-replicator",
+        "last_seen_epoch": since,
+        "changes": sync_changes,
+    }))
+    .unwrap();
+    let replica = replica.clone();
+    let apply_resp = tokio::task::spawn_blocking(move || {
+        grafeo_service::sync::SyncService::apply(replica.databases(), "default", request)
+    })
+    .await
+    .expect("the apply task panicked")
+    .expect("the replica rejected the batch");
 
     assert!(
-        apply_resp["conflicts"]
-            .as_array()
-            .is_none_or(|c| c.is_empty()),
+        apply_resp.conflicts.is_empty(),
         "Unexpected conflicts during replication: {:?}",
-        apply_resp["conflicts"]
+        apply_resp.conflicts
     );
 
     server_epoch
@@ -197,7 +203,7 @@ async fn replicate(client: &Client, primary: &str, replica: &str, since: u64) ->
 async fn primary_writes_replicate_to_replica() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, replica_state) = spawn_replica(&primary).await;
 
     // Write 5 nodes to primary
     for i in 0..5 {
@@ -217,7 +223,7 @@ async fn primary_writes_replicate_to_replica() {
     );
 
     // Replicate
-    replicate(&client, &primary, &replica, 0).await;
+    replicate(&client, &primary, &replica_state, 0).await;
 
     // Verify replica has all nodes
     let replica_count = node_count(&client, &replica).await;
@@ -231,7 +237,7 @@ async fn primary_writes_replicate_to_replica() {
 async fn session_mutations_replicate() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, replica_state) = spawn_replica(&primary).await;
 
     // Write via GQL INSERT (session-driven, exercises CdcGraphStore)
     query(
@@ -254,7 +260,7 @@ async fn session_mutations_replicate() {
     );
 
     // Replicate
-    replicate(&client, &primary, &replica, 0).await;
+    replicate(&client, &primary, &replica_state, 0).await;
 
     let replica_count = node_count(&client, &replica).await;
     assert!(
@@ -267,7 +273,7 @@ async fn session_mutations_replicate() {
 async fn replica_rejects_mutation_via_put() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, _) = spawn_replica(&primary).await;
 
     // PUT/DELETE requests are blocked by the replica guard middleware
     let resp = client
@@ -285,10 +291,52 @@ async fn replica_rejects_mutation_via_put() {
 }
 
 #[tokio::test]
+async fn replica_rejects_post_writes_but_answers_read_queries() {
+    let client = Client::new();
+    let primary = spawn_primary().await;
+    let (replica, _) = spawn_replica(&primary).await;
+
+    for (path, body) in [
+        (
+            "/db/default/upsert/nodes",
+            json!({"labels": ["Person"], "key": "name", "rows": [{"name": "Alix"}]}),
+        ),
+        ("/db", json!({"name": "copy"})),
+        (
+            "/db/default/sync",
+            json!({
+                "client_id": "c1",
+                "changes": [{"kind": "create", "entity_type": "node", "labels": ["Person"]}],
+            }),
+        ),
+    ] {
+        let resp = client
+            .post(format!("{replica}{path}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 503, "POST {path}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "replica_mode", "POST {path}");
+    }
+
+    let resp = client
+        .post(format!("{replica}/query"))
+        .json(&json!({"query": "MATCH (n) RETURN count(n) AS cnt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0, "nothing was written: {body}");
+}
+
+#[tokio::test]
 async fn replica_allows_read_queries() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, _) = spawn_replica(&primary).await;
 
     // Read queries should work on replicas
     let resp = client
@@ -309,7 +357,7 @@ async fn replica_allows_read_queries() {
 async fn convergence_after_multiple_batches() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, replica_state) = spawn_replica(&primary).await;
 
     let mut last_epoch = 0u64;
 
@@ -317,19 +365,19 @@ async fn convergence_after_multiple_batches() {
     for i in 0..3 {
         query(&client, &primary, &format!("INSERT (:Batch1 {{seq: {i}}})")).await;
     }
-    last_epoch = replicate(&client, &primary, &replica, last_epoch).await;
+    last_epoch = replicate(&client, &primary, &replica_state, last_epoch).await;
 
     // Batch 2: 2 nodes
     for i in 0..2 {
         query(&client, &primary, &format!("INSERT (:Batch2 {{seq: {i}}})")).await;
     }
-    last_epoch = replicate(&client, &primary, &replica, last_epoch).await;
+    last_epoch = replicate(&client, &primary, &replica_state, last_epoch).await;
 
     // Batch 3: 4 nodes
     for i in 0..4 {
         query(&client, &primary, &format!("INSERT (:Batch3 {{seq: {i}}})")).await;
     }
-    let _ = replicate(&client, &primary, &replica, last_epoch).await;
+    let _ = replicate(&client, &primary, &replica_state, last_epoch).await;
 
     // Verify counts match
     let primary_count = node_count(&client, &primary).await;
@@ -345,7 +393,7 @@ async fn convergence_after_multiple_batches() {
 async fn concurrent_writes_all_replicate() {
     let client = Client::new();
     let primary = spawn_primary().await;
-    let replica = spawn_replica(&primary).await;
+    let (replica, replica_state) = spawn_replica(&primary).await;
 
     // 4 concurrent writers
     let mut handles = Vec::new();
@@ -374,7 +422,7 @@ async fn concurrent_writes_all_replicate() {
     );
 
     // Replicate all at once
-    replicate(&client, &primary, &replica, 0).await;
+    replicate(&client, &primary, &replica_state, 0).await;
 
     let replica_count = node_count(&client, &replica).await;
     assert_eq!(

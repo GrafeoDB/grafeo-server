@@ -121,7 +121,10 @@ async fn query_create_and_match() {
     assert_eq!(resp.status(), 200);
 
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["columns"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["columns"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Match it back
     let resp = client
@@ -174,7 +177,7 @@ async fn cypher_endpoint_works() {
 
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(!rows.is_empty());
+    assert_ne!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +281,7 @@ async fn transaction_rollback() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(rows.is_empty());
+    assert_eq!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +508,10 @@ async fn readme_examples_cypher() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -606,7 +612,10 @@ async fn sidebar_examples() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // "Count nodes": MATCH (n) RETURN count(n)
     let resp = client
@@ -637,7 +646,10 @@ async fn sidebar_examples() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +800,10 @@ async fn query_on_specific_database() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["rows"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -897,7 +912,10 @@ async fn transaction_on_specific_database() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert!(body["rows"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,7 +1242,7 @@ async fn query_with_timeout_ms_succeeds() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    // Large timeout — should succeed
+    // Large timeout: should succeed
     let resp = client
         .post(format!("{base}/query"))
         .json(&json!({"query": "MATCH (n) RETURN count(n)", "timeout_ms": 60000}))
@@ -1335,7 +1353,7 @@ async fn no_auth_when_not_configured() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    // Standard spawn_server has no auth — should work without token
+    // Standard spawn_server has no auth, so it should work without token
     let resp = client
         .post(format!("{base}/query"))
         .json(&json!({"query": "MATCH (n) RETURN count(n)"}))
@@ -1856,7 +1874,7 @@ async fn sql_endpoint_call_procedures() {
 
     let body: Value = resp.json().await.unwrap();
     let rows = body["rows"].as_array().unwrap();
-    assert!(!rows.is_empty());
+    assert_ne!(rows.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]
@@ -1877,7 +1895,10 @@ async fn sql_pgq_via_query_language_field() {
     assert_eq!(resp.status(), 200);
 
     let body: Value = resp.json().await.unwrap();
-    assert!(!body["rows"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["rows"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -2017,6 +2038,52 @@ async fn gwp_execute_query() {
 
     let rows = cursor.collect_rows().await.unwrap();
     assert_eq!(rows.len(), 2, "should find 2 GwpTest nodes");
+
+    session.close().await.unwrap();
+}
+
+#[cfg(all(feature = "gwp", feature = "text-index"))]
+#[tokio::test]
+async fn gwp_call_grafeo_search_text() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let http_client = Client::new();
+
+    // Seed text-indexable data via HTTP (same pattern as gwp_execute_query).
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // Create a text index via HTTP (no GWP admin path for this in scope).
+    let idx = http_client
+        .post(format!("{http}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure via GWP.
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("GWP execute of search.text failed");
+
+    let rows = cursor.collect_rows().await.unwrap();
+    assert!(!rows.is_empty(), "expected at least one match for 'fox'");
 
     session.close().await.unwrap();
 }
@@ -2240,7 +2307,7 @@ async fn gwp_delete_then_recreate_database() {
         wal_durability: None,
     };
 
-    // Create, delete, recreate — exercises the close barrier path
+    // Create, delete, recreate: exercises the close barrier path
     catalog_client.create_graph(config.clone()).await.unwrap();
     catalog_client
         .drop_graph("default", "ephemeral", false)
@@ -2550,7 +2617,10 @@ async fn admin_validate_clean_database() {
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["valid"], true);
-    assert!(body["errors"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["errors"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -2580,7 +2650,7 @@ async fn admin_create_and_drop_property_index() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["dropped"], true);
 
-    // Drop again — should return false
+    // Drop again: should return false
     let resp = client
         .delete(format!("{base}/admin/default/index"))
         .json(&json!({"type": "property", "property": "name"}))
@@ -2653,7 +2723,7 @@ async fn openapi_includes_admin_and_search_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// Search endpoints (v0.4.3) — feature-dependent stubs
+// Search endpoints (v0.4.3): feature-dependent stubs
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2769,7 +2839,7 @@ async fn gwp_admin_validate() {
         .into_inner();
 
     assert!(resp.valid);
-    assert!(resp.errors.is_empty());
+    assert_eq!(resp.errors, [] as [gwp::proto::ValidationError; 0]);
 }
 
 #[cfg(feature = "gwp")]
@@ -3123,7 +3193,7 @@ async fn bolt_database_switching() {
         .await
         .unwrap();
 
-    // Query the new database — should see the data
+    // Query the new database: should see the data
     let result = session
         .run_with_params(
             "MATCH (n:SwitchTest) RETURN n.name",
@@ -3134,7 +3204,7 @@ async fn bolt_database_switching() {
         .unwrap();
     assert_eq!(result.records.len(), 1);
 
-    // Query the default database explicitly — should NOT see the data
+    // Query the default database explicitly: should NOT see the data
     let default_extra = boltr::types::BoltDict::from([(
         "db".to_string(),
         boltr::types::BoltValue::String("default".to_string()),
@@ -3199,6 +3269,50 @@ async fn bolt_language_dispatch() {
     session.close().await.unwrap();
 }
 
+#[cfg(all(feature = "bolt", feature = "text-index"))]
+#[tokio::test]
+async fn bolt_call_grafeo_search_text() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let http_client = Client::new();
+
+    // Seed text-indexable data via HTTP (same pattern as bolt_execute_query).
+    let resp = http_client
+        .post(format!("{http}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // Create a text index via HTTP (no Bolt admin path for this in scope).
+    let idx = http_client
+        .post(format!("{http}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure via Bolt.
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let result = session
+        .run("CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score")
+        .await
+        .expect("Bolt run of search.text failed");
+
+    assert!(
+        !result.records.is_empty(),
+        "expected at least one match for 'fox'"
+    );
+
+    session.close().await.unwrap();
+}
+
 // ===========================================================================
 // Memory usage endpoint (v0.4.7)
 // ===========================================================================
@@ -3239,6 +3353,383 @@ async fn admin_memory_usage_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
+#[tokio::test]
+async fn admin_memory_usage_includes_buffer_manager_breakdown() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let body: Value = client
+        .get(format!("{base}/admin/default/memory"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Engine 0.5.41 expanded the buffer_manager block; assert the object is
+    // non-empty and contains at least one of the canonical numeric fields.
+    let bm = body["buffer_manager"]
+        .as_object()
+        .expect("buffer_manager object");
+    assert!(
+        bm.contains_key("allocated_bytes")
+            || bm.contains_key("budget_bytes")
+            || bm.contains_key("execution_buffers_bytes")
+            || bm.contains_key("graph_storage_bytes")
+            || bm.contains_key("index_buffers_bytes")
+            || bm.contains_key("spill_staging_bytes"),
+        "buffer_manager should expose breakdown fields; got {bm:?}"
+    );
+}
+
+// ===========================================================================
+// Storage tiers endpoint (engine 0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn admin_storage_tiers_returns_tier_list() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/default/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let tiers = body["tiers"].as_array().expect("tiers is array");
+    assert!(!tiers.is_empty(), "expected at least one section");
+    for entry in tiers {
+        assert!(entry["section"].is_string());
+        let tier = entry["tier"].as_str().unwrap();
+        assert!(
+            tier == "in_memory" || tier == "uninitialized",
+            "in-memory db must not report on_disk; got {tier}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_storage_tiers_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/admin/nonexistent/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ===========================================================================
+// Reload eligible endpoint (engine 0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn admin_reload_eligible_in_memory_returns_zero() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_accepts_explicit_fraction() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .json(&json!({ "target_fraction": 0.5 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["reloaded"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_accepts_missing_body() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_accepts_empty_json_body() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .header("content-type", "application/json")
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["reloaded"], 0);
+
+    // A body that is not JSON is still a 400.
+    let resp = client
+        .post(format!("{base}/admin/default/reload-eligible"))
+        .header("content-type", "application/json")
+        .body("{nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn admin_reload_eligible_not_found() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/admin/nonexistent/reload-eligible"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ===========================================================================
+// Storage tiers round-trip (section_tiers, v0.5.42)
+// ===========================================================================
+
+#[tokio::test]
+async fn create_database_with_section_tiers_roundtrips_via_storage_tiers() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Create a db with section_tiers set to auto (exercises the parser
+    // and Config plumbing without forcing a tier transition).
+    let create = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "tiered_http",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "section_tiers": {
+                    "VectorStore": "auto",
+                    "LpgStore": "auto"
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200, "{}", create.text().await.unwrap());
+
+    // Confirm the new endpoint reports a tier list for the new db.
+    let resp = client
+        .get(format!("{base}/admin/tiered_http/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["tiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["section"] == "LpgStore")
+    );
+}
+
+#[tokio::test]
+async fn create_database_rejects_invalid_section_tier_value() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "bad_tier",
+            "database_type": "Lpg",
+            "storage_mode": "InMemory",
+            "options": {
+                "section_tiers": { "VectorStore": "frozen" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_database_rejects_force_disk_for_unspillable_section() {
+    let (base, data_dir, _backup_dir) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "nospill",
+            "database_type": "Lpg",
+            "storage_mode": "Persistent",
+            "options": {
+                "section_tiers": { "LpgStore": "force_disk" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("cannot be kept on disk"), "body: {text}");
+
+    let resp = client
+        .get(format!("{base}/db/nospill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert!(!data_dir.path().join("nospill").exists());
+}
+
+/// Survival smoke test: a persistent database created with a non-auto tier
+/// override is stored with it and still serves requests after a restart.
+/// The override itself is pinned by the unit test
+/// `section_tier_override_is_applied_on_reopen`.
+///
+/// Engine 0.5.44 does not report overrides: `/admin/{db}/storage-tiers` lists
+/// only the sections that hold data, and a `force_disk` spill at open finds
+/// them empty. So this checks what the server controls: the override is
+/// accepted, kept in `options.json`, and the database serves requests from
+/// a second manager on the same directory.
+#[tokio::test]
+async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
+    let data_dir = TempDir::new().unwrap();
+    let make_state = || {
+        let config = grafeo_service::ServiceConfig {
+            data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
+            read_only: false,
+            session_ttl: 300,
+            query_timeout: 30,
+            rate_limit: 0,
+            rate_limit_window: 60,
+            #[cfg(feature = "auth")]
+            auth_token: None,
+            #[cfg(feature = "auth")]
+            auth_user: None,
+            #[cfg(feature = "auth")]
+            auth_password: None,
+            #[cfg(feature = "auth")]
+            token_store_path: None,
+            #[cfg(feature = "replication")]
+            replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
+            backup_dir: None,
+            backup_retention: None,
+        };
+        grafeo_service::ServiceState::new(&config)
+    };
+    let client = Client::new();
+
+    let first = make_state();
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
+        first.clone(),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    ))
+    .await;
+    let create = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "spilled",
+            "database_type": "Lpg",
+            "storage_mode": "Persistent",
+            "options": { "section_tiers": { "VectorStore": "force_disk" } }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200, "{}", create.text().await.unwrap());
+    let seed = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "database": "spilled",
+            "query": "INSERT (:Item {name: 'kept'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    let options_file = data_dir.path().join("spilled").join("options.json");
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
+    assert_eq!(
+        stored["options"]["section_tiers"]["VectorStore"],
+        "force_disk"
+    );
+
+    // Release the first manager's files, then open a second manager on the
+    // same directory.
+    for summary in first.databases().list() {
+        first
+            .databases()
+            .get(&summary.name)
+            .unwrap()
+            .db()
+            .close()
+            .unwrap();
+    }
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
+        make_state(),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    ))
+    .await;
+
+    let tiers = client
+        .get(format!("{base}/admin/spilled/storage-tiers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tiers.status(), 200);
+    let rows = client
+        .post(format!("{base}/query"))
+        .json(&json!({
+            "database": "spilled",
+            "query": "MATCH (i:Item) RETURN i.name"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rows.status(), 200);
+    let rows: Value = rows.json().await.unwrap();
+    assert_eq!(rows["rows"][0][0], "kept", "{rows}");
+}
+
 // ===========================================================================
 // Named graphs (v0.4.7)
 // ===========================================================================
@@ -3256,7 +3747,10 @@ async fn named_graphs_crud() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["graphs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["graphs"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Create a named graph
     let resp = client
@@ -3720,7 +4214,7 @@ async fn read_only_list_databases_works() {
 
     let body: Value = resp.json().await.unwrap();
     let dbs = body["databases"].as_array().unwrap();
-    assert!(!dbs.is_empty());
+    assert_ne!(dbs.as_slice(), [] as [serde_json::Value; 0]);
     assert!(dbs.iter().any(|d| d["name"] == "default"));
 }
 
@@ -4024,7 +4518,10 @@ async fn e2e_named_graphs_full_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["graphs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["graphs"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // 2. Create two named graphs
     let resp = client
@@ -4473,9 +4970,9 @@ async fn sync_round_trip_two_databases() {
     let state_a = sync_state();
     {
         let entry = state_a.databases().get("default").unwrap();
-        entry.db().create_node(&["Person"]);
-        entry.db().create_node(&["Person"]);
-        entry.db().create_node(&["Person"]);
+        entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_node(&["Person"]).unwrap();
     }
     let base_a = spawn_server_from_state(state_a).await;
 
@@ -4538,7 +5035,10 @@ async fn sync_round_trip_two_databases() {
     // All 3 creates applied, no conflicts
     assert_eq!(apply_body["applied"], 3);
     assert_eq!(apply_body["skipped"], 0);
-    assert!(apply_body["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        apply_body["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     // Server B assigned a new ID for each create
     let mappings = apply_body["id_mappings"].as_array().unwrap();
@@ -4564,9 +5064,9 @@ async fn sync_with_edge_creates() {
     let state_a = sync_state();
     let (alix_raw, gus_raw) = {
         let entry = state_a.databases().get("default").unwrap();
-        let alix = entry.db().create_node(&["Person"]);
-        let gus = entry.db().create_node(&["Person"]);
-        entry.db().create_edge(alix, gus, "KNOWS");
+        let alix = entry.db().create_node(&["Person"]).unwrap();
+        let gus = entry.db().create_node(&["Person"]).unwrap();
+        entry.db().create_edge(alix, gus, "KNOWS").unwrap();
         (alix.as_u64(), gus.as_u64())
     };
     let base_a = spawn_server_from_state(state_a).await;
@@ -4660,7 +5160,10 @@ async fn sync_with_edge_creates() {
         .unwrap();
 
     assert_eq!(edge_resp["applied"], 1);
-    assert!(edge_resp["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        edge_resp["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     let edge_mappings = edge_resp["id_mappings"].as_array().unwrap();
     assert_eq!(edge_mappings.len(), 1);
     assert!(edge_mappings[0]["server_id"].as_u64().is_some());
@@ -4677,8 +5180,8 @@ async fn sync_updates_and_deletes() {
     let state_b = sync_state();
     let (n1, n2) = {
         let entry = state_b.databases().get("default").unwrap();
-        let n1 = entry.db().create_node(&["Device"]).as_u64();
-        let n2 = entry.db().create_node(&["Device"]).as_u64();
+        let n1 = entry.db().create_node(&["Device"]).unwrap().as_u64();
+        let n2 = entry.db().create_node(&["Device"]).unwrap().as_u64();
         (n1, n2)
     };
     let base_b = spawn_server_from_state(state_b).await;
@@ -4718,12 +5221,18 @@ async fn sync_updates_and_deletes() {
 
     assert_eq!(resp["applied"], 2);
     assert_eq!(resp["skipped"], 0);
-    assert!(resp["conflicts"].as_array().unwrap().is_empty());
+    assert_eq!(
+        resp["conflicts"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     // No creates, so no id_mappings.
-    assert!(resp["id_mappings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        resp["id_mappings"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
-/// Sync: LWW conflict detection — stale client update is rejected.
+/// Sync: LWW conflict detection, a stale client update is rejected.
 ///
 /// A node is created directly on the server (CDC records it with the current
 /// wall-clock time T). Pushing an update with timestamp=1 (which is less than T)
@@ -4734,7 +5243,7 @@ async fn sync_lww_conflict_detection() {
     let state = sync_state();
     let node_id = {
         let entry = state.databases().get("default").unwrap();
-        entry.db().create_node(&["Person"]).as_u64()
+        entry.db().create_node(&["Person"]).unwrap().as_u64()
     };
     let base = spawn_server_from_state(state).await;
 
@@ -4780,7 +5289,7 @@ async fn sync_limit_truncation() {
     {
         let entry = state.databases().get("default").unwrap();
         for _ in 0..7 {
-            entry.db().create_node(&["Item"]);
+            entry.db().create_node(&["Item"]).unwrap();
         }
     }
     let base = spawn_server_from_state(state).await;
@@ -4821,7 +5330,55 @@ async fn sync_limit_truncation() {
         .json()
         .await
         .unwrap();
-    assert!(caught_up["changes"].as_array().unwrap().is_empty());
+    assert_eq!(
+        caught_up["changes"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+}
+
+/// `GET /db/{name}/changes`: a named-graph event carries `graph` and a label
+/// change carries `before_labels` in the JSON.
+#[cfg(feature = "sync")]
+#[tokio::test]
+async fn sync_changes_json_has_graph_and_before_labels() {
+    let state = sync_state();
+    {
+        let db = state.databases().get("default").unwrap().db();
+        db.execute("CREATE GRAPH g2").unwrap();
+        let session = db.session();
+        session.use_graph("g2");
+        session.execute("INSERT (:InG2)").unwrap();
+        db.session().execute("INSERT (:Draft)").unwrap();
+        db.session()
+            .execute("MATCH (n:Draft) SET n:Published")
+            .unwrap();
+    }
+    let base = spawn_server_from_state(state).await;
+
+    let page: Value = Client::new()
+        .get(format!("{base}/db/default/changes?since=0&limit=100"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let changes = page["changes"].as_array().unwrap();
+    let in_g2 = changes
+        .iter()
+        .find(|c| c["labels"] == json!(["InG2"]))
+        .expect("the named-graph event");
+    assert_eq!(in_g2["graph"], "g2");
+    let in_default = changes
+        .iter()
+        .find(|c| c["labels"] == json!(["Draft"]))
+        .expect("the default-graph event");
+    assert!(in_default.get("graph").is_none_or(Value::is_null));
+    let relabel = changes
+        .iter()
+        .find(|c| c.get("before_labels").is_some_and(|v| !v.is_null()))
+        .expect("the label-change event");
+    assert_eq!(relabel["before_labels"], json!(["Draft"]));
 }
 
 /// Sync: missing required fields produce descriptive conflict reasons.
@@ -4882,6 +5439,467 @@ async fn sync_validation_errors() {
     assert!(reasons.contains(&"edge_create_missing_src_dst_or_type"));
 }
 
+/// Reads the next data event of an SSE response as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_sse_data(resp: &mut reqwest::Response, pending: &mut String) -> Value {
+    let (name, data) = next_sse_message(resp, pending).await;
+    assert_eq!(name, None, "a named event: {data}");
+    data
+}
+
+/// Reads the next SSE message: its event name (`None` for a plain data
+/// event) and its data as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_sse_message(
+    resp: &mut reqwest::Response,
+    pending: &mut String,
+) -> (Option<String>, Value) {
+    let mut name = None;
+    loop {
+        if let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            let line = line.trim_end();
+            if let Some(event) = line.strip_prefix("event:") {
+                name = Some(event.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data:") {
+                return (name, serde_json::from_str(data.trim_start()).unwrap());
+            }
+            continue;
+        }
+        // Above the 15 s SSE keep-alive, so a quiet stream is not a failure.
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), resp.chunk())
+            .await
+            .expect("no SSE data within 30 s")
+            .unwrap()
+            .expect("the SSE stream ended");
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// SSE: a history longer than one pull arrives whole and once, then live
+/// events follow it.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_pages_through_history_then_goes_live() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    // Three epochs of 6 000 events: more than the 10 000 one pull returns.
+    for label in ["A", "B", "C"] {
+        db.batch_create_nodes_with_labels(&[label], vec![std::collections::HashMap::new(); 6_000])
+            .unwrap();
+    }
+    let base = spawn_server_from_state(state).await;
+
+    let mut resp = Client::new()
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut pending = String::new();
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..18_000 {
+        let event = next_sse_data(&mut resp, &mut pending).await;
+        assert!(
+            ids.insert(event["id"].as_u64().unwrap()),
+            "event sent twice: {event}"
+        );
+    }
+
+    db.create_node(&["Live"]).unwrap();
+    let live = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(live["labels"], json!(["Live"]));
+}
+
+/// SSE: a stream that falls more than the hub's channel behind ends with a
+/// `lagged` event that says where to resume.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+    let mut resp = client
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    db.create_node(&["Warmup"]).unwrap();
+    let warmup_epoch = db.current_epoch().0;
+    let mut pending = String::new();
+    let warmup = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(warmup["labels"], json!(["Warmup"]));
+
+    // One epoch of 5 000 events, several times what the hub's channel holds.
+    // The hub sends a whole epoch in one poll, without yielding, and
+    // `#[tokio::test]` runs the server, the hub and this client on one
+    // thread, so nothing reads the channel until the burst is in it and the
+    // subscriber lags for certain. How many it loses depends on the channel
+    // size and, on a multi-threaded runtime, on how much it drains meanwhile:
+    // only a loss is asserted.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 5_000])
+        .unwrap();
+    let (name, data) = next_sse_message(&mut resp, &mut pending).await;
+    assert_eq!(name.as_deref(), Some("lagged"), "{data}");
+    assert!(data["skipped"].as_u64().unwrap() > 0, "{data}");
+    // The first epoch not delivered in full: the warm-up's (sent live) or
+    // the one after it (sent with the history).
+    let since = data["since"].as_u64().unwrap();
+    assert!(since <= warmup_epoch + 1, "{data}");
+    let end = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(end.is_none(), "the lag ends the stream");
+
+    // Resuming at `since` gets the whole burst.
+    let resumed: Value = client
+        .get(format!(
+            "{base}/db/default/changes?since={since}&limit=10000"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bursts = resumed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["labels"] == json!(["Burst"]))
+        .count();
+    assert_eq!(bursts, 5_000);
+}
+
+/// WebSocket: a subscription that falls behind ends with a `lagged` error,
+/// the connection stays open, and subscribing again at its `since` gets
+/// every event it lost.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "subscribed");
+
+    db.create_node(&["Warmup"]).unwrap();
+    let warmup_epoch = db.current_epoch().0;
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "change", "{body}");
+    assert_eq!(body["event"]["labels"], json!(["Warmup"]));
+
+    // One epoch of 5 000 events, several times what the hub's channel holds.
+    // The hub sends a whole epoch in one poll, without yielding, and
+    // `#[tokio::test]` runs the server, the hub and this client on one
+    // thread, so nothing reads the channel until the burst is in it and the
+    // subscriber lags for certain. How many it loses depends on the channel
+    // size and, on a multi-threaded runtime, on how much it drains meanwhile:
+    // only a loss is asserted.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 5_000])
+        .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"], "lagged");
+    assert_eq!(body["id"], "s1");
+    let detail: Value = serde_json::from_str(body["detail"].as_str().unwrap()).unwrap();
+    assert!(detail["skipped"].as_u64().unwrap() > 0, "{detail}");
+    // The first epoch not delivered in full: the warm-up's (sent live) or
+    // the one after it (sent with the history).
+    let since = detail["since"].as_u64().unwrap();
+    assert!(since <= warmup_epoch + 1, "{detail}");
+
+    // The socket is still open: subscribing again at `since` sends the
+    // history from there, the whole burst once, before anything live.
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s2", "db": "default", "since": since})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    let mut bursts = std::collections::HashSet::new();
+    while bursts.len() < 5_000 {
+        let body = next_ws_json(&mut ws).await;
+        assert_eq!(body["type"], "change", "{body}");
+        assert_eq!(body["sub_id"], "s2");
+        if body["event"]["labels"] == json!(["Burst"]) {
+            assert!(
+                bursts.insert(body["event"]["id"].as_u64().unwrap()),
+                "sent twice: {body}"
+            );
+        }
+    }
+    db.create_node(&["After"]).unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["event"]["labels"], json!(["After"]), "{body}");
+}
+
+/// Reads the next WebSocket text message as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_ws_json<S>(ws: &mut S) -> Value
+where
+    S: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>> + Unpin,
+{
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), ws.next())
+        .await
+        .expect("no WebSocket message within 30 s")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(reply.to_text().unwrap()).unwrap()
+}
+
+/// WebSocket: a subscription at `since` gets the history from there, once,
+/// then live events, also while another subscriber keeps the change hub
+/// running (and so ahead of the new subscription's `since`).
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_sends_history_from_since_then_live() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let mut old = Vec::new();
+    for _ in 0..3 {
+        old.push(db.create_node(&["Old"]).unwrap().as_u64());
+    }
+    let since = db.current_epoch().0 - 1;
+    // Another subscriber keeps the hub running past the history.
+    let _other =
+        state
+            .change_hub()
+            .subscribe("default", db.current_epoch().0 + 1, state.service().clone());
+    let base = spawn_server_from_state(state.clone()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": since})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+
+    // The two writes from `since` on, in order.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body = next_ws_json(&mut ws).await;
+        assert_eq!(body["type"], "change", "{body}");
+        ids.push(body["event"]["id"].as_u64().unwrap());
+    }
+    assert_eq!(ids, old[1..]);
+
+    // Then live, with nothing in between and nothing twice.
+    let live = db.create_node(&["Live"]).unwrap().as_u64();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["event"]["id"], live, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "pong", "a change arrived twice: {body}");
+}
+
+/// WebSocket: a subscribe that reuses a live `sub_id` and fails still
+/// replaces the old subscription: it ends, and no change arrives for it.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_failed_resubscribe_ends_the_subscription_it_replaces() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    for (target, reply) in [("default", "subscribed"), ("nope", "error")] {
+        ws.send(tungstenite::Message::Text(
+            json!({"type": "subscribe", "sub_id": "s1", "db": target, "since": 0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            next_ws_json(&mut ws).await["type"],
+            reply,
+            "subscribe to {target}"
+        );
+    }
+
+    db.create_node(&["Unseen"]).unwrap();
+    // Give a change time to arrive, then check the next message is the pong.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(
+        body["type"], "pong",
+        "the old subscription still runs: {body}"
+    );
+}
+
+/// WebSocket: a subscribe to a database that does not exist is an error, not
+/// a subscription.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscribe_to_a_missing_database_is_an_error() {
+    let base = spawn_server_from_state(sync_state()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "nope", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["id"], "s1");
+    assert_eq!(body["error"], "not_found");
+}
+
+/// WebSocket: dropping a database ends its subscriptions with a `closed`
+/// error, and the connection stays open.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_ends_when_its_database_is_dropped() {
+    let state = sync_state();
+    state
+        .databases()
+        .create(&grafeo_service::types::CreateDatabaseRequest {
+            name: "gone".to_string(),
+            database_type: grafeo_service::types::DatabaseType::Lpg,
+            storage_mode: grafeo_service::types::StorageMode::InMemory,
+            options: grafeo_service::types::DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        })
+        .unwrap();
+    let db = state.databases().get("gone").unwrap().db();
+    db.set_cdc_enabled(true);
+    let base = spawn_server_from_state(state.clone()).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "gone", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    db.create_node(&["Live"]).unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "change");
+    drop(db);
+
+    state.databases().delete("gone").unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["id"], "s1");
+    assert_eq!(body["error"], "closed");
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ws_json(&mut ws).await["type"], "pong");
+}
+
+/// WebSocket: subscribing again with a `sub_id` in use replaces the old
+/// subscription, so each change arrives once.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_resubscribe_with_the_same_sub_id_replaces_the_subscription() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    for _ in 0..2 {
+        ws.send(tungstenite::Message::Text(
+            json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": 0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next_ws_json(&mut ws).await["type"], "subscribed");
+    }
+
+    db.create_node(&["Once"]).unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "change", "{body}");
+    assert_eq!(body["event"]["labels"], json!(["Once"]));
+
+    // Give a second copy time to arrive, then check the next message is
+    // the answer to a ping.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let body = next_ws_json(&mut ws).await;
+    assert_eq!(body["type"], "pong", "a change arrived twice: {body}");
+}
+
+/// SSE: when the history fills its last page exactly, the empty pull after
+/// it does not move the live cursor back onto events already sent.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_after_an_exactly_full_page_sends_no_event_twice() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    db.batch_create_nodes_with_labels(&["Page"], vec![std::collections::HashMap::new(); 10_000])
+        .unwrap();
+    let base = spawn_server_from_state(state).await;
+
+    let mut resp = Client::new()
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut pending = String::new();
+    for _ in 0..10_000 {
+        next_sse_data(&mut resp, &mut pending).await;
+    }
+    db.create_node(&["Live"]).unwrap();
+    let live = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(live["labels"], json!(["Live"]), "{live}");
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket error paths
 // ---------------------------------------------------------------------------
@@ -4893,7 +5911,7 @@ async fn websocket_query_bad_syntax_returns_error() {
 
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
 
-    // Send a query with invalid GQL — should produce a "bad_request" error frame.
+    // Send a query with invalid GQL: should produce a "bad_request" error frame.
     ws.send(tungstenite::Message::Text(
         json!({
             "type": "query",
@@ -5344,7 +6362,7 @@ async fn backup_delete() {
         .await
         .unwrap();
     let backups: Vec<Value> = resp.json().await.unwrap();
-    assert!(backups.is_empty());
+    assert_eq!(backups, [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]
@@ -5581,7 +6599,7 @@ async fn restore_data_rollback() {
     seed_nodes(&client, &base, "default", 5).await;
     assert_eq!(db_node_count(&client, &base, "default").await, 15);
 
-    // Restore — should roll back to 10
+    // Restore: should roll back to 10
     let resp = client
         .post(format!("{base}/admin/default/restore"))
         .json(&json!({ "backup": filename }))
@@ -6084,7 +7102,7 @@ async fn gwp_auth_bearer_token_allows_query() {
         .expect("handshake with valid token should succeed");
 
     let session_id = resp.into_inner().session_id;
-    assert!(!session_id.is_empty());
+    assert_ne!(session_id, "");
 
     // Execute a query (admin token can write)
     let stream = gql_client
@@ -6423,6 +7441,24 @@ async fn spawn_server_with_token_store(
     admin_token: &str,
     scoped_tokens: Vec<(&str, &str, grafeo_service::auth::TokenScope)>,
 ) -> (String, String, Vec<(String, String)>) {
+    let (service, token_infos) = token_store_service(admin_token, scoped_tokens);
+    let state = grafeo_server::AppState::new(
+        service,
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
+    let base = spawn_server_from_state(state).await;
+    (base, admin_token.to_string(), token_infos)
+}
+
+/// Helper: an in-memory service whose token store holds a legacy admin token
+/// and the given managed scoped tokens. Returns the service and
+/// Vec<(token_plaintext, token_id)>.
+#[cfg(feature = "auth")]
+fn token_store_service(
+    admin_token: &str,
+    scoped_tokens: Vec<(&str, &str, grafeo_service::auth::TokenScope)>,
+) -> (grafeo_service::ServiceState, Vec<(String, String)>) {
     use grafeo_service::auth::TokenRecord;
 
     let dir = tempfile::tempdir().unwrap();
@@ -6456,13 +7492,94 @@ async fn spawn_server_with_token_store(
     .unwrap();
 
     let service = grafeo_service::ServiceState::new_in_memory_with_auth_provider(300, provider);
-    let state = grafeo_server::AppState::new(
+    (service, token_infos)
+}
+
+/// Sync endpoints check the token: a read-only token cannot push changes,
+/// a token scoped to another database cannot read this one's change feed,
+/// and an admin token can do both.
+#[cfg(all(feature = "auth", feature = "sync"))]
+#[tokio::test]
+async fn auth_sync_endpoints_check_role_and_database_scope() {
+    use grafeo_service::auth::{Role, TokenScope};
+
+    let (service, tokens) = token_store_service(
+        "admin-sync-tok",
+        vec![
+            (
+                "reader-sync-tok",
+                "sync-reader",
+                TokenScope {
+                    role: Role::ReadOnly,
+                    databases: vec![],
+                },
+            ),
+            (
+                "other-db-sync-tok",
+                "sync-other-db",
+                TokenScope {
+                    role: Role::ReadWrite,
+                    databases: vec!["otherdb".to_string()],
+                },
+            ),
+        ],
+    );
+    service
+        .databases()
+        .get("default")
+        .unwrap()
+        .db()
+        .set_cdc_enabled(true);
+    let base = spawn_server_from_state(grafeo_server::AppState::new(
         service,
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
-    );
-    let base = spawn_server_from_state(state).await;
-    (base, admin_token.to_string(), token_infos)
+    ))
+    .await;
+    let client = Client::new();
+    let (reader, other_db) = (&tokens[0].0, &tokens[1].0);
+    let push = json!({
+        "client_id": "auth-test",
+        "changes": [{"kind": "create", "entity_type": "node", "labels": ["Pushed"]}],
+    });
+    let push_as = |token: &str| {
+        client
+            .post(format!("{base}/db/default/sync"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&push)
+            .send()
+    };
+    let changes_as = |token: &str| {
+        client
+            .get(format!("{base}/db/default/changes?since=0"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+    };
+
+    assert_eq!(push_as(reader).await.unwrap().status(), 403);
+    assert_eq!(push_as(other_db).await.unwrap().status(), 403);
+    assert_eq!(changes_as(other_db).await.unwrap().status(), 403);
+    #[cfg(feature = "push-changefeed")]
+    {
+        let stream = client
+            .get(format!("{base}/db/default/changes/stream?since=0"))
+            .header("Authorization", format!("Bearer {other_db}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), 403);
+    }
+
+    let pushed = push_as("admin-sync-tok").await.unwrap();
+    assert_eq!(pushed.status(), 200);
+    let pushed: Value = pushed.json().await.unwrap();
+    assert_eq!(pushed["applied"], 1, "{pushed}");
+    let read = changes_as("admin-sync-tok").await.unwrap();
+    assert_eq!(read.status(), 200);
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read["changes"].as_array().unwrap().len(), 1, "{read}");
+    // A read-only token may still read the change feed.
+    assert_eq!(changes_as(reader).await.unwrap().status(), 200);
 }
 
 /// Database list filtering: a scoped token sees only its databases.
@@ -7437,4 +8554,368 @@ async fn rate_limit_xff_trusted_from_loopback() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+// ===========================================================================
+// Search procedures (engine 0.5.41 - CALL grafeo.search.*)
+// ===========================================================================
+
+#[cfg(feature = "text-index")]
+#[tokio::test]
+async fn call_grafeo_search_text_via_http() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed two nodes with a text-indexed property.
+    let seed = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Doc {body: 'the quick brown fox'}), (:Doc {body: 'lazy dog naps'})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    // Create a text index on Doc.body.
+    let idx = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({ "type": "text", "label": "Doc", "property": "body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    // Execute the search procedure.
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CALL grafeo.search.text('Doc', 'body', 'fox') YIELD node_id, score RETURN node_id, score"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().expect("rows array");
+    assert!(!rows.is_empty(), "expected at least one match for 'fox'");
+}
+
+#[cfg(feature = "vector-index")]
+#[tokio::test]
+async fn call_grafeo_search_vector_via_http() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    // Seed nodes with vector-typed embeddings (vector() coerces the list literal
+    // to Value::Vector so the HNSW index can pick it up).
+    let seed = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CREATE (:Item {emb: vector([1.0, 0.0, 0.0])}), (:Item {emb: vector([0.0, 1.0, 0.0])})"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), 200, "{}", seed.text().await.unwrap());
+
+    let idx = client
+        .post(format!("{base}/admin/default/index"))
+        .json(&json!({
+            "type": "vector", "label": "Item", "property": "emb",
+            "dimensions": 3, "metric": "cosine"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idx.status(), 200, "{}", idx.text().await.unwrap());
+
+    let resp = client
+        .post(format!("{base}/cypher"))
+        .json(&json!({
+            "query": "CALL grafeo.search.vector('Item', 'emb', [1.0, 0.0, 0.0], 2) YIELD node_id, distance RETURN node_id, distance"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected 2 nearest neighbours, got {}",
+        rows.len()
+    );
+}
+
+// ===========================================================================
+// Write counters (engine 0.5.44)
+// ===========================================================================
+
+#[tokio::test]
+async fn query_reports_write_counters() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let body: Value = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Counted {name: 'Alix'})-[:KNOWS]->(:Counted {name: 'Gus'})"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["counters"]["nodes_created"], 2, "{body}");
+    assert_eq!(body["counters"]["edges_created"], 1);
+    assert_eq!(body["counters"]["labels_added"], 2);
+    assert_eq!(body["counters"]["properties_set"], 2);
+
+    let body: Value = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Counted) RETURN n.name"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body.get("counters").is_none(),
+        "reads carry no counters: {body}"
+    );
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_summary_reports_write_counters() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut cursor = session
+        .execute(
+            "INSERT (:GwpCounted {name: 'Alix'})",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let summary = cursor
+        .summary()
+        .await
+        .unwrap()
+        .expect("summary frame")
+        .clone();
+    assert_eq!(summary.counters.get("nodes_created"), Some(&1));
+    assert_eq!(summary.counters.get("labels_added"), Some(&1));
+    assert!(
+        !summary.counters.contains_key("nodes_deleted"),
+        "zero counters are omitted"
+    );
+
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_summary_reports_write_stats() {
+    use boltr::types::BoltValue;
+
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+
+    let result = session
+        .run("INSERT (:BoltCounted {name: 'Alix'})-[:KNOWS]->(:BoltCounted {name: 'Gus'})")
+        .await
+        .unwrap();
+    let Some(BoltValue::Dict(stats)) = result.summary.get("stats") else {
+        panic!("expected a stats dict in {:?}", result.summary);
+    };
+    assert_eq!(stats.get("nodes-created"), Some(&BoltValue::Integer(2)));
+    assert_eq!(
+        stats.get("relationships-created"),
+        Some(&BoltValue::Integer(1))
+    );
+    assert_eq!(
+        stats.get("contains-updates"),
+        Some(&BoltValue::Boolean(true))
+    );
+
+    let result = session
+        .run("MATCH (n:BoltCounted) RETURN n.name")
+        .await
+        .unwrap();
+    assert!(
+        !result.summary.contains_key("stats"),
+        "reads carry no stats"
+    );
+
+    session.close().await.unwrap();
+}
+
+// ===========================================================================
+// Upserts (engine 0.5.44)
+// ===========================================================================
+
+async fn post_json(client: &Client, url: String, body: Value) -> (u16, Value) {
+    let resp = client.post(url).json(&body).send().await.unwrap();
+    let status = resp.status().as_u16();
+    // axum's JSON rejections are plain text, so keep a non-JSON body as a string.
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+#[tokio::test]
+async fn upsert_nodes_creates_then_updates_by_key() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let url = format!("{base}/db/default/upsert/nodes");
+
+    let (status, body) = post_json(
+        &client,
+        url.clone(),
+        json!({"labels": ["Person"], "rows": [
+            {"id": 1, "name": "Alix"}, {"id": 2, "name": "Gus"}, {"name": "no key"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 2);
+    assert_eq!(body["updated"], 0);
+    assert_eq!(body["skipped"], 1);
+    assert_eq!(body["skipped_rows"], json!([2]));
+
+    let (_, body) = post_json(
+        &client,
+        url,
+        json!({"labels": ["Person"], "rows": [{"id": 1, "city": "Paris"}]}),
+    )
+    .await;
+    assert_eq!(body["created"], 0);
+    assert_eq!(body["updated"], 1);
+
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (p:Person {id: 1}) RETURN p.name, p.city"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0], json!(["Alix", "Paris"]));
+}
+
+#[tokio::test]
+async fn upsert_edges_links_nodes_by_key() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["Person"], "rows": [{"id": 1}, {"id": 2}]}),
+    )
+    .await;
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/edges"),
+        json!({"edge_type": "KNOWS", "rows": [
+            {"id": "k1", "src": 1, "dst": 2, "since": 2020},
+            {"id": "k2", "src": 1, "dst": 99}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 1);
+    assert_eq!(body["skipped_rows"], json!([1]));
+
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (:Person {id: 1})-[k:KNOWS]->(:Person {id: 2}) RETURN k.since"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0][0], 2020);
+}
+
+#[tokio::test]
+async fn upsert_into_named_graph_and_missing_graph() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "CREATE GRAPH g2"}),
+    )
+    .await;
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["InG2"], "rows": [{"id": 1}], "graph": "g2"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 1);
+    let (_, body) = post_json(
+        &client,
+        format!("{base}/query"),
+        json!({"query": "MATCH (n:InG2) RETURN count(n)"}),
+    )
+    .await;
+    assert_eq!(body["rows"][0][0], 0, "the default graph is untouched");
+
+    let (status, _) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["X"], "rows": [{"id": 1}], "graph": "nope"}),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn upsert_rejects_non_object_rows() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/db/default/upsert/nodes"),
+        json!({"labels": ["P"], "rows": [{"id": 1}, 5]}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(body.to_string().contains("row 1"), "{body}");
+}
+
+#[tokio::test]
+async fn upsert_rejects_integer_keys_beyond_i64() {
+    let base = spawn_server().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db/default/upsert/nodes"))
+        .json(&json!({
+            "labels": ["Item"],
+            "key": "id",
+            "rows": [
+                {"id": 1},
+                {"id": 2},
+                {"id": 3},
+                {"id": 18_446_744_073_709_551_615_u64}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("row 3"), "body: {text}");
+    assert!(text.contains("out of range"), "body: {text}");
 }

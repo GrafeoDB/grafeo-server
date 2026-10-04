@@ -115,6 +115,16 @@ curl -X POST http://localhost:7474/sparql \
   -d '{"query": "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?name WHERE { ?p a foaf:Person . ?p foaf:name ?name }"}'
 ```
 
+A statement that writes also returns a `counters` object saying what it changed (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`). Reads leave it out. GWP puts the same numbers in `ResultSummary.counters`.
+
+```bash
+curl -X POST http://localhost:7474/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT (:Person {name: '\''Alix'\''})-[:KNOWS]->(:Person {name: '\''Gus'\''})"}'
+# "counters": {"nodes_created": 2, "nodes_deleted": 0, "edges_created": 1, "edges_deleted": 0,
+#              "properties_set": 2, "labels_added": 2, "labels_removed": 0}
+```
+
 ### Graph Algorithms (CALL Procedures)
 
 All query endpoints support `CALL` procedures for 22+ built-in graph algorithms:
@@ -172,6 +182,8 @@ curl http://localhost:7474/admin/default/cache
 curl -X POST http://localhost:7474/admin/default/cache/clear
 ```
 
+`POST /admin/{db}/reload-eligible` (bring spilled sections back into RAM) takes an optional body, `{"target_fraction": 0.7}`; without one the fraction defaults to 0.7.
+
 ### Search
 
 Vector, text, and hybrid search endpoints. Require the corresponding engine features (`vector-index`, `text-index`, `hybrid-search`), available in the full tier.
@@ -209,6 +221,23 @@ curl -X POST http://localhost:7474/batch \
   }'
 ```
 
+### Upserts
+
+Create or update many nodes or edges by a key property in one all-or-nothing statement. Rows are plain JSON objects. A node row with no value for the key is skipped, and so is an edge row whose `src` or `dst` matches no node; `skipped_rows` lists their indexes. Add `"graph": "name"` to write into a named graph (404 if it does not exist). The body is limited by `GRAFEO_MAX_BODY_SIZE`.
+
+```bash
+# Nodes: labels, rows (the key defaults to `id`, set `key` to change it)
+curl -X POST http://localhost:7474/db/default/upsert/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"labels": ["Person"], "rows": [{"id": 1, "name": "Alix"}, {"id": 2, "name": "Gus"}]}'
+# {"created": 2, "updated": 0, "skipped": 0, "skipped_rows": []}
+
+# Edges: edge_type, rows with id, src and dst (the key values of the end nodes)
+curl -X POST http://localhost:7474/db/default/upsert/edges \
+  -H "Content-Type: application/json" \
+  -d '{"edge_type": "KNOWS", "rows": [{"id": "k1", "src": 1, "dst": 2, "since": 2020}]}'
+```
+
 ### Transactions
 
 ```bash
@@ -229,6 +258,15 @@ curl -X POST http://localhost:7474/tx/commit \
 curl -X POST http://localhost:7474/tx/rollback \
   -H "X-Session-Id: $SESSION"
 ```
+
+### Change Feed, Sync and Replication
+
+Builds with the `sync` feature expose a change feed and a push endpoint for offline-first clients and replicas.
+
+- `GET /db/{name}/changes?since=<epoch>&limit=<n>` pulls change events. An epoch is never split across responses. The response's `server_epoch` is the cursor: every event up to it has been returned, so resume with `since = server_epoch + 1` and keep the larger of your stored cursor and the new one. When a response is cut at `limit`, `server_epoch` is the epoch of its last event.
+- `POST /db/{name}/sync` applies a client changeset with last-write-wins conflict resolution; changes the engine rejects are listed in `conflicts`.
+- `GET /db/{name}/changes/stream` (SSE) and a `subscribe` message on the WebSocket push live events after the history from `since`. A stream that cannot go on ends with a terminal event: `lagged` (the subscriber fell behind; it carries `{"skipped": n, "since": e}`, so reconnect with `since=e`) or `error` (a failed history read, or the database was dropped, restored, compacted or replaced). The WebSocket sends the same two as `error` messages (`lagged`, `closed`) and stays open.
+- A replica (a server following a primary) rejects writes over HTTP with 503 `replica_mode`, including client `POST /db/{name}/sync`. It applies the primary's changes itself; queries, search and the change feed stay available.
 
 ### WebSocket
 
@@ -275,6 +313,8 @@ Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 ### Bolt v5.x (BoltR)
 
 The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.1.2) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+
+Write statements return Neo4j's `stats` in the PULL summary, which drivers expose as `summary.counters`.
 
 Configure the port with `--bolt-port` or `GRAFEO_BOLT_PORT` (default: 7687).
 

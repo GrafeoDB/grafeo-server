@@ -11,6 +11,19 @@ use crate::error::ServiceError;
 use crate::metrics::Metrics;
 use crate::types;
 
+/// Convert a `StorageTier` to its string representation.
+///
+/// `StorageTier` is `#[non_exhaustive]`, so we must include a wildcard arm.
+fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str {
+    use grafeo_common::memory::buffer::StorageTier;
+    match tier {
+        StorageTier::InMemory => "in_memory",
+        StorageTier::OnDisk => "on_disk",
+        StorageTier::Uninitialized => "uninitialized",
+        _ => "unknown",
+    }
+}
+
 /// Stateless admin operations.
 pub struct AdminService;
 
@@ -249,6 +262,45 @@ impl AdminService {
         serde_json::to_value(&usage).map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
+    /// Get current storage tier for every section consumer in a database.
+    pub async fn storage_tiers(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> Result<types::StorageTiersResponse, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+
+        let raw = tokio::task::spawn_blocking(move || entry.db().storage_tiers())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+
+        let mut tiers: Vec<types::SectionTierInfo> = raw
+            .into_iter()
+            .map(|(section, tier)| types::SectionTierInfo {
+                section: format!("{:?}", section),
+                tier: tier_to_str(tier).to_string(),
+            })
+            .collect();
+        tiers.sort_by(|a, b| a.section.cmp(&b.section));
+
+        Ok(types::StorageTiersResponse { tiers })
+    }
+
+    /// Reload spilled sections back into RAM until projected memory usage
+    /// reaches `target_fraction * memory_limit`. `target_fraction` is clamped
+    /// to `[0.0, 1.0]` by the engine; default is `0.7`.
+    pub async fn reload_eligible(
+        databases: &DatabaseManager,
+        db_name: &str,
+        target_fraction: Option<f64>,
+    ) -> Result<usize, ServiceError> {
+        let entry = databases.get_available(db_name)?;
+        let target = target_fraction.unwrap_or(0.7);
+
+        tokio::task::spawn_blocking(move || entry.db().reload_eligible(target))
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
     /// List named graphs within a database.
     pub async fn list_graphs(
         databases: &DatabaseManager,
@@ -341,72 +393,36 @@ impl AdminService {
     ///
     /// Requires exclusive access to the database (no active sessions or
     /// concurrent requests holding a reference).
-    #[allow(clippy::unused_async)] // async needed when compact-store is enabled
-    pub async fn compact(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
-        if databases.is_read_only() {
+    ///
+    /// Taking the database out of the registry, compacting it and putting it
+    /// back run in one blocking task that owns a handle on the service, so a
+    /// caller that stops waiting (a dropped request) cannot leave the
+    /// database out of the registry: the task finishes and puts it back.
+    #[cfg(feature = "compact-store")]
+    pub async fn compact(state: &crate::ServiceState, db_name: &str) -> Result<(), ServiceError> {
+        if state.databases().is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
-
-        #[cfg(feature = "compact-store")]
-        {
-            use std::panic::{AssertUnwindSafe, catch_unwind};
-            use std::sync::Arc;
-
-            let db_entry = databases.take_exclusive(db_name)?;
-            let name = db_name.to_owned();
-
-            let result = tokio::task::spawn_blocking(move || {
-                let (mut db_arc, mut metadata) = db_entry.into_parts();
-                let db = match Arc::get_mut(&mut db_arc) {
-                    Some(db) => db,
-                    None => {
-                        let entry = DatabaseEntry::new(db_arc, metadata);
-                        return Err((
-                            entry,
-                            ServiceError::Conflict(
-                                "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
-                            ),
-                        ));
-                    }
-                };
-
-                match catch_unwind(AssertUnwindSafe(|| db.compact())) {
-                    Ok(Ok(())) => {
-                        metadata.storage_mode = "compact".to_string();
-                        Ok(DatabaseEntry::new(db_arc, metadata))
-                    }
-                    Ok(Err(e)) => Err((
-                        DatabaseEntry::new(db_arc, metadata),
-                        ServiceError::Internal(format!("compaction failed: {e}")),
-                    )),
-                    Err(_panic) => Err((
-                        DatabaseEntry::new(db_arc, metadata),
-                        ServiceError::Internal("compaction panicked".to_string()),
-                    )),
-                }
-            })
+        let state = state.clone();
+        let name = db_name.to_owned();
+        tokio::task::spawn_blocking(move || compact_in_place(state.databases(), &name))
             .await
-            .expect("compact: spawn_blocking task should not be cancelled");
+            .map_err(|e| ServiceError::Internal(format!("compaction task failed: {e}")))?
+    }
 
-            match result {
-                Ok(compacted) => {
-                    databases.reinsert(name.clone(), compacted);
-                    tracing::info!(name = %name, "Database compacted to columnar read-only store");
-                    Ok(())
-                }
-                Err((original, err)) => {
-                    databases.reinsert(name, original);
-                    Err(err)
-                }
-            }
-        }
-        #[cfg(not(feature = "compact-store"))]
-        {
-            let _ = db_name;
+    /// Compact stub when the `compact-store` feature is disabled.
+    #[cfg(not(feature = "compact-store"))]
+    pub fn compact(
+        state: &crate::ServiceState,
+        _db_name: &str,
+    ) -> impl Future<Output = Result<(), ServiceError>> {
+        std::future::ready(if state.databases().is_read_only() {
+            Err(ServiceError::ReadOnly)
+        } else {
             Err(ServiceError::BadRequest(
                 "compact-store feature not enabled".to_string(),
             ))
-        }
+        })
     }
 
     /// Bulk-import a TSV edge list into a database.
@@ -608,10 +624,7 @@ impl AdminService {
     ///
     /// Requires the `async-storage` and `grafeo-file` features. Returns an
     /// error explaining the missing features when they are not enabled.
-    // The await lives inside the cfg(async-storage, grafeo-file) branch;
-    // without those features the function body is sync, but the signature
-    // must remain async for the HTTP handler.
-    #[allow(clippy::unused_async)]
+    #[cfg(all(feature = "async-storage", feature = "grafeo-file"))]
     pub async fn write_snapshot(
         databases: &DatabaseManager,
         db_name: &str,
@@ -619,24 +632,29 @@ impl AdminService {
         if databases.is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
-
         let entry = databases.get_available(db_name)?;
+        entry
+            .db()
+            .async_write_snapshot()
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
 
-        #[cfg(all(feature = "async-storage", feature = "grafeo-file"))]
-        {
-            entry
-                .db()
-                .async_write_snapshot()
-                .await
-                .map_err(|e| ServiceError::Internal(e.to_string()))
-        }
-        #[cfg(not(all(feature = "async-storage", feature = "grafeo-file")))]
-        {
-            let _ = entry;
-            Err(ServiceError::BadRequest(
-                "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
-            ))
-        }
+    /// Snapshot stub without the `async-storage` and `grafeo-file` features.
+    #[cfg(not(all(feature = "async-storage", feature = "grafeo-file")))]
+    pub fn write_snapshot(
+        databases: &DatabaseManager,
+        db_name: &str,
+    ) -> impl Future<Output = Result<(), ServiceError>> {
+        std::future::ready(if databases.is_read_only() {
+            Err(ServiceError::ReadOnly)
+        } else {
+            databases.get_available(db_name).and_then(|_| {
+                Err(ServiceError::BadRequest(
+                    "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
+                ))
+            })
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -645,7 +663,6 @@ impl AdminService {
 
     /// Validate RDF data against SHACL shapes.
     #[cfg(feature = "shacl")]
-    #[allow(clippy::unused_async)]
     pub async fn validate_shacl(
         databases: &DatabaseManager,
         db_name: &str,
@@ -687,22 +704,82 @@ impl AdminService {
 
     /// Validate RDF data against SHACL shapes (stub when feature disabled).
     #[cfg(not(feature = "shacl"))]
-    #[allow(clippy::unused_async)]
-    pub async fn validate_shacl(
+    pub fn validate_shacl(
         _databases: &DatabaseManager,
         _db_name: &str,
         _req: &types::ShaclValidateRequest,
-    ) -> Result<types::ShaclValidationReport, ServiceError> {
-        Err(ServiceError::BadRequest(
+    ) -> impl Future<Output = Result<types::ShaclValidationReport, ServiceError>> {
+        std::future::ready(Err(ServiceError::BadRequest(
             "shacl feature not enabled".to_owned(),
-        ))
+        )))
+    }
+}
+
+/// Takes `db_name` out of the registry, compacts it and puts it back, the
+/// original when compaction fails. Blocking.
+#[cfg(feature = "compact-store")]
+fn compact_in_place(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
+    let db_entry = databases.take_exclusive(db_name)?;
+    let result = compact_entry(db_entry);
+
+    match result {
+        Ok(compacted) => {
+            databases.reinsert(db_name.to_owned(), compacted);
+            tracing::info!(name = %db_name, "Database compacted to columnar read-only store");
+            Ok(())
+        }
+        Err((original, err)) => {
+            databases.reinsert(db_name.to_owned(), original);
+            Err(err)
+        }
+    }
+}
+
+/// Compacts the database of `db_entry`: the compacted entry, or the original
+/// with the error.
+#[cfg(feature = "compact-store")]
+fn compact_entry(db_entry: DatabaseEntry) -> Result<DatabaseEntry, (DatabaseEntry, ServiceError)> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+
+    let (db_arc, mut metadata) = db_entry.into_parts();
+    // `try_unwrap` needs only the one strong reference; weak ones
+    // (a live change feed keeps one to tell instances apart) do not
+    // stand in the way, unlike with `Arc::get_mut`. The database
+    // goes back in a new `Arc`: a new instance to a change feed,
+    // which ends its subscriptions.
+    let mut db = match Arc::try_unwrap(db_arc) {
+        Ok(db) => db,
+        Err(shared) => {
+            return Err((
+                DatabaseEntry::new(shared, metadata),
+                ServiceError::Conflict(
+                    "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
+                ),
+            ));
+        }
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| db.compact())) {
+        Ok(Ok(())) => {
+            metadata.storage_mode = "compact".to_string();
+            Ok(DatabaseEntry::new(Arc::new(db), metadata))
+        }
+        Ok(Err(e)) => Err((
+            DatabaseEntry::new(Arc::new(db), metadata),
+            ServiceError::Internal(format!("compaction failed: {e}")),
+        )),
+        Err(_panic) => Err((
+            DatabaseEntry::new(Arc::new(db), metadata),
+            ServiceError::Internal("compaction panicked".to_string()),
+        )),
     }
 }
 
 /// Reject names containing `/`, which grafeo-engine uses internally as the
 /// `schema/graph` compound storage-key separator. Catching this at the service
 /// layer surfaces as a clean 400 instead of a scrubbed 500 from the engine.
-fn validate_catalog_name(kind: &'static str, name: &str) -> Result<(), ServiceError> {
+pub(crate) fn validate_catalog_name(kind: &'static str, name: &str) -> Result<(), ServiceError> {
     if name.contains('/') {
         return Err(ServiceError::BadRequest(format!(
             "{kind} name must not contain '/'"
@@ -744,6 +821,63 @@ fn calculate_db_disk_usage(dir: &Path) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::ServiceState;
+
+    #[cfg(feature = "compact-store")]
+    #[test]
+    fn a_dropped_compaction_request_still_puts_the_database_back() {
+        // One blocking thread, held by a task that waits for a signal: the
+        // compaction queues behind it, so the caller gives up before any of
+        // it runs.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = ServiceState::new_in_memory(300);
+            state
+                .databases()
+                .create(&types::CreateDatabaseRequest {
+                    name: "columns".to_string(),
+                    database_type: types::DatabaseType::Lpg,
+                    storage_mode: types::StorageMode::InMemory,
+                    options: types::DatabaseOptions::default(),
+                    schema_file: None,
+                    schema_filename: None,
+                })
+                .unwrap();
+            let db = state.databases().get("columns").unwrap().db();
+            for _ in 0..3 {
+                db.create_node(&["Kept"]).unwrap();
+            }
+            drop(db);
+
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || wait.recv().ok());
+
+            // The caller stops waiting at once, as a dropped request does.
+            let gave_up = tokio::time::timeout(
+                std::time::Duration::ZERO,
+                AdminService::compact(&state, "columns"),
+            )
+            .await;
+            assert!(gave_up.is_err(), "the compaction was still queued");
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            // The one blocking thread runs its queue in order: this no-op
+            // runs after the compaction. Nothing here holds the entry while
+            // the compaction takes it.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+
+            let entry = state
+                .databases()
+                .get("columns")
+                .expect("the database is back in the registry");
+            assert_eq!(entry.metadata.storage_mode, "compact");
+            assert_eq!(entry.db().node_count(), 3, "readable, nothing lost");
+        });
+    }
 
     #[tokio::test]
     async fn test_database_stats_default_db() {
@@ -992,7 +1126,7 @@ mod tests {
         let graphs = AdminService::list_graphs(state.databases(), "default")
             .await
             .unwrap();
-        assert!(graphs.is_empty());
+        assert_eq!(graphs, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]
@@ -1087,7 +1221,7 @@ mod tests {
         let list = AdminService::list_projections(state.databases(), "default")
             .await
             .unwrap();
-        assert!(list.is_empty());
+        assert_eq!(list, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]
@@ -1144,6 +1278,61 @@ mod tests {
     async fn test_write_snapshot_not_found() {
         let state = ServiceState::new_in_memory(300);
         let err = AdminService::write_snapshot(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_storage_tiers_default_db_returns_section_list() {
+        let state = ServiceState::new_in_memory(300);
+        let resp = AdminService::storage_tiers(state.databases(), "default")
+            .await
+            .unwrap();
+        // In-memory DB: at least one consumer (LpgStore) is present and reports InMemory.
+        assert!(!resp.tiers.is_empty(), "expected non-empty tier list");
+        assert!(
+            resp.tiers
+                .iter()
+                .all(|t| t.tier == "in_memory" || t.tier == "uninitialized"),
+            "in-memory db should never report on_disk tiers, got {:?}",
+            resp.tiers
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_tiers_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::storage_tiers(state.databases(), "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_in_memory_returns_zero() {
+        // No on-disk consumers in an in-memory db, so reload_eligible reports 0.
+        let state = ServiceState::new_in_memory(300);
+        let n = AdminService::reload_eligible(state.databases(), "default", Some(0.7))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_clamps_target_fraction() {
+        // Engine clamps to [0.0, 1.0]; we should not error on out-of-range input.
+        let state = ServiceState::new_in_memory(300);
+        let n = AdminService::reload_eligible(state.databases(), "default", Some(2.5))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reload_eligible_not_found() {
+        let state = ServiceState::new_in_memory(300);
+        let err = AdminService::reload_eligible(state.databases(), "nonexistent", None)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));

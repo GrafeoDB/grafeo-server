@@ -14,15 +14,20 @@
 //!
 //! # Wire protocol
 //!
-//! The replica reuses the existing `GET /db/{name}/changes?since={epoch}&limit=500`
-//! endpoint — no new protocol required. `SyncService::apply()` is used to
-//! replay the returned `ChangeEventDto` entries.
+//! The replica reuses the existing `GET /db/{name}/changes?since={since}&limit=500`
+//! endpoint, so no new protocol is required. `since` is the `server_epoch`
+//! of the last applied batch plus one (0 before the first batch), and
+//! `SyncService::apply()` replays the returned `ChangeEventDto` entries.
 //!
 //! # Per-database epoch tracking
 //!
 //! `ReplicationState` holds a `DashMap<db_name, AtomicU64>` tracking the
 //! last successfully applied epoch per database. The background task
 //! (in `grafeo-http`) updates these after each successful batch.
+//!
+//! A batch whose changes the replica could not all apply still advances the
+//! epoch (replaying its creates would duplicate them); a summary of what was
+//! not applied is kept per database and reported as its `last_error`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,7 +79,9 @@ impl ReplicationMode {
 pub struct DbReplicationStatus {
     /// The last CDC epoch successfully applied on this replica.
     pub last_applied_epoch: u64,
-    /// Last error encountered, if any.
+    /// Last error encountered, if any: the error of the last poll when it
+    /// failed, else the summary of the last batch the replica could not
+    /// apply in full (which stays, as the divergence it reports does).
     pub last_error: Option<String>,
 }
 
@@ -100,6 +107,9 @@ pub struct ReplicationState {
     pub epochs: DashMap<String, Arc<AtomicU64>>,
     /// Per-database last error.
     pub errors: DashMap<String, String>,
+    /// Per-database summary of the last batch whose changes could not all
+    /// be applied. Kept until the process restarts.
+    pub conflicts: DashMap<String, String>,
     /// Data directory for epoch persistence. None = in-memory only.
     data_dir: Option<std::path::PathBuf>,
 }
@@ -109,6 +119,7 @@ impl Default for ReplicationState {
         Self {
             epochs: DashMap::new(),
             errors: DashMap::new(),
+            conflicts: DashMap::new(),
             data_dir: None,
         }
     }
@@ -130,6 +141,7 @@ impl ReplicationState {
         let state = Self {
             epochs: DashMap::new(),
             errors: DashMap::new(),
+            conflicts: DashMap::new(),
             data_dir: Some(data_dir),
         };
         state.load_epochs();
@@ -148,11 +160,13 @@ impl ReplicationState {
     ///
     /// If persistence is enabled, writes the updated state to disk.
     pub fn advance_epoch(&self, db: &str, epoch: u64) {
-        let entry = self
-            .epochs
+        // The entry guard write-locks a map shard. It must be gone before
+        // save_epochs iterates the map, or that iteration waits on this
+        // thread forever.
+        self.epochs
             .entry(db.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
-        entry.fetch_max(epoch, Ordering::Relaxed);
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .fetch_max(epoch, Ordering::Relaxed);
         self.save_epochs();
     }
 
@@ -192,9 +206,17 @@ impl ReplicationState {
         self.errors.insert(db.to_string(), err);
     }
 
-    /// Clears the error for `db`.
+    /// Clears the error for `db`. A recorded conflict summary stays.
     pub fn clear_error(&self, db: &str) {
         self.errors.remove(db);
+    }
+
+    /// Records that a batch for `db` had changes the replica could not
+    /// apply. Unlike [`set_error`](Self::set_error) it survives
+    /// [`clear_error`](Self::clear_error): a later clean batch does not undo
+    /// the divergence.
+    pub fn set_conflict(&self, db: &str, summary: String) {
+        self.conflicts.insert(db.to_string(), summary);
     }
 
     /// Returns the current status snapshot.
@@ -204,7 +226,11 @@ impl ReplicationState {
         for entry in &self.epochs {
             let db = entry.key().clone();
             let last_applied_epoch = entry.value().load(Ordering::Relaxed);
-            let last_error = self.errors.get(&db).map(|e| e.value().clone());
+            let last_error = self
+                .errors
+                .get(&db)
+                .or_else(|| self.conflicts.get(&db))
+                .map(|e| e.value().clone());
             databases.insert(
                 db,
                 DbReplicationStatus {
@@ -290,6 +316,33 @@ mod tests {
     }
 
     #[test]
+    fn conflict_summary_survives_clear_error() {
+        let state = ReplicationState::new();
+        state.advance_epoch("default", 3);
+        let last_error = |state: &ReplicationState| {
+            state.status(&ReplicationMode::Standalone).databases["default"]
+                .last_error
+                .clone()
+        };
+
+        state.set_conflict("default", "1 change(s) could not be applied".to_string());
+        state.clear_error("default");
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some("1 change(s) could not be applied")
+        );
+
+        // A poll error shows while it lasts, then the conflict is back.
+        state.set_error("default", "connection refused".to_string());
+        assert_eq!(last_error(&state).as_deref(), Some("connection refused"));
+        state.clear_error("default");
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some("1 change(s) could not be applied")
+        );
+    }
+
+    #[test]
     fn status_mode_strings() {
         let state = ReplicationState::new();
         assert_eq!(
@@ -305,5 +358,23 @@ mod tests {
                 .mode,
             "replica"
         );
+    }
+
+    #[test]
+    fn advance_epoch_with_persistence_does_not_deadlock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = Arc::new(ReplicationState::with_persistence(dir.path().to_path_buf()));
+        let worker = Arc::clone(&state);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            worker.advance_epoch("default", 7);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("advance_epoch deadlocked: the entry guard was held across save_epochs");
+        assert_eq!(state.last_epoch("default"), 7);
+        let saved = std::fs::read_to_string(dir.path().join(".replica-epochs")).unwrap();
+        assert!(saved.contains("\"default\":7"), "epochs file: {saved}");
     }
 }

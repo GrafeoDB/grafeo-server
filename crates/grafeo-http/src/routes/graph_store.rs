@@ -833,8 +833,8 @@ mod tests {
         let headers = HeaderMap::new();
         let body = Bytes::new();
         let result = parse_body_to_ntriples(&headers, &body).unwrap();
-        assert!(result.lines.is_empty());
-        assert!(result.prologue.is_empty());
+        assert_eq!(result.lines, [] as [std::string::String; 0]);
+        assert_eq!(result.prologue, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -849,7 +849,7 @@ mod tests {
         let result = parse_body_to_ntriples(&headers, &body).unwrap();
         assert_eq!(result.lines.len(), 2);
         assert!(result.lines[0].contains("<http://ex.org/s>"));
-        assert!(result.prologue.is_empty());
+        assert_eq!(result.prologue, [] as [std::string::String; 0]);
     }
 
     #[test]

@@ -77,8 +77,9 @@ mod tests {
         let rows = (0..num_rows)
             .map(|i| vec![Value::Int64(i as i64)])
             .collect();
-        let mut result =
-            QueryResult::from_rows(vec!["x".to_string()], rows).with_metrics(1.0, num_rows as u64);
+        let mut result = QueryResult::from_rows(vec!["x".to_string()], rows)
+            .unwrap()
+            .with_metrics(1.0, num_rows as u64);
         result.column_types = vec![LogicalType::Int64];
         result
     }
@@ -87,7 +88,7 @@ mod tests {
     fn empty_result_yields_no_batches() {
         let result = make_result(0);
         let batches: Vec<_> = result.row_batches(100).collect();
-        assert!(batches.is_empty());
+        assert_eq!(batches, [] as [&[std::vec::Vec<grafeo_common::Value>]; 0]);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Each named database is an independent `GrafeoDB` instance. The `"default"`
 //! database always exists and cannot be deleted.
 //!
-//! Session management has been moved to `SessionRegistry` — this module only
+//! Session management has been moved to `SessionRegistry`: this module only
 //! handles database lifecycle (create/delete/list/info).
 
 use std::path::{Path, PathBuf};
@@ -11,14 +11,218 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
-use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
+use dashmap::{DashMap, DashSet};
+use grafeo_engine::{Config, ConfigError, DurabilityMode, GrafeoDB};
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::ServiceError;
-use crate::types::{CreateDatabaseRequest, DatabaseType, StorageMode};
+use crate::types::{CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode};
 
 /// Default memory limit for new databases: 512 MB.
 const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+
+/// File in a persistent database's directory that records the options it
+/// was created with, so every reopen applies them again (grafeo-server#67).
+///
+/// Temporary: the engine does not store creation config in the `.grafeo`
+/// file yet (grafeo#551, planned for grafeo 0.6.0). Once it does, stop writing this
+/// file and only read it for databases created before that.
+pub const OPTIONS_FILE: &str = "options.json";
+
+/// What [`OPTIONS_FILE`] holds: the database type and its creation options
+/// with defaults filled in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredOptions {
+    database_type: DatabaseType,
+    options: DatabaseOptions,
+}
+
+/// Fills in the defaults `create` applies, so the stored options reproduce
+/// the database exactly.
+fn resolve_options(options: &DatabaseOptions) -> DatabaseOptions {
+    DatabaseOptions {
+        memory_limit_bytes: Some(options.memory_limit_bytes.unwrap_or(DEFAULT_MEMORY_LIMIT)),
+        backward_edges: Some(options.backward_edges.unwrap_or(true)),
+        threads: Some(
+            options
+                .threads
+                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
+        ),
+        ..options.clone()
+    }
+}
+
+/// Applies a database's type and options to an engine config. `create` and
+/// every reopen share it, so a reopened database gets the settings it was
+/// created with.
+fn configure(
+    config: Config,
+    database_type: DatabaseType,
+    options: &DatabaseOptions,
+) -> Result<Config, ServiceError> {
+    let mut config = type_config(config, database_type);
+    if let Some(limit) = options.memory_limit_bytes {
+        config = config.with_memory_limit(limit);
+    }
+    if let Some(threads) = options.threads {
+        config = config.with_threads(threads);
+    }
+    if options.backward_edges == Some(false) {
+        config = config.without_backward_edges();
+    }
+    if options.wal_enabled == Some(false) {
+        config.wal_enabled = false;
+    }
+    if let Some(ref durability) = options.wal_durability {
+        config = config.with_wal_durability(parse_durability(durability)?);
+    }
+    if let Some(ref spill_path) = options.spill_path {
+        config = config.with_spill_path(spill_path);
+    }
+    if let Some(ref section_tiers) = options.section_tiers {
+        for (section_name, tier_str) in section_tiers {
+            config = config.with_section_tier(
+                parse_section_type(section_name)?,
+                parse_tier_override(tier_str)?,
+            );
+        }
+    }
+    Ok(config)
+}
+
+/// What `database_type` itself needs of the engine config, whatever the
+/// options: its graph model, and schema constraint checks for a JSON Schema
+/// database.
+fn type_config(config: Config, database_type: DatabaseType) -> Config {
+    let config = config.with_graph_model(database_type.graph_model());
+    if database_type == DatabaseType::JsonSchema {
+        config.with_schema_constraints()
+    } else {
+        config
+    }
+}
+
+/// The metadata a database with these resolved options reports.
+fn metadata_for(
+    database_type: DatabaseType,
+    storage_mode: StorageMode,
+    options: &DatabaseOptions,
+) -> DatabaseMetadata {
+    DatabaseMetadata {
+        database_type: database_type.as_str().to_string(),
+        storage_mode: storage_mode.as_str().to_string(),
+        backward_edges: options.backward_edges.unwrap_or(true),
+        threads: options.threads.unwrap_or(1),
+    }
+}
+
+/// Why [`OPTIONS_FILE`] could not be read as [`StoredOptions`].
+struct StoredOptionsError {
+    message: String,
+    /// The stored graph model, when the file is JSON with a readable
+    /// `database_type` but values of the wrong type (`"threads": "8"`).
+    database_type: Option<DatabaseType>,
+}
+
+/// Reads a database's [`OPTIONS_FILE`]; `Ok(None)` when it has none.
+fn read_stored_options(db_dir: &Path) -> Result<Option<StoredOptions>, StoredOptionsError> {
+    let text = match std::fs::read_to_string(db_dir.join(OPTIONS_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(StoredOptionsError {
+                message: e.to_string(),
+                database_type: None,
+            });
+        }
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e: serde_json::Error| StoredOptionsError {
+            message: e.to_string(),
+            database_type: serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| value.get("database_type").cloned())
+                .and_then(|value| serde_json::from_value(value).ok()),
+        })
+}
+
+/// Writes a database's [`OPTIONS_FILE`] through a temp file and a rename,
+/// so a crash never leaves half a file.
+fn write_stored_options(db_dir: &Path, stored: &StoredOptions) -> Result<(), ServiceError> {
+    let json = serde_json::to_string_pretty(stored)
+        .map_err(|e| ServiceError::Internal(format!("failed to encode database options: {e}")))?;
+    let tmp = db_dir.join(format!("{OPTIONS_FILE}.tmp"));
+    std::fs::write(&tmp, json)
+        .and_then(|()| std::fs::rename(&tmp, db_dir.join(OPTIONS_FILE)))
+        .map_err(|e| ServiceError::Internal(format!("failed to write options.json: {e}")))
+}
+
+/// Releases a name reserved by [`DatabaseManager::reserve_name`] on drop, so
+/// early returns and `?` cannot leak a reservation.
+struct CreateReservation<'a> {
+    creating: &'a DashSet<String>,
+    name: &'a str,
+}
+
+impl Drop for CreateReservation<'_> {
+    fn drop(&mut self) {
+        self.creating.remove(self.name);
+    }
+}
+
+/// Undoes a failed [`DatabaseManager::create`] after the directory step.
+/// When the call created the directory it is removed whole; otherwise only
+/// the files this call produces are removed, so anything else in a
+/// pre-existing directory survives.
+fn rollback_create(dir: &Path, created_dir: bool) {
+    if created_dir {
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    }
+    let options_tmp = format!("{OPTIONS_FILE}.tmp");
+    for file in [
+        OPTIONS_FILE,
+        options_tmp.as_str(),
+        "data.grafeo",
+        "data.grafeo.wal",
+    ] {
+        let path = dir.join(file);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// The entries in `dir` that belong to a database and that a create must
+/// never adopt or overwrite: `data.grafeo` and its WAL, the legacy
+/// `grafeo.db` and its WAL that startup migrates, and the pre-restore copy
+/// of an interrupted epoch restore with its WAL. An entry of any kind counts,
+/// a dangling symbolic link included (the engine would create the file it
+/// points to), and so does an entry that cannot be checked for any reason
+/// but its absence.
+fn database_files_present(dir: &Path) -> Vec<PathBuf> {
+    [
+        "data.grafeo",
+        "data.grafeo.wal",
+        "grafeo.db",
+        "grafeo.db.wal",
+        "data.grafeo.pre-restore",
+        "data.grafeo.pre-restore.wal",
+    ]
+    .iter()
+    .map(|file| dir.join(file))
+    .filter(|path| crate::backup::path_present(path))
+    .collect()
+}
+
+/// Whether `dir` holds any [`database_files_present`].
+fn has_database_files(dir: &Path) -> bool {
+    !database_files_present(dir).is_empty()
+}
 
 /// Name validation: starts with letter, then alphanumeric/underscore/hyphen, max 64 chars.
 fn is_valid_name(name: &str) -> bool {
@@ -46,6 +250,64 @@ fn parse_durability(s: &str) -> Result<DurabilityMode, ServiceError> {
             "invalid wal_durability '{other}': expected \"sync\", \"batch\", \"adaptive\", or \"nosync\""
         ))),
     }
+}
+
+fn parse_section_type(name: &str) -> Result<grafeo_common::storage::SectionType, ServiceError> {
+    use grafeo_common::storage::SectionType;
+    Ok(match name {
+        "LpgStore" => SectionType::LpgStore,
+        "RdfStore" => SectionType::RdfStore,
+        "CompactStore" => SectionType::CompactStore,
+        "VectorStore" => SectionType::VectorStore,
+        "TextIndex" => SectionType::TextIndex,
+        "RdfRing" => SectionType::RdfRing,
+        "PropertyIndex" => SectionType::PropertyIndex,
+        "Catalog" => SectionType::Catalog,
+        other => {
+            return Err(ServiceError::BadRequest(format!(
+                "unknown section type '{other}': expected one of \
+                 LpgStore, RdfStore, CompactStore, VectorStore, TextIndex, \
+                 RdfRing, PropertyIndex, Catalog"
+            )));
+        }
+    })
+}
+
+fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, ServiceError> {
+    use grafeo_common::storage::TierOverride;
+    match s.to_lowercase().as_str() {
+        "auto" => Ok(TierOverride::Auto),
+        "force_ram" | "forceram" => Ok(TierOverride::ForceRam),
+        "force_disk" | "forcedisk" => Ok(TierOverride::ForceDisk),
+        other => Err(ServiceError::BadRequest(format!(
+            "invalid tier '{other}': expected \"auto\", \"force_ram\", or \"force_disk\""
+        ))),
+    }
+}
+
+/// Rejects `force_disk` for sections the engine cannot spill. Only sections
+/// whose `SectionType::default_flags().mmap_able` is true (CompactStore,
+/// VectorStore, TextIndex, RdfRing, PropertyIndex in engine 0.5.44) can be
+/// kept on disk; for the others the engine silently ignores the override.
+/// Called from `create` only, so the reopen path never rejects a stored file.
+fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceError> {
+    let Some(ref section_tiers) = options.section_tiers else {
+        return Ok(());
+    };
+    for (section_name, tier_str) in section_tiers {
+        let section = parse_section_type(section_name)?;
+        if matches!(
+            parse_tier_override(tier_str)?,
+            grafeo_common::storage::TierOverride::ForceDisk
+        ) && !section.default_flags().mmap_able
+        {
+            return Err(ServiceError::BadRequest(format!(
+                "section '{section_name}' cannot be kept on disk: only CompactStore, \
+                 VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Creation-time metadata stored alongside each database.
@@ -141,8 +403,9 @@ impl DatabaseEntry {
 
     /// Consumes the entry and returns the inner `Arc<GrafeoDB>` and metadata.
     ///
-    /// Used by compact, which needs `Arc::get_mut` for `&mut GrafeoDB` access.
-    /// The entry must not be in the DashMap when calling this.
+    /// Used by compact, which takes the database out with `Arc::try_unwrap`
+    /// for `&mut GrafeoDB` access. The entry must not be in the DashMap when
+    /// calling this.
     pub fn into_parts(self) -> (Arc<GrafeoDB>, DatabaseMetadata) {
         (self.inner.into_inner(), self.metadata)
     }
@@ -151,6 +414,9 @@ impl DatabaseEntry {
 /// Thread-safe registry of named database instances.
 pub struct DatabaseManager {
     databases: DashMap<String, Arc<DatabaseEntry>>,
+    /// Names with a `create` in flight, so two creates of one name cannot both
+    /// pass the on-disk check and then roll back each other's files.
+    creating: DashSet<String>,
     /// If `Some`, databases are persisted under `{data_dir}/{name}/data.grafeo`.
     data_dir: Option<PathBuf>,
     /// When `true`, reject all write operations.
@@ -167,6 +433,7 @@ impl DatabaseManager {
     pub fn new(data_dir: Option<&str>, read_only: bool) -> Self {
         let mgr = Self {
             databases: DashMap::new(),
+            creating: DashSet::new(),
             data_dir: data_dir.map(PathBuf::from),
             read_only,
             #[cfg(feature = "cdc")]
@@ -177,7 +444,7 @@ impl DatabaseManager {
             std::fs::create_dir_all(dir).expect("failed to create data directory");
 
             // Migration: old flat layout had `{data_dir}/grafeo.db` directly.
-            // Skip in read-only mode — can't rename on read-only mounts.
+            // Skip in read-only mode: can't rename on read-only mounts.
             let old_flat = dir.join("grafeo.db");
             if !mgr.read_only && old_flat.exists() {
                 let new_dir = dir.join("default");
@@ -221,6 +488,10 @@ impl DatabaseManager {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
+                        // A crash between the two renames of an epoch restore
+                        // leaves the original at the pre-restore path.
+                        crate::backup::recover_orphaned_pre_restore(&path, mgr.read_only);
+
                         // Migrate legacy grafeo.db → data.grafeo (skip in read-only mode)
                         let legacy = path.join("grafeo.db");
                         let current = path.join("data.grafeo");
@@ -244,20 +515,23 @@ impl DatabaseManager {
                         {
                             let name = entry.file_name().to_string_lossy().to_string();
                             tracing::info!(name = %name, read_only = mgr.read_only, "Opening database");
-                            let open_result = if mgr.read_only {
-                                GrafeoDB::open_read_only(db_file.to_str().unwrap())
-                            } else {
-                                GrafeoDB::open(db_file.to_str().unwrap())
+                            let (config, stored_metadata) = match mgr.reopen_config(&db_file) {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    tracing::error!(name = %name, error = %e, "Not opening database, skipping");
+                                    continue;
+                                }
                             };
-                            match open_result {
+                            match GrafeoDB::with_config(config) {
                                 Ok(db) => {
-                                    let metadata = DatabaseMetadata {
-                                        database_type: format!("{}", db.graph_model()),
-                                        storage_mode: "persistent".to_string(),
-                                        backward_edges: true,
-                                        threads: std::thread::available_parallelism()
-                                            .map_or(1, |n| n.get()),
-                                    };
+                                    let metadata =
+                                        stored_metadata.unwrap_or_else(|| DatabaseMetadata {
+                                            database_type: format!("{}", db.graph_model()),
+                                            storage_mode: "persistent".to_string(),
+                                            backward_edges: true,
+                                            threads: std::thread::available_parallelism()
+                                                .map_or(1, |n| n.get()),
+                                        });
                                     mgr.databases.insert(
                                         name,
                                         Arc::new(DatabaseEntry::new(Arc::new(db), metadata)),
@@ -275,6 +549,18 @@ impl DatabaseManager {
             // Ensure "default" exists
             if !mgr.databases.contains_key("default") {
                 let default_dir = dir.join("default");
+                // An empty default must never be created next to files of an
+                // earlier one: it would shadow them, or adopt and rewrite
+                // them. Recovery is retried on every start.
+                let leftovers: Vec<String> = database_files_present(&default_dir)
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                assert!(
+                    leftovers.is_empty(),
+                    "refusing to create an empty default database: found {} from an earlier one that did not open. Check the server log for the reason (an interrupted epoch restore, options.json, a lock), fix or move these files, then start again",
+                    leftovers.join(", ")
+                );
                 std::fs::create_dir_all(&default_dir)
                     .expect("failed to create default db directory");
                 let db_path = default_dir.join("data.grafeo");
@@ -345,6 +631,166 @@ impl DatabaseManager {
         Ok(entry)
     }
 
+    /// Engine config for reopening the persistent database at `db_file`.
+    ///
+    /// Applies the options in the database's [`OPTIONS_FILE`] and returns the
+    /// metadata they imply. A database without the file (created before
+    /// 0.5.44, or the `default` database) opens with engine defaults and
+    /// `None` metadata, as before. A file with a value the engine refuses
+    /// (zero threads, zero memory), an unknown name or a value of the wrong
+    /// type falls back to engine defaults with the stored graph model. A file
+    /// that is not JSON, or has no readable `database_type`, is logged and
+    /// ignored; its graph model is unknown, so it opens as before.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and the database must stay closed, when the stored
+    /// graph model fails the engine's validation, for example an RDF database
+    /// on a build without the triple store: opening it with another model
+    /// would rewrite the file without its data.
+    pub fn reopen_config(
+        &self,
+        db_file: &Path,
+    ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
+        let (config, metadata) = self.stored_config(db_file)?;
+        // A reopened database keeps change capture on a replication primary,
+        // as `create` does for a new one.
+        #[cfg(feature = "cdc")]
+        let config = if self.cdc_enabled {
+            config.with_cdc()
+        } else {
+            config
+        };
+        Ok((config, metadata))
+    }
+
+    /// [`Self::reopen_config`] without the server-wide settings.
+    fn stored_config(
+        &self,
+        db_file: &Path,
+    ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
+        let base = if self.read_only {
+            Config::read_only(db_file)
+        } else {
+            Config::persistent(db_file)
+        };
+        let Some(db_dir) = db_file.parent() else {
+            return Ok((base, None));
+        };
+        let options_path = db_dir.join(OPTIONS_FILE);
+        let stored = match read_stored_options(db_dir) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return Ok((base, None)),
+            Err(e) => {
+                // With a readable model the file's values are ignored and the
+                // model is kept. A file that is not JSON, or has no readable
+                // `database_type`, has an unknown model and opens as before.
+                return match e.database_type {
+                    Some(database_type) => {
+                        Self::type_only_config(base, database_type, &options_path, &e.message)
+                    }
+                    None => {
+                        tracing::warn!(
+                            path = %options_path.display(),
+                            error = %e.message,
+                            "Ignoring unreadable options.json; opening with engine defaults"
+                        );
+                        Ok((base, None))
+                    }
+                };
+            }
+        };
+        // `configure` only checks names; the engine checks the values. A file
+        // with a value-range error or an unknown name falls back to the base
+        // config with the stored graph model. The model is kept because the
+        // file's sections depend on it: opening an RDF file as a property
+        // graph would rewrite it without its RDF data at the next checkpoint.
+        // Any other validation error keeps the database closed.
+        let configured = match configure(base.clone(), stored.database_type, &stored.options) {
+            Ok(config) => config,
+            Err(e) => {
+                return Self::type_only_config(
+                    base,
+                    stored.database_type,
+                    &options_path,
+                    &e.to_string(),
+                );
+            }
+        };
+        match configured.validate() {
+            Ok(()) => {
+                let metadata = metadata_for(
+                    stored.database_type,
+                    StorageMode::Persistent,
+                    &stored.options,
+                );
+                Ok((configured, Some(metadata)))
+            }
+            Err(
+                e @ (ConfigError::ZeroMemoryLimit
+                | ConfigError::ZeroThreads
+                | ConfigError::ZeroWalFlushInterval
+                | ConfigError::ZeroAdaptiveFlushInterval),
+            ) => Self::type_only_config(base, stored.database_type, &options_path, &e.to_string()),
+            Err(e) => Err(Self::keep_closed(&options_path, &e)),
+        }
+    }
+
+    /// The base config with what the stored database type needs (its graph
+    /// model, and schema constraints for JSON Schema), for a file whose
+    /// options are ignored because of `reason`. That config must pass
+    /// validation, or the database stays closed.
+    fn type_only_config(
+        base: Config,
+        database_type: DatabaseType,
+        options_path: &Path,
+        reason: &str,
+    ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
+        let config = type_config(base, database_type);
+        match config.validate() {
+            Ok(()) => {
+                tracing::warn!(
+                    path = %options_path.display(),
+                    error = %reason,
+                    "Ignoring invalid options.json; falling back to engine defaults with the stored database type"
+                );
+                Ok((config, None))
+            }
+            // A value error cannot come from a base config; treat it like any
+            // other error and keep the database closed.
+            Err(e) => Err(Self::keep_closed(options_path, &e)),
+        }
+    }
+
+    /// The error for a stored config the engine rejects in a way that must
+    /// not be worked around.
+    fn keep_closed(options_path: &Path, error: &ConfigError) -> ServiceError {
+        match error {
+            ConfigError::RdfFeatureRequired => ServiceError::Internal(format!(
+                "{} declares an RDF-based database, but this server was built without the triple store; use a server built with it. The database stays closed and its files are untouched",
+                options_path.display()
+            )),
+            other => ServiceError::Internal(format!(
+                "{} fails the engine's validation ({other}); the database stays closed and its files are untouched",
+                options_path.display()
+            )),
+        }
+    }
+
+    /// Reserves `name` for a `create` in flight; the guard releases it on drop.
+    fn reserve_name<'a>(&'a self, name: &'a str) -> Result<CreateReservation<'a>, ServiceError> {
+        if self.creating.insert(name.to_string()) {
+            Ok(CreateReservation {
+                creating: &self.creating,
+                name,
+            })
+        } else {
+            Err(ServiceError::Conflict(format!(
+                "database '{name}' is being created"
+            )))
+        }
+    }
+
     /// Creates a new named database from a full request.
     pub fn create(&self, req: &CreateDatabaseRequest) -> Result<(), ServiceError> {
         if self.read_only {
@@ -360,6 +806,14 @@ impl DatabaseManager {
             )));
         }
 
+        if self.databases.contains_key(name.as_str()) {
+            return Err(ServiceError::Conflict(format!(
+                "database '{name}' already exists"
+            )));
+        }
+
+        let _reservation = self.reserve_name(name)?;
+        // Re-check: another create may have finished between the two checks.
         if self.databases.contains_key(name.as_str()) {
             return Err(ServiceError::Conflict(format!(
                 "database '{name}' already exists"
@@ -394,20 +848,11 @@ impl DatabaseManager {
             )));
         }
 
-        // Build engine Config
-        let graph_model = req.database_type.graph_model();
-        let memory_limit = req
-            .options
-            .memory_limit_bytes
-            .unwrap_or(DEFAULT_MEMORY_LIMIT);
-        let backward_edges = req.options.backward_edges.unwrap_or(true);
-        let threads = req
-            .options
-            .threads
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-
-        let mut config = match req.storage_mode {
-            StorageMode::InMemory => Config::in_memory(),
+        // Build the engine config. Invalid options are rejected before any
+        // directory is created.
+        let resolved = resolve_options(&req.options);
+        let db_dir = match req.storage_mode {
+            StorageMode::InMemory => None,
             StorageMode::Persistent => {
                 let dir = self.data_dir.as_ref().ok_or_else(|| {
                     ServiceError::BadRequest(
@@ -415,48 +860,64 @@ impl DatabaseManager {
                             .to_string(),
                     )
                 })?;
-                let db_dir = dir.join(name.as_str());
-                std::fs::create_dir_all(&db_dir).map_err(|e| {
-                    ServiceError::Internal(format!("failed to create directory: {e}"))
-                })?;
-                let db_path = db_dir.join("data.grafeo");
-                Config::persistent(db_path.to_str().unwrap())
+                Some(dir.join(name.as_str()))
             }
         };
+        let base = match &db_dir {
+            Some(dir) => Config::persistent(dir.join("data.grafeo")),
+            None => Config::in_memory(),
+        };
+        validate_spillable_sections(&resolved)?;
+        let config = configure(base, req.database_type, &resolved)?;
 
-        config = config
-            .with_graph_model(graph_model)
-            .with_memory_limit(memory_limit)
-            .with_threads(threads);
-
-        if !backward_edges {
-            config = config.without_backward_edges();
-        }
-
-        if req.database_type == DatabaseType::JsonSchema {
-            config = config.with_schema_constraints();
-        }
-
-        // WAL settings
-        if let Some(wal_enabled) = req.options.wal_enabled
-            && !wal_enabled
+        // Never adopt or overwrite a database that is on disk but absent from
+        // the map (skipped at startup because it is corrupt or its options
+        // fail validation). A leftover options.json alone is the remains of
+        // an interrupted create (options.json is written before data.grafeo),
+        // so create may replace it and a rollback may remove it.
+        if let Some(ref dir) = db_dir
+            && has_database_files(dir)
         {
-            config.wal_enabled = false;
+            return Err(ServiceError::Conflict(format!(
+                "database '{name}' already exists on disk"
+            )));
         }
 
-        if let Some(ref durability_str) = req.options.wal_durability {
-            config = config.with_wal_durability(parse_durability(durability_str)?);
-        }
+        // Decode the schema before any filesystem change.
+        let schema_bytes = match req.schema_file {
+            Some(ref schema_b64) => Some(
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
+                    .map_err(|e| {
+                        ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
+                    })?,
+            ),
+            None => None,
+        };
 
-        if let Some(ref spill_path) = req.options.spill_path {
-            config = config.with_spill_path(spill_path);
+        let created_dir = db_dir
+            .as_ref()
+            .is_some_and(|dir| !dir.try_exists().unwrap_or(true));
+        if let Some(ref dir) = db_dir {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| ServiceError::Internal(format!("failed to create directory: {e}")))?;
+            // Write options.json before the engine creates data.grafeo, so a
+            // crash can only leave options.json without data.grafeo (which the
+            // startup scan skips), never the reverse.
+            let stored = StoredOptions {
+                database_type: req.database_type,
+                options: resolved.clone(),
+            };
+            if let Err(e) = write_stored_options(dir, &stored) {
+                rollback_create(dir, created_dir);
+                return Err(e);
+            }
         }
 
         tracing::info!(
             name = %name,
             database_type = %req.database_type,
             storage_mode = ?req.storage_mode,
-            memory_limit = memory_limit,
+            memory_limit = resolved.memory_limit_bytes.unwrap_or(DEFAULT_MEMORY_LIMIT),
             "Creating database"
         );
 
@@ -472,29 +933,28 @@ impl DatabaseManager {
                     "Engine creation failed, retrying after brief pause"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                GrafeoDB::with_config(config).map_err(|e| {
-                    ServiceError::Internal(format!("failed to create database after retry: {e}"))
-                })?
+                match GrafeoDB::with_config(config) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        if let Some(ref dir) = db_dir {
+                            rollback_create(dir, created_dir);
+                        }
+                        return Err(ServiceError::Internal(format!(
+                            "failed to create database after retry: {e}"
+                        )));
+                    }
+                }
             }
         };
 
         // Schema loading (if applicable)
-        if let Some(ref schema_b64) = req.schema_file {
-            let schema_bytes =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, schema_b64)
-                    .map_err(|e| {
-                        ServiceError::BadRequest(format!("invalid base64 in schema_file: {e}"))
-                    })?;
-
-            let schema_result = crate::schema::load_schema(req.database_type, &schema_bytes, &db);
+        if let Some(ref schema_bytes) = schema_bytes {
+            let schema_result = crate::schema::load_schema(req.database_type, schema_bytes, &db);
             if let Err(e) = schema_result {
-                // Rollback: close and remove the database
+                // Rollback: close and remove what this call created
                 let _ = db.close();
-                if req.storage_mode == StorageMode::Persistent
-                    && let Some(ref dir) = self.data_dir
-                {
-                    let db_dir = dir.join(name.as_str());
-                    let _ = std::fs::remove_dir_all(db_dir);
+                if let Some(ref dir) = db_dir {
+                    rollback_create(dir, created_dir);
                 }
                 return Err(e);
             }
@@ -507,12 +967,7 @@ impl DatabaseManager {
             db.set_cdc_enabled(true);
         }
 
-        let metadata = DatabaseMetadata {
-            database_type: req.database_type.as_str().to_string(),
-            storage_mode: req.storage_mode.as_str().to_string(),
-            backward_edges,
-            threads,
-        };
+        let metadata = metadata_for(req.database_type, req.storage_mode, &resolved);
 
         self.databases.insert(
             name.clone(),
@@ -556,7 +1011,7 @@ impl DatabaseManager {
 
         // Explicitly drop the Arc to ensure the engine is fully released
         // before we touch the filesystem. If other references exist (e.g.,
-        // stale sessions), this won't be the final drop — but we've already
+        // stale sessions), this won't be the final drop, but we've already
         // removed from the registry so new lookups will fail.
         drop(entry);
 
@@ -600,7 +1055,7 @@ impl DatabaseManager {
     ///
     /// Returns the owned `DatabaseEntry` after verifying exclusive ownership
     /// of both the outer and inner Arcs. The entry is removed from the
-    /// registry, so the caller **must** re-insert it via [`reinsert`] when
+    /// registry, so the caller **must** re-insert it via [`reinsert`](Self::reinsert) when
     /// done, even on failure.
     #[cfg(feature = "compact-store")]
     pub fn take_exclusive(&self, name: &str) -> Result<DatabaseEntry, ServiceError> {
@@ -634,7 +1089,8 @@ impl DatabaseManager {
         }
     }
 
-    /// Re-inserts a database entry previously removed via [`take_exclusive`].
+    /// Re-inserts a database entry previously removed via
+    /// [`take_exclusive`](Self::take_exclusive).
     #[cfg(feature = "compact-store")]
     pub fn reinsert(&self, name: String, entry: DatabaseEntry) {
         self.databases.insert(name, Arc::new(entry));
@@ -793,7 +1249,7 @@ mod tests {
             schema_filename: None,
         };
 
-        // Create, delete, immediately recreate — exercises the close barrier
+        // Create, delete, immediately recreate: exercises the close barrier
         mgr.create(&req).unwrap();
         assert!(mgr.get("ephemeral").is_some());
 
@@ -1100,5 +1556,942 @@ mod tests {
 
         // Cleanup
         entry.set_available();
+    }
+
+    #[test]
+    fn create_database_with_section_tier_overrides() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "force_disk".to_string());
+        section_tiers.insert("CompactStore".to_string(), "auto".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "tiered".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        mgr.create(&req).expect("create succeeds");
+        assert!(mgr.get("tiered").is_some());
+    }
+
+    #[test]
+    fn create_database_rejects_unknown_section_tier_name() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("NotASection".to_string(), "auto".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "bad".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        let err = mgr.create(&req).expect_err("invalid section");
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[test]
+    fn create_database_rejects_unknown_tier_value() {
+        use std::collections::HashMap;
+
+        let mgr = DatabaseManager::new(None, false);
+
+        let mut section_tiers = HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "frozen".to_string());
+
+        let req = CreateDatabaseRequest {
+            name: "bad2".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+
+        let err = mgr.create(&req).expect_err("invalid tier");
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    fn persistent_request(name: &str, options: DatabaseOptions) -> CreateDatabaseRequest {
+        CreateDatabaseRequest {
+            name: name.to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::Persistent,
+            options,
+            schema_file: None,
+            schema_filename: None,
+        }
+    }
+
+    #[test]
+    fn memory_limit_survives_restart() {
+        // grafeo-server#67, the reproduction from the issue.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let limit = 128 * 1024 * 1024;
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let options = DatabaseOptions {
+                memory_limit_bytes: Some(limit),
+                ..Default::default()
+            };
+            mgr.create(&persistent_request("capped", options)).unwrap();
+            assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
+        }
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
+        assert!(mgr.total_allocated_memory() >= limit);
+    }
+
+    #[test]
+    fn creation_options_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut section_tiers = std::collections::HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "force_ram".to_string());
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let options = DatabaseOptions {
+                backward_edges: Some(false),
+                threads: Some(2),
+                wal_durability: Some("sync".to_string()),
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            };
+            mgr.create(&persistent_request("tuned", options)).unwrap();
+        }
+        let stored = std::fs::read_to_string(dir.path().join("tuned").join(OPTIONS_FILE)).unwrap();
+        assert!(stored.contains("\"backward_edges\": false"), "{stored}");
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr.get("tuned").unwrap();
+        assert!(!entry.metadata.backward_edges);
+        assert_eq!(entry.metadata.threads, 2);
+        assert_eq!(entry.metadata.database_type, "lpg");
+        // The default limit is resolved at creation, so it survives too.
+        assert_eq!(entry.db().memory_limit(), Some(DEFAULT_MEMORY_LIMIT));
+    }
+
+    #[test]
+    fn read_only_restart_applies_stored_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let limit = 64 * 1024 * 1024;
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let options = DatabaseOptions {
+                memory_limit_bytes: Some(limit),
+                ..Default::default()
+            };
+            mgr.create(&persistent_request("capped", options)).unwrap();
+        }
+        let mgr = DatabaseManager::new(Some(path), true);
+        assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
+    }
+
+    #[test]
+    fn database_without_options_file_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("legacy", DatabaseOptions::default()))
+                .unwrap();
+        }
+        std::fs::remove_file(dir.path().join("legacy").join(OPTIONS_FILE)).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("legacy")
+            .expect("a store without options.json must still open");
+        assert_eq!(entry.db().memory_limit(), None);
+        assert!(entry.metadata.backward_edges);
+    }
+
+    #[test]
+    fn unreadable_options_file_falls_back_to_engine_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("garbled", DatabaseOptions::default()))
+                .unwrap();
+        }
+        std::fs::write(dir.path().join("garbled").join(OPTIONS_FILE), "{ not json").unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("garbled")
+            .expect("a bad options.json must not keep the database closed");
+        assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[test]
+    fn invalid_section_tier_leaves_no_directory() {
+        // PR #69 review item 2: options are validated before the database
+        // directory exists, so bad requests cannot litter the data directory.
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut section_tiers = std::collections::HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "frozen".to_string());
+        let options = DatabaseOptions {
+            section_tiers: Some(section_tiers),
+            ..Default::default()
+        };
+        let err = mgr.create(&persistent_request("bad", options)).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+        assert!(!dir.path().join("bad").exists());
+    }
+
+    #[test]
+    fn in_memory_database_writes_no_options_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        mgr.create(&CreateDatabaseRequest {
+            name: "scratch".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions::default(),
+            schema_file: None,
+            schema_filename: None,
+        })
+        .unwrap();
+        assert!(!dir.path().join("scratch").exists());
+    }
+
+    #[test]
+    fn options_file_exists_before_the_database_file() {
+        // cubic 4178501194: a crash between engine creation and the options
+        // write must not leave a data.grafeo without options.json. Writing
+        // the options first means a crash can only leave options.json without
+        // data.grafeo, which the startup scan skips.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let db_dir = dir.path().join("half");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join(OPTIONS_FILE), "{}").unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert!(
+            mgr.get("half").is_none(),
+            "a directory without data.grafeo is skipped"
+        );
+
+        // Creating the same name later works and rewrites options.json.
+        let options = DatabaseOptions {
+            memory_limit_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        mgr.create(&persistent_request("half", options)).unwrap();
+        drop(mgr);
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert_eq!(
+            mgr.get("half").unwrap().db().memory_limit(),
+            Some(64 * 1024 * 1024)
+        );
+    }
+
+    fn dir_listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn failed_create_in_existing_dir_keeps_other_files() {
+        // A directory that exists without a database (for example one the
+        // startup scan skipped) keeps its files when the create fails after
+        // the directory step; only what the call wrote is removed.
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("keep");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("sentinel.txt"), "precious").unwrap();
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("keep", DatabaseOptions::default());
+        req.database_type = DatabaseType::JsonSchema;
+        req.schema_file = Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"this is not json",
+        ));
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+
+        assert!(mgr.get("keep").is_none());
+        assert_eq!(dir_listing(&db_dir), vec!["sentinel.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(db_dir.join("sentinel.txt")).unwrap(),
+            "precious"
+        );
+    }
+
+    #[test]
+    fn create_refuses_to_adopt_existing_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("old");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo"), b"not a real database").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("old").is_none(), "a corrupt database is skipped");
+        let err = mgr
+            .create(&persistent_request("old", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::metadata(db_dir.join("data.grafeo")).unwrap().len(),
+            b"not a real database".len() as u64
+        );
+    }
+
+    #[test]
+    fn create_with_invalid_base64_schema_leaves_no_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("b64", DatabaseOptions::default());
+        req.schema_file = Some("!!! not base64 !!!".to_string());
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+        assert!(!dir.path().join("b64").exists());
+    }
+
+    #[test]
+    fn create_rejects_force_disk_for_sections_that_cannot_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+
+        for section in ["Catalog", "LpgStore", "RdfStore"] {
+            let mut req = persistent_request("nospill", DatabaseOptions::default());
+            req.options.section_tiers = Some(
+                [(section.to_string(), "force_disk".to_string())]
+                    .into_iter()
+                    .collect(),
+            );
+            let err = mgr.create(&req).expect_err("force_disk must be rejected");
+            let ServiceError::BadRequest(msg) = err else {
+                panic!("expected BadRequest, got: {err}");
+            };
+            assert_eq!(
+                msg,
+                format!(
+                    "section '{section}' cannot be kept on disk: only CompactStore, \
+                     VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                )
+            );
+            assert!(mgr.get("nospill").is_none());
+            assert!(!dir.path().join("nospill").exists());
+        }
+
+        // auto and force_ram stay valid for every section.
+        let mut req = persistent_request("fine", DatabaseOptions::default());
+        req.options.section_tiers = Some(
+            [
+                ("LpgStore".to_string(), "force_ram".to_string()),
+                ("Catalog".to_string(), "auto".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        mgr.create(&req).unwrap();
+    }
+
+    #[test]
+    fn create_refuses_a_leftover_wal_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("orphan");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.wal"), b"unreplayed").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let err = mgr
+            .create(&persistent_request("orphan", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::read(db_dir.join("data.grafeo.wal")).unwrap(),
+            b"unreplayed"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_legacy_wal_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("legacy");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("grafeo.db.wal"), b"unreplayed").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("legacy").is_none(), "a WAL alone is not opened");
+        let err = mgr
+            .create(&persistent_request("legacy", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::read(db_dir.join("grafeo.db.wal")).unwrap(),
+            b"unreplayed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_dangling_database_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("linked");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("target.grafeo");
+        std::os::unix::fs::symlink(&target, db_dir.join("data.grafeo")).unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("linked").is_none(), "a dangling link is not opened");
+        let err = mgr
+            .create(&persistent_request("linked", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        let link = std::fs::symlink_metadata(db_dir.join("data.grafeo")).unwrap();
+        assert!(link.file_type().is_symlink(), "the link is left as it was");
+        assert!(
+            std::fs::symlink_metadata(&target).is_err(),
+            "nothing is created where the link points"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_name_being_created_and_releases_it_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let req = persistent_request("busy", DatabaseOptions::default());
+
+        {
+            let _held = mgr.reserve_name("busy").unwrap();
+            let err = mgr.create(&req).unwrap_err();
+            assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+            assert!(!dir.path().join("busy").exists(), "nothing is touched");
+        }
+
+        // The guard released the name, and a finished create releases it too.
+        mgr.create(&req).unwrap();
+        mgr.delete("busy").unwrap();
+        mgr.create(&req).unwrap();
+    }
+
+    /// Writes a database holding one node, then moves its file to the
+    /// pre-restore path the way a crash between the two renames of an epoch
+    /// restore leaves it. Closing the engine removes the WAL, so the layout
+    /// has no WAL sidecar; the WAL layouts are tested apart.
+    fn orphan_with_one_node(data_dir: &Path, name: &str, create_it: bool) {
+        {
+            let mgr = DatabaseManager::new(Some(data_dir.to_str().unwrap()), false);
+            if create_it {
+                mgr.create(&persistent_request(name, DatabaseOptions::default()))
+                    .unwrap();
+            }
+            mgr.get(name)
+                .unwrap()
+                .db()
+                .session()
+                .execute("INSERT (:Person {name: 'Alice'})")
+                .unwrap();
+        }
+        let db_dir = data_dir.join(name);
+        std::fs::rename(
+            db_dir.join("data.grafeo"),
+            db_dir.join("data.grafeo.pre-restore"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn startup_recovers_an_orphaned_pre_restore_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "orphan", true);
+        let db_dir = dir.path().join("orphan");
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let entry = mgr.get("orphan").expect("the original must come back");
+        assert_eq!(entry.db().node_count(), 1);
+        assert!(!db_dir.join("data.grafeo.pre-restore").exists());
+    }
+
+    #[test]
+    fn startup_recovers_an_orphaned_default_instead_of_recreating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "default", false);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let entry = mgr.get("default").unwrap();
+        assert_eq!(
+            entry.db().node_count(),
+            1,
+            "default must not be recreated empty"
+        );
+        assert!(
+            !dir.path()
+                .join("default")
+                .join("data.grafeo.pre-restore")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn startup_leaves_both_files_when_a_live_database_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        orphan_with_one_node(dir.path(), "both", true);
+        let db_dir = dir.path().join("both");
+        // A live database next to the pre-restore copy: an operator decides.
+        {
+            let live = GrafeoDB::open(db_dir.join("data.grafeo").to_str().unwrap()).unwrap();
+            live.close().unwrap();
+        }
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert_eq!(mgr.get("both").unwrap().db().node_count(), 0);
+        assert!(db_dir.join("data.grafeo.pre-restore").exists());
+    }
+
+    #[test]
+    fn options_that_fail_engine_validation_open_with_engine_defaults() {
+        // `configure` accepts zero threads; the engine's validation does not.
+        // The database must still open.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("zero", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("zero").join(OPTIONS_FILE);
+        let stored = std::fs::read_to_string(&file).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        json["options"]["threads"] = serde_json::json!(0);
+        json["options"]["memory_limit_bytes"] = serde_json::json!(0);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("zero")
+            .expect("a stored file that fails validation must not keep the database closed");
+        assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[test]
+    fn a_json_schema_database_keeps_its_schema_checks_when_its_options_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("checked", DatabaseOptions::default()))
+                .unwrap();
+        }
+        // A JSON Schema database whose stored options fail the engine's
+        // validation.
+        let file = dir.path().join("checked").join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["database_type"] = serde_json::json!("JsonSchema");
+        json["options"]["threads"] = serde_json::json!(0);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(None, false);
+        let (config, metadata) = mgr
+            .reopen_config(&dir.path().join("checked").join("data.grafeo"))
+            .unwrap();
+        assert!(metadata.is_none(), "the options fell back");
+        assert!(config.schema_constraints, "the schema checks stay on");
+        assert_eq!(config.graph_model, grafeo_engine::GraphModel::Lpg);
+    }
+
+    #[test]
+    fn options_with_an_unknown_tier_name_open_with_engine_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("tiers", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("tiers").join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["options"]["section_tiers"] = serde_json::json!({ "NoSuchSection": "force_ram" });
+        json["options"]["memory_limit_bytes"] = serde_json::json!(64 * 1024 * 1024);
+        std::fs::write(&file, json.to_string()).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let entry = mgr
+            .get("tiers")
+            .expect("valid JSON that fails configure must not keep the database closed");
+        // The whole file is ignored, not applied in part.
+        assert_eq!(entry.db().memory_limit(), None);
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn json_schema_database_type_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let mut req = persistent_request("typed", DatabaseOptions::default());
+            req.database_type = DatabaseType::JsonSchema;
+            req.schema_file = Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                br#"{"definitions":{"Person":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+            ));
+            mgr.create(&req).unwrap();
+            assert_eq!(
+                mgr.get("typed").unwrap().metadata.database_type,
+                "json-schema"
+            );
+        }
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert_eq!(
+            mgr.get("typed").unwrap().metadata.database_type,
+            "json-schema"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn create_with_an_invalid_schema_leaves_no_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let mut req = persistent_request("badschema", DatabaseOptions::default());
+        req.database_type = DatabaseType::JsonSchema;
+        req.schema_file = Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"this is not json",
+        ));
+        let err = mgr.create(&req).unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
+        assert!(!dir.path().join("badschema").exists());
+        assert!(mgr.get("badschema").is_none());
+    }
+
+    #[cfg(feature = "cdc")]
+    #[test]
+    fn reopen_config_keeps_cdc_on_a_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let db_file = dir.path().join("default").join("data.grafeo");
+        assert!(!mgr.reopen_config(&db_file).unwrap().0.cdc_enabled);
+        mgr.set_cdc_enabled(true);
+        assert!(mgr.reopen_config(&db_file).unwrap().0.cdc_enabled);
+    }
+
+    #[test]
+    fn section_tier_override_is_applied_on_reopen() {
+        use grafeo_common::storage::{SectionType, TierOverride};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut section_tiers = std::collections::HashMap::new();
+        section_tiers.insert("VectorStore".to_string(), "force_disk".to_string());
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            let options = DatabaseOptions {
+                section_tiers: Some(section_tiers),
+                ..Default::default()
+            };
+            mgr.create(&persistent_request("spilled", options)).unwrap();
+        }
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        let db_file = dir.path().join("spilled").join("data.grafeo");
+        let (config, _) = mgr.reopen_config(&db_file).unwrap();
+        let tier = config
+            .section_configs
+            .get(&SectionType::VectorStore)
+            .map(|c| c.tier);
+        assert_eq!(tier, Some(TierOverride::ForceDisk));
+        assert!(mgr.get("spilled").is_some());
+    }
+
+    /// Runs `DatabaseManager::new` and returns the panic message, or `None`
+    /// when startup succeeded.
+    fn startup_panic(data_dir: &Path) -> Option<String> {
+        let path = data_dir.to_str().unwrap().to_string();
+        let result = std::panic::catch_unwind(move || {
+            let _ = DatabaseManager::new(Some(&path), false);
+        });
+        result.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_default()
+        })
+    }
+
+    #[test]
+    fn startup_refuses_an_empty_default_next_to_an_orphaned_copy() {
+        // Recovery is blocked: both sides have a WAL, so moving the copy back
+        // would overwrite one of them.
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("default");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore"), b"original").unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore.wal"), b"original wal").unwrap();
+        std::fs::create_dir_all(db_dir.join("data.grafeo.wal")).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.wal").join("segment"), b"live").unwrap();
+
+        let message = startup_panic(dir.path()).expect("startup must refuse");
+        assert!(
+            message.contains("data.grafeo.pre-restore"),
+            "the message names the path: {message}"
+        );
+        assert!(!db_dir.join("data.grafeo").exists(), "no empty default");
+        assert_eq!(
+            std::fs::read(db_dir.join("data.grafeo.pre-restore")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn a_lone_live_wal_next_to_a_pre_restore_copy_is_left_alone() {
+        // The WAL may belong to a restored database that did not open, so
+        // moving the copy back could replay it into the original.
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("walled");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore"), b"original").unwrap();
+        std::fs::write(db_dir.join("data.grafeo.wal"), b"live wal").unwrap();
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+
+        assert!(mgr.get("walled").is_none(), "the database is not opened");
+        assert!(!db_dir.join("data.grafeo").exists());
+        assert_eq!(
+            std::fs::read(db_dir.join("data.grafeo.pre-restore")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(db_dir.join("data.grafeo.wal")).unwrap(),
+            b"live wal"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_directory_with_an_orphaned_pre_restore_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        // Placed after startup, which would have moved the copy back.
+        let db_dir = dir.path().join("orphan");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("data.grafeo.pre-restore"), b"original").unwrap();
+
+        let err = mgr
+            .create(&persistent_request("orphan", DatabaseOptions::default()))
+            .unwrap_err();
+
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+        assert_eq!(
+            dir_listing(&db_dir),
+            vec!["data.grafeo.pre-restore".to_string()]
+        );
+    }
+
+    #[test]
+    fn startup_recovery_leaves_everything_when_both_sides_have_a_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in [
+            ("data.grafeo.pre-restore", "original"),
+            ("data.grafeo.pre-restore.wal", "original wal"),
+            ("data.grafeo.wal", "live wal"),
+        ] {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+
+        crate::backup::recover_orphaned_pre_restore(dir.path(), false);
+
+        assert!(!dir.path().join("data.grafeo").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("data.grafeo.wal")).unwrap(),
+            b"live wal"
+        );
+        assert!(dir.path().join("data.grafeo.pre-restore").exists());
+        assert!(dir.path().join("data.grafeo.pre-restore.wal").exists());
+    }
+
+    /// Rewrites a database's options.json to declare an RDF database and
+    /// returns the bytes of its `data.grafeo`.
+    #[cfg(not(feature = "triple-store"))]
+    fn declare_rdf(data_dir: &Path, name: &str) -> Vec<u8> {
+        let file = data_dir.join(name).join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["database_type"] = serde_json::json!("Rdf");
+        std::fs::write(&file, json.to_string()).unwrap();
+        std::fs::read(data_dir.join(name).join("data.grafeo")).unwrap()
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_database_stays_closed_without_the_triple_store() {
+        // Opening the file with an LPG config would rewrite it without its
+        // RDF section at the next checkpoint.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("triples", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let before = declare_rdf(dir.path(), "triples");
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert!(mgr.get("triples").is_none(), "it must stay closed");
+        drop(mgr);
+        assert_eq!(
+            std::fs::read(dir.path().join("triples").join("data.grafeo")).unwrap(),
+            before,
+            "the file is untouched"
+        );
+        let Err(err) = DatabaseManager::new(Some(path), false)
+            .reopen_config(&dir.path().join("triples").join("data.grafeo"))
+        else {
+            panic!("the stored config must be refused");
+        };
+        assert!(err.to_string().contains("triple store"), "got: {err}");
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_default_database_stops_startup_instead_of_being_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        drop(DatabaseManager::new(Some(path), false));
+        let before = declare_rdf_default(dir.path());
+
+        let message = startup_panic(dir.path()).expect("startup must refuse");
+        assert!(message.contains("data.grafeo"), "got: {message}");
+        assert_eq!(
+            std::fs::read(dir.path().join("default").join("data.grafeo")).unwrap(),
+            before,
+            "the file is untouched"
+        );
+    }
+
+    /// `default` has no options.json, so write one that declares RDF.
+    #[cfg(not(feature = "triple-store"))]
+    fn declare_rdf_default(data_dir: &Path) -> Vec<u8> {
+        let stored = StoredOptions {
+            database_type: DatabaseType::Rdf,
+            options: DatabaseOptions::default(),
+        };
+        write_stored_options(&data_dir.join("default"), &stored).unwrap();
+        std::fs::read(data_dir.join("default").join("data.grafeo")).unwrap()
+    }
+
+    /// Rewrites options.json of `name` to declare RDF with `extra` merged
+    /// into its options, and returns the bytes of its `data.grafeo`.
+    #[cfg(not(feature = "triple-store"))]
+    fn declare_rdf_with(data_dir: &Path, name: &str, extra: serde_json::Value) -> Vec<u8> {
+        let file = data_dir.join(name).join(OPTIONS_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        json["database_type"] = serde_json::json!("Rdf");
+        for (key, value) in extra.as_object().unwrap() {
+            json["options"][key] = value.clone();
+        }
+        std::fs::write(&file, json.to_string()).unwrap();
+        std::fs::read(data_dir.join(name).join("data.grafeo")).unwrap()
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_database_with_mistyped_options_stays_closed_without_the_triple_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("typed", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("typed").join(OPTIONS_FILE);
+        std::fs::write(
+            &file,
+            r#"{"database_type": "Rdf", "options": {"threads": "8"}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(dir.path().join("typed").join("data.grafeo")).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert!(mgr.get("typed").is_none(), "it must stay closed");
+        drop(mgr);
+        assert_eq!(
+            std::fs::read(dir.path().join("typed").join("data.grafeo")).unwrap(),
+            before,
+            "the file is untouched"
+        );
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_database_with_ignored_options_stays_closed_without_the_triple_store() {
+        // The fallbacks keep the stored graph model, so a value error or an
+        // unknown name cannot turn an RDF file into a property graph.
+        for (name, extra) in [
+            ("zero_threads", serde_json::json!({ "threads": 0 })),
+            (
+                "bad_tier",
+                serde_json::json!({ "section_tiers": { "NoSuchSection": "force_ram" } }),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_str().unwrap();
+            {
+                let mgr = DatabaseManager::new(Some(path), false);
+                mgr.create(&persistent_request(name, DatabaseOptions::default()))
+                    .unwrap();
+            }
+            let before = declare_rdf_with(dir.path(), name, extra);
+
+            let mgr = DatabaseManager::new(Some(path), false);
+            assert!(mgr.get(name).is_none(), "{name} must stay closed");
+            drop(mgr);
+            assert_eq!(
+                std::fs::read(dir.path().join(name).join("data.grafeo")).unwrap(),
+                before,
+                "{name}: the file is untouched"
+            );
+        }
     }
 }

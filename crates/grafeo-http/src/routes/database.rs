@@ -456,3 +456,67 @@ pub async fn drop_schema(
         AdminService::drop_schema(state.databases(), state.metrics(), &name, &schema).await?;
     Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
+
+/// Create or update many nodes by a key property (engine 0.5.44).
+///
+/// All rows are written in one statement: a row that breaks a constraint or
+/// the schema fails the whole call and nothing is written. One call is one
+/// statement, and the request body is limited to `GRAFEO_MAX_BODY_SIZE`
+/// (2 MiB by default; larger bodies are answered with 413), so send large
+/// sets in several calls.
+#[utoipa::path(
+    post,
+    path = "/db/{name}/upsert/nodes",
+    params(("name" = String, Path, description = "Database name")),
+    request_body = grafeo_service::types::UpsertNodesRequest,
+    responses(
+        (status = 200, description = "Upsert summary", body = grafeo_service::types::UpsertResponse),
+        (status = 400, description = "Bad rows or a constraint violation", body = ErrorBody),
+        (status = 404, description = "Database or graph not found", body = ErrorBody),
+        (status = 409, description = "A concurrent write conflicted: retry", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn upsert_nodes(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+    Json(req): Json<grafeo_service::types::UpsertNodesRequest>,
+) -> Result<Json<grafeo_service::types::UpsertResponse>, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
+    let resp =
+        grafeo_service::upsert::UpsertService::upsert_nodes(state.databases(), &name, req).await?;
+    Ok(Json(resp))
+}
+
+/// Create or update many edges by a key property between nodes found by
+/// their key (engine 0.5.44). Endpoints are never created. One call is one
+/// statement, and the request body is limited to `GRAFEO_MAX_BODY_SIZE`
+/// (2 MiB by default; larger bodies are answered with 413), so send large
+/// sets in several calls.
+#[utoipa::path(
+    post,
+    path = "/db/{name}/upsert/edges",
+    params(("name" = String, Path, description = "Database name")),
+    request_body = grafeo_service::types::UpsertEdgesRequest,
+    responses(
+        (status = 200, description = "Upsert summary", body = grafeo_service::types::UpsertResponse),
+        (status = 400, description = "Bad rows or a constraint violation", body = ErrorBody),
+        (status = 404, description = "Database or graph not found", body = ErrorBody),
+        (status = 409, description = "A concurrent write conflicted: retry", body = ErrorBody),
+    ),
+    tag = "Database"
+)]
+pub async fn upsert_edges(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+    Json(req): Json<grafeo_service::types::UpsertEdgesRequest>,
+) -> Result<Json<grafeo_service::types::UpsertResponse>, ApiError> {
+    auth.check_db_access(&name)?;
+    auth.check_write()?;
+    let resp =
+        grafeo_service::upsert::UpsertService::upsert_edges(state.databases(), &name, req).await?;
+    Ok(Json(resp))
+}

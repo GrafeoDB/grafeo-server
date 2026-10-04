@@ -3,6 +3,8 @@ import { api, GrafeoApiError } from "../../api/client";
 import type {
   DatabaseType,
   StorageMode,
+  SectionName,
+  TierOverride,
   SystemResources,
 } from "../../types/api";
 import styles from "./CreateDatabaseDialog.module.css";
@@ -34,6 +36,20 @@ function formatBytes(bytes: number): string {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
+const SECTION_NAMES: SectionName[] = [
+  "LpgStore",
+  "RdfStore",
+  "CompactStore",
+  "VectorStore",
+  "TextIndex",
+  "RdfRing",
+  "PropertyIndex",
+  "Catalog",
+];
+
+/** Sections the engine cannot memory-map, so "Keep on disk" would be ignored. */
+const NON_SPILLABLE: SectionName[] = ["Catalog", "LpgStore", "RdfStore"];
+
 export default function CreateDatabaseDialog({
   open,
   onClose,
@@ -48,6 +64,10 @@ export default function CreateDatabaseDialog({
   const [walDurability, setWalDurability] = useState("batch");
   const [backwardEdges, setBackwardEdges] = useState(true);
   const [threads, setThreads] = useState(0); // 0 = auto
+  const [showTiers, setShowTiers] = useState(false);
+  const [sectionTiers, setSectionTiers] = useState<
+    Partial<Record<SectionName, TierOverride>>
+  >({});
   const [schemaFile, setSchemaFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -68,6 +88,8 @@ export default function CreateDatabaseDialog({
     if (open) {
       fetchResources();
       setName("");
+      setShowTiers(false);
+      setSectionTiers({});
       setDbType("Lpg");
       setStorageMode("InMemory");
       setWalEnabled(false);
@@ -102,6 +124,18 @@ export default function CreateDatabaseDialog({
     if (file) setSchemaFile(file);
   };
 
+  const setTier = (section: SectionName, tier: TierOverride) => {
+    setSectionTiers((prev) => {
+      const next = { ...prev };
+      if (tier === "auto") {
+        delete next[section];
+      } else {
+        next[section] = tier;
+      }
+      return next;
+    });
+  };
+
   const handleSubmit = async () => {
     setError(null);
     setSubmitting(true);
@@ -129,6 +163,10 @@ export default function CreateDatabaseDialog({
           wal_durability: walDurability as "sync" | "batch" | "adaptive" | "nosync",
           backward_edges: backwardEdges,
           threads: threads === 0 ? undefined : threads,
+          section_tiers:
+            storageMode === "Persistent" && Object.keys(sectionTiers).length > 0
+              ? sectionTiers
+              : undefined,
         },
         schema_file: schemaB64,
         schema_filename: schemaFilename,
@@ -176,6 +214,7 @@ export default function CreateDatabaseDialog({
               const info = DB_TYPE_LABELS[t];
               return (
                 <button
+                  type="button"
                   key={t}
                   className={`${styles.radioOption} ${
                     dbType === t ? styles.selected : ""
@@ -330,15 +369,57 @@ export default function CreateDatabaseDialog({
           </select>
         </div>
 
+        {/* Storage tiers (advanced, persistent only) */}
+        {storageMode === "Persistent" && (
+          <div className={styles.field}>
+            <button
+              type="button"
+              className={styles.disclosure}
+              aria-expanded={showTiers}
+              aria-controls="tier-grid"
+              onClick={() => setShowTiers((v) => !v)}
+            >
+              <span aria-hidden="true">{showTiers ? "▾" : "▸"}</span> Storage tiers (advanced)
+            </button>
+            {showTiers && (
+              <div id="tier-grid" className={styles.tierGrid}>
+                {SECTION_NAMES.map((section) => (
+                  <label key={section} className={styles.tierRow}>
+                    <span>{section}</span>
+                    <select
+                      className={styles.select}
+                      value={sectionTiers[section] ?? "auto"}
+                      onChange={(e) =>
+                        setTier(section, e.target.value as TierOverride)
+                      }
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="force_ram">Keep in RAM</option>
+                      {!NON_SPILLABLE.includes(section) && (
+                        <option value="force_disk">Keep on disk</option>
+                      )}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Error */}
         {error && <div className={styles.error}>{error}</div>}
 
         {/* Actions */}
         <div className={styles.actions}>
-          <button className={styles.cancelButton} onClick={onClose}>
+          <button
+            type="button"
+            className={styles.cancelButton}
+            onClick={onClose}
+          >
             Cancel
           </button>
           <button
+            type="button"
             className={styles.submitButton}
             onClick={handleSubmit}
             disabled={!canSubmit}

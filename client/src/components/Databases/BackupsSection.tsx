@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, GrafeoApiError } from "../../api/client";
 import type { BackupEntry, DatabaseSummary } from "../../types/api";
 import btn from "../../styles/buttons.module.css";
@@ -38,6 +38,8 @@ function filenameKey(filename: string): string {
 export default function BackupsSection({ database, onMutated }: Props) {
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notConfigured, setNotConfigured] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [submittingCreate, setSubmittingCreate] = useState(false);
@@ -48,13 +50,46 @@ export default function BackupsSection({ database, onMutated }: Props) {
   const [epochError, setEpochError] = useState<string | null>(null);
   const [submittingEpoch, setSubmittingEpoch] = useState(false);
 
+  // Each refresh gets a number; a response is applied only when no later
+  // refresh has started, so a slow answer (for a database no longer shown,
+  // or an older list) cannot overwrite a newer one.
+  const generation = useRef(0);
+
   const refresh = useCallback(() => {
+    const current = ++generation.current;
+    const isLatest = () => current === generation.current;
     setLoading(true);
     api.backup
       .list(database)
-      .then(setBackups)
-      .catch(() => setBackups([]))
-      .finally(() => setLoading(false));
+      .then((list) => {
+        if (!isLatest()) return;
+        setNotConfigured(false);
+        setLoadError(null);
+        setBackups(list);
+      })
+      .catch((err) => {
+        if (!isLatest()) return;
+        // The server (`require_backup_dir` in
+        // crates/grafeo-http/src/routes/backup.rs) answers 400 "backup not
+        // configured: ..." when it was started without --backup-dir. Match
+        // the message, not any 400.
+        const unconfigured =
+          err instanceof GrafeoApiError &&
+          err.status === 400 &&
+          err.detail.includes("backup not configured");
+        setNotConfigured(unconfigured);
+        setLoadError(
+          unconfigured
+            ? null
+            : err instanceof GrafeoApiError
+              ? err.detail
+              : String(err),
+        );
+        setBackups([]);
+      })
+      .finally(() => {
+        if (isLatest()) setLoading(false);
+      });
   }, [database]);
 
   useEffect(() => {
@@ -150,40 +185,48 @@ export default function BackupsSection({ database, onMutated }: Props) {
     <section className={styles.section}>
       <div className={styles.header}>
         <h3 className={styles.heading}>Backups</h3>
-        <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={btn.link}
-            onClick={() => {
-              setEpochError(null);
-              setEpochRestoring(true);
-            }}
-            disabled={backups.length === 0}
-            title={
-              backups.length === 0
-                ? "No backups available to restore from"
-                : "Restore to a point in time"
-            }
-          >
-            Restore to epoch…
-          </button>
-          <button
-            type="button"
-            className={btn.secondary}
-            onClick={() => {
-              setCreateError(null);
-              setCreating(true);
-            }}
-          >
-            + New backup
-          </button>
-        </div>
+        {!notConfigured && (
+          <div className={styles.headerActions}>
+            <button
+              type="button"
+              className={btn.link}
+              onClick={() => {
+                setEpochError(null);
+                setEpochRestoring(true);
+              }}
+              disabled={backups.length === 0}
+              title={
+                backups.length === 0
+                  ? "No backups available to restore from"
+                  : "Restore to a point in time"
+              }
+            >
+              Restore to epoch…
+            </button>
+            <button
+              type="button"
+              className={btn.secondary}
+              onClick={() => {
+                setCreateError(null);
+                setCreating(true);
+              }}
+            >
+              + New backup
+            </button>
+          </div>
+        )}
       </div>
 
       {toast && <div className={styles.toast}>{toast}</div>}
 
       {loading ? (
         <div className={styles.empty}>Loading…</div>
+      ) : notConfigured ? (
+        <div className={styles.empty}>
+          Backups are not configured on this server
+        </div>
+      ) : loadError ? (
+        <div className={styles.error}>{loadError}</div>
       ) : backups.length === 0 ? (
         <div className={styles.empty}>
           No backups yet. Create one with the button above.

@@ -437,7 +437,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!qr.columns.is_empty());
+        assert_ne!(qr.columns, [] as [std::string::String; 0]);
     }
 
     #[tokio::test]
@@ -517,7 +517,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(qr.rows().is_empty());
+        assert_eq!(qr.rows().len(), 0);
     }
 
     #[tokio::test]
@@ -576,7 +576,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(qr.rows().is_empty());
+        assert_eq!(qr.rows().len(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -589,7 +589,7 @@ mod tests {
         let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
             .await
             .unwrap();
-        assert!(!id.is_empty());
+        assert_ne!(id, "");
     }
 
     #[tokio::test]
@@ -901,7 +901,7 @@ mod tests {
         let session = entry.db().session();
         let qr =
             QueryService::dispatch(&session, "MATCH (n) RETURN n LIMIT 0", None, None).unwrap();
-        assert!(qr.rows().is_empty());
+        assert_eq!(qr.rows().len(), 0);
     }
 
     #[tokio::test]

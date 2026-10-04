@@ -47,7 +47,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.5.40",
+        version = "0.5.44",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -77,6 +77,8 @@ pub use state::AppState;
         routes::database::create_schema,
         routes::database::drop_schema,
         routes::database::import_tsv,
+        routes::database::upsert_nodes,
+        routes::database::upsert_edges,
         routes::admin::admin_stats,
         routes::admin::admin_wal_status,
         routes::admin::admin_wal_checkpoint,
@@ -86,6 +88,8 @@ pub use state::AppState;
         routes::admin::admin_cache_stats,
         routes::admin::admin_clear_cache,
         routes::admin::admin_memory_usage,
+        routes::admin::admin_storage_tiers,
+        routes::admin::admin_reload_eligible,
         routes::admin::admin_write_snapshot,
         routes::admin::admin_compact,
         routes::admin::admin_create_projection,
@@ -117,7 +121,11 @@ pub use state::AppState;
             grafeo_service::types::DatabaseStats, grafeo_service::types::WalStatusInfo,
             grafeo_service::types::ValidationInfo, grafeo_service::types::ValidationErrorItem,
             grafeo_service::types::ValidationWarningItem, grafeo_service::types::IndexDef,
-            grafeo_service::types::CacheStatsInfo,
+            grafeo_service::types::CacheStatsInfo, grafeo_service::types::WriteCountersInfo,
+            grafeo_service::types::StorageTiersResponse,
+            grafeo_service::types::SectionTierInfo,
+            grafeo_service::types::ReloadEligibleRequest,
+            grafeo_service::types::ReloadEligibleResponse,
             grafeo_service::types::VectorSearchReq, grafeo_service::types::TextSearchReq,
             grafeo_service::types::HybridSearchReq, grafeo_service::types::SearchHit,
             grafeo_service::types::CreateGraphRequest,
@@ -126,6 +134,8 @@ pub use state::AppState;
             grafeo_service::types::CreateSchemaRequest,
             grafeo_service::types::ImportTsvRequest,
             grafeo_service::types::ImportResponse,
+            grafeo_service::types::UpsertNodesRequest, grafeo_service::types::UpsertEdgesRequest,
+            grafeo_service::types::UpsertResponse,
             grafeo_service::types::CreateProjectionRequest,
             grafeo_service::types::ProjectionListResponse,
             grafeo_service::types::ShaclValidateRequest,
@@ -212,6 +222,14 @@ pub fn router(state: AppState) -> Router {
             delete(routes::database::drop_schema),
         )
         .route("/db/{name}/import/tsv", post(routes::database::import_tsv))
+        .route(
+            "/db/{name}/upsert/nodes",
+            post(routes::database::upsert_nodes),
+        )
+        .route(
+            "/db/{name}/upsert/edges",
+            post(routes::database::upsert_edges),
+        )
         // SPARQL Protocol (W3C compliant)
         .route(
             "/db/{name}/sparql",
@@ -244,6 +262,14 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::admin_clear_cache),
         )
         .route("/admin/{db}/memory", get(routes::admin::admin_memory_usage))
+        .route(
+            "/admin/{db}/storage-tiers",
+            get(routes::admin::admin_storage_tiers),
+        )
+        .route(
+            "/admin/{db}/reload-eligible",
+            post(routes::admin::admin_reload_eligible),
+        )
         .route(
             "/admin/{db}/snapshot",
             post(routes::admin::admin_write_snapshot),

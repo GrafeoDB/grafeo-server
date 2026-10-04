@@ -155,7 +155,7 @@ mod tests {
         let store = make_store();
         let (record, plaintext) =
             TokenService::create_token(&store, "test".to_string(), default_scope(), None).unwrap();
-        assert!(!plaintext.is_empty());
+        assert_ne!(plaintext, "");
         assert_ne!(plaintext, record.token_hash);
         assert_eq!(record.name, "test");
     }
