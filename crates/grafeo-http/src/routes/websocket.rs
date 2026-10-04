@@ -8,7 +8,11 @@
 //!   stream live change events for a named database.
 //!
 //! Multiple subscriptions may be active on the same connection simultaneously.
-//! Each subscription is identified by a client-assigned `sub_id`.
+//! Each subscription is identified by a client-assigned `sub_id`. A
+//! subscription that falls too far behind loses events: it ends with an
+//! `error` message whose `id` is the `sub_id`, `error` is `"lagged"` and
+//! `detail` is `{"skipped": n, "last_epoch": e}` (subscribe again with
+//! `since = e + 1`). The connection stays open.
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -142,14 +146,13 @@ async fn handle_with_subscriptions<S, R>(
 {
     use std::collections::HashMap;
 
-    use tokio::sync::broadcast::error::RecvError;
+    use grafeo_service::changefeed::LiveCursor;
     use tokio::sync::mpsc;
 
     use crate::types::WsServerMessage;
 
     // Channel that collects events from all active subscription tasks.
-    let (event_tx, mut event_rx) =
-        mpsc::unbounded_channel::<(String, grafeo_service::sync::ChangeEventDto)>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<(String, SubscriptionItem)>();
 
     // Active subscription tasks, keyed by sub_id.
     let mut sub_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -208,27 +211,12 @@ async fn handle_with_subscriptions<S, R>(
                             }
                         } else {
                             let rx = state.change_hub().subscribe(&db, since, state.service().clone());
-                            let tx = event_tx.clone();
-                            let sid = sub_id.clone();
-                            let handle = tokio::spawn(async move {
-                                let mut rx = rx;
-                                loop {
-                                    match rx.recv().await {
-                                        Ok(event) => {
-                                            if tx.send((sid.clone(), event)).is_err() {
-                                                break;
-                                            }
-                                        }
-                                        Err(RecvError::Lagged(n)) => {
-                                            tracing::debug!(
-                                                "WebSocket changefeed sub '{sid}' lagged by {n} events"
-                                            );
-                                            // Continue: client will receive the next available event.
-                                        }
-                                        Err(RecvError::Closed) => break,
-                                    }
-                                }
-                            });
+                            let handle = tokio::spawn(forward_subscription(
+                                sub_id.clone(),
+                                rx,
+                                LiveCursor::new(since),
+                                event_tx.clone(),
+                            ));
                             sub_tasks.insert(sub_id.clone(), handle);
                             WsServerMessage::Subscribed { sub_id }
                         }
@@ -248,8 +236,8 @@ async fn handle_with_subscriptions<S, R>(
 
             // Forward change events from active subscriptions.
             event = event_rx.recv() => {
-                if let Some((sub_id, change_event)) = event {
-                    let msg = WsServerMessage::Change { sub_id, event: Box::new(change_event) };
+                if let Some((sub_id, item)) = event {
+                    let msg = subscription_message(sub_id, item);
                     if send_json(sender, &msg).await.is_err() {
                         break;
                     }
@@ -261,6 +249,63 @@ async fn handle_with_subscriptions<S, R>(
     // Clean up all subscription tasks when the connection closes.
     for (_, handle) in sub_tasks {
         handle.abort();
+    }
+}
+
+/// What a subscription task hands to the connection.
+#[cfg(feature = "push-changefeed")]
+#[derive(Debug)]
+enum SubscriptionItem {
+    Change(Box<grafeo_service::sync::ChangeEventDto>),
+    /// The subscription fell behind and ended.
+    Lagged(grafeo_service::changefeed::LaggedNotice),
+}
+
+/// Forwards the events of subscription `sub_id` to `tx` until the hub
+/// closes or the connection goes away. A subscription that falls behind
+/// ends with a lag notice; the connection stays open.
+#[cfg(feature = "push-changefeed")]
+async fn forward_subscription(
+    sub_id: String,
+    mut receiver: tokio::sync::broadcast::Receiver<grafeo_service::sync::ChangeEventDto>,
+    mut cursor: grafeo_service::changefeed::LiveCursor,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, SubscriptionItem)>,
+) {
+    use grafeo_service::changefeed::LiveItem;
+
+    loop {
+        let item = match cursor.next(&mut receiver).await {
+            LiveItem::Change(event) => SubscriptionItem::Change(event),
+            LiveItem::Lagged(notice) => {
+                tracing::warn!(
+                    sub_id = %sub_id,
+                    skipped = notice.skipped,
+                    last_epoch = notice.last_epoch,
+                    "WebSocket change subscription fell behind; ending it"
+                );
+                let _ = tx.send((sub_id, SubscriptionItem::Lagged(notice)));
+                return;
+            }
+            LiveItem::Closed => return,
+        };
+        if tx.send((sub_id.clone(), item)).is_err() {
+            return;
+        }
+    }
+}
+
+/// The message a subscription item becomes on the socket.
+#[cfg(feature = "push-changefeed")]
+fn subscription_message(sub_id: String, item: SubscriptionItem) -> WsServerMessage {
+    match item {
+        SubscriptionItem::Change(event) => WsServerMessage::Change { sub_id, event },
+        SubscriptionItem::Lagged(notice) => WsServerMessage::Error {
+            id: Some(sub_id),
+            error: "lagged".to_string(),
+            detail: Some(
+                serde_json::to_string(&notice).expect("a lag notice is always serializable"),
+            ),
+        },
     }
 }
 
@@ -337,5 +382,50 @@ async fn process_query(
             };
             WsServerMessage::Error { id, error, detail }
         }
+    }
+}
+
+#[cfg(all(test, feature = "push-changefeed"))]
+mod tests {
+    use super::*;
+
+    fn event_at(epoch: u64) -> grafeo_service::sync::ChangeEventDto {
+        serde_json::from_value(serde_json::json!({
+            "id": epoch, "entity_type": "node", "kind": "create",
+            "epoch": epoch, "timestamp": epoch,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_lagging_subscription_ends_with_a_lagged_error() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(4);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(event_at(3)).unwrap();
+        // Ten events into a channel of 4 before the task reads: 6 are lost.
+        for epoch in 4..14 {
+            sender.send(event_at(epoch)).unwrap();
+        }
+
+        forward_subscription(
+            "s1".to_string(),
+            receiver,
+            grafeo_service::changefeed::LiveCursor::new(3),
+            tx,
+        )
+        .await;
+
+        let (sub_id, item) = rx.recv().await.expect("a lag message");
+        let message = serde_json::to_value(subscription_message(sub_id, item)).unwrap();
+        assert_eq!(
+            message,
+            serde_json::json!({
+                "type": "error",
+                "id": "s1",
+                "error": "lagged",
+                "detail": "{\"skipped\":7,\"last_epoch\":2}",
+            })
+        );
+        assert!(rx.recv().await.is_none(), "the subscription has ended");
     }
 }

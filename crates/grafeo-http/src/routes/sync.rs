@@ -107,8 +107,8 @@ mod sse {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use futures_util::{Stream, StreamExt};
 
+    use grafeo_service::changefeed::{LaggedNotice, LiveCursor, LiveItem};
     use grafeo_service::sync::{ChangeEventDto, ChangesResponse, SyncService};
-    use tokio::sync::broadcast::error::RecvError;
 
     use crate::error::ApiError;
     use crate::middleware::auth_context::AuthContext;
@@ -126,7 +126,11 @@ mod sse {
     /// the client disconnects.
     ///
     /// Events are newline-delimited JSON objects in the `data:` field of each
-    /// SSE event, matching the `ChangeEventDto` schema.
+    /// SSE event, matching the `ChangeEventDto` schema. A named event ends
+    /// the stream:
+    ///
+    /// - `lagged`: the client fell too far behind and lost events. The data
+    ///   is `{"skipped": n, "last_epoch": e}`: reconnect with `since = e + 1`.
     ///
     /// The `limit` query parameter is ignored for the streaming endpoint.
     ///
@@ -142,12 +146,24 @@ mod sse {
         // without CDC, is an HTTP error rather than an empty stream.
         let first = history_page(&state, &name, params.since).await?;
         let stream =
-            change_stream(state, name, first, params.since).map(|event| Ok(sse_event(&event)));
+            change_stream(state, name, first, params.since).map(|item| Ok(item.into_event()));
         Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
     }
 
-    fn sse_event(event: &ChangeEventDto) -> Event {
-        Event::default().data(to_json(event))
+    /// What the change stream sends: a change, or the message that ends it.
+    #[derive(Debug)]
+    enum StreamItem {
+        Change(Box<ChangeEventDto>),
+        Lagged(LaggedNotice),
+    }
+
+    impl StreamItem {
+        fn into_event(self) -> Event {
+            match self {
+                Self::Change(event) => Event::default().data(to_json(&event)),
+                Self::Lagged(notice) => Event::default().event("lagged").data(to_json(&notice)),
+            }
+        }
     }
 
     /// The changes of `name` from epoch `since` on: the history page by page
@@ -161,7 +177,7 @@ mod sse {
         name: String,
         first: ChangesResponse,
         since: u64,
-    ) -> impl Stream<Item = ChangeEventDto> {
+    ) -> impl Stream<Item = StreamItem> {
         async_stream::stream! {
             // Each pull resumes after the previous one's cursor. The cursor
             // never moves back: a pull that finds nothing new can report a
@@ -171,7 +187,7 @@ mod sse {
             while page.changes.len() >= HISTORY_PAGE {
                 next_since = next_since.max(page.server_epoch.saturating_add(1));
                 for event in page.changes {
-                    yield event;
+                    yield StreamItem::Change(Box::new(event));
                 }
                 page = match history_page(&state, &name, next_since).await {
                     Ok(next) => next,
@@ -189,7 +205,7 @@ mod sse {
                 .change_hub()
                 .subscribe(&name, next_since, state.service().clone());
             for event in page.changes {
-                yield event;
+                yield StreamItem::Change(Box::new(event));
             }
             // What the hub broadcast before the subscription is in the log
             // by now: pull it.
@@ -204,24 +220,28 @@ mod sse {
                 next_since = next_since.max(page.server_epoch.saturating_add(1));
                 let full = page.changes.len() >= HISTORY_PAGE;
                 for event in page.changes {
-                    yield event;
+                    yield StreamItem::Change(Box::new(event));
                 }
                 if !full {
                     break;
                 }
             }
 
-            // Live events, without the ones the history already sent.
-            let live_since = next_since;
+            let mut cursor = LiveCursor::new(next_since);
             loop {
-                match receiver.recv().await {
-                    Ok(event) if event.epoch < live_since => {}
-                    Ok(event) => yield event,
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::debug!("SSE receiver lagged by {n} events");
-                        // Continue: the client will see the next available event.
+                match cursor.next(&mut receiver).await {
+                    LiveItem::Change(event) => yield StreamItem::Change(event),
+                    LiveItem::Lagged(notice) => {
+                        tracing::warn!(
+                            db = %name,
+                            skipped = notice.skipped,
+                            last_epoch = notice.last_epoch,
+                            "SSE change stream fell behind; ending it"
+                        );
+                        yield StreamItem::Lagged(notice);
+                        break;
                     }
-                    Err(RecvError::Closed) => break,
+                    LiveItem::Closed => break,
                 }
             }
         }
@@ -264,17 +284,18 @@ mod sse {
             state
         }
 
-        async fn next_item(
-            stream: &mut (impl Stream<Item = ChangeEventDto> + Unpin),
-        ) -> ChangeEventDto {
+        async fn next_item(stream: &mut (impl Stream<Item = StreamItem> + Unpin)) -> StreamItem {
             tokio::time::timeout(Duration::from_secs(10), stream.next())
                 .await
                 .expect("no item within 10 s")
                 .expect("the stream ended")
         }
 
-        fn change_label(event: ChangeEventDto) -> String {
-            event.labels.unwrap().remove(0)
+        fn change_label(item: StreamItem) -> String {
+            match item {
+                StreamItem::Change(event) => event.labels.unwrap().remove(0),
+                other @ StreamItem::Lagged(_) => panic!("expected a change, got {other:?}"),
+            }
         }
 
         #[tokio::test]
@@ -318,6 +339,42 @@ mod sse {
             // Live from here: the hub's copy of `During` is not sent again.
             db.create_node(&["After"]).unwrap();
             assert_eq!(change_label(next_item(&mut stream).await), "After");
+        }
+
+        #[tokio::test]
+        async fn a_lagging_stream_ends_with_a_resumable_notice() {
+            let state = cdc_state();
+            let db = state.databases().get("default").unwrap().db();
+            let first = history_page(&state, "default", 0).await.unwrap();
+            let mut stream = Box::pin(change_stream(
+                state.clone(),
+                "default".to_string(),
+                first,
+                0,
+            ));
+            db.create_node(&["Warmup"]).unwrap();
+            let warmup_epoch = db.current_epoch().0;
+            assert_eq!(change_label(next_item(&mut stream).await), "Warmup");
+
+            // One epoch with more events than the hub's channel holds.
+            db.batch_create_nodes_with_labels(
+                &["Burst"],
+                vec![std::collections::HashMap::new(); 2_000],
+            )
+            .unwrap();
+            match next_item(&mut stream).await {
+                StreamItem::Lagged(notice) => {
+                    assert!(notice.skipped >= 2_000 - 1_024, "{notice:?}");
+                    assert_eq!(notice.last_epoch, warmup_epoch);
+                }
+                other @ StreamItem::Change(_) => panic!("expected a lag, got {other:?}"),
+            }
+            assert!(stream.next().await.is_none(), "the lag ends the stream");
+
+            // Resuming at last_epoch + 1 gets the whole burst.
+            let resumed =
+                SyncService::pull(state.databases(), "default", warmup_epoch + 1, 10_000).unwrap();
+            assert_eq!(resumed.changes.len(), 2_000);
         }
     }
 }

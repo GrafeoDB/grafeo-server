@@ -5253,14 +5253,30 @@ async fn sync_validation_errors() {
     assert!(reasons.contains(&"edge_create_missing_src_dst_or_type"));
 }
 
-/// Reads the next `data:` line of an SSE response as JSON.
+/// Reads the next data event of an SSE response as JSON.
 #[cfg(feature = "push-changefeed")]
 async fn next_sse_data(resp: &mut reqwest::Response, pending: &mut String) -> Value {
+    let (name, data) = next_sse_message(resp, pending).await;
+    assert_eq!(name, None, "a named event: {data}");
+    data
+}
+
+/// Reads the next SSE message: its event name (`None` for a plain data
+/// event) and its data as JSON.
+#[cfg(feature = "push-changefeed")]
+async fn next_sse_message(
+    resp: &mut reqwest::Response,
+    pending: &mut String,
+) -> (Option<String>, Value) {
+    let mut name = None;
     loop {
         if let Some(end) = pending.find('\n') {
             let line: String = pending.drain(..=end).collect();
-            if let Some(data) = line.trim_end().strip_prefix("data:") {
-                return serde_json::from_str(data.trim_start()).unwrap();
+            let line = line.trim_end();
+            if let Some(event) = line.strip_prefix("event:") {
+                name = Some(event.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data:") {
+                return (name, serde_json::from_str(data.trim_start()).unwrap());
             }
             continue;
         }
@@ -5307,6 +5323,121 @@ async fn sse_stream_pages_through_history_then_goes_live() {
     db.create_node(&["Live"]).unwrap();
     let live = next_sse_data(&mut resp, &mut pending).await;
     assert_eq!(live["labels"], json!(["Live"]));
+}
+
+/// SSE: a stream that falls more than the hub's channel behind ends with a
+/// `lagged` event that says where to resume.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn sse_stream_that_falls_behind_ends_with_a_lagged_event() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+    let mut resp = client
+        .get(format!("{base}/db/default/changes/stream?since=0"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    db.create_node(&["Warmup"]).unwrap();
+    let warmup_epoch = db.current_epoch().0;
+    let mut pending = String::new();
+    let warmup = next_sse_data(&mut resp, &mut pending).await;
+    assert_eq!(warmup["labels"], json!(["Warmup"]));
+
+    // One epoch with more events than the hub's channel holds.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 2_000])
+        .unwrap();
+    let (name, data) = next_sse_message(&mut resp, &mut pending).await;
+    assert_eq!(name.as_deref(), Some("lagged"), "{data}");
+    assert!(data["skipped"].as_u64().unwrap() >= 2_000 - 1_024, "{data}");
+    let last_epoch = data["last_epoch"].as_u64().unwrap();
+    assert!(last_epoch <= warmup_epoch, "{data}");
+    let end = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(end.is_none(), "the lag ends the stream");
+
+    // Resuming at last_epoch + 1 gets the whole burst.
+    let resumed: Value = client
+        .get(format!(
+            "{base}/db/default/changes?since={}&limit=10000",
+            last_epoch + 1
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bursts = resumed["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["labels"] == json!(["Burst"]))
+        .count();
+    assert_eq!(bursts, 2_000);
+}
+
+/// WebSocket: a subscription that falls behind ends with a `lagged` error,
+/// and the connection stays open.
+#[cfg(feature = "push-changefeed")]
+#[tokio::test]
+async fn websocket_subscription_that_falls_behind_ends_but_the_socket_stays_open() {
+    let state = sync_state();
+    let db = state.databases().get("default").unwrap().db();
+    let base = spawn_server_from_state(state).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "subscribe", "sub_id": "s1", "db": "default", "since": 0})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "subscribed");
+
+    db.create_node(&["Warmup"]).unwrap();
+    let warmup_epoch = db.current_epoch().0;
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "change", "{body}");
+    assert_eq!(body["event"]["labels"], json!(["Warmup"]));
+
+    // One epoch with more events than the hub's channel holds.
+    db.batch_create_nodes_with_labels(&["Burst"], vec![std::collections::HashMap::new(); 2_000])
+        .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"], "lagged");
+    assert_eq!(body["id"], "s1");
+    let detail: Value = serde_json::from_str(body["detail"].as_str().unwrap()).unwrap();
+    assert!(
+        detail["skipped"].as_u64().unwrap() >= 2_000 - 1_024,
+        "{detail}"
+    );
+    assert!(
+        detail["last_epoch"].as_u64().unwrap() < warmup_epoch,
+        "{detail}"
+    );
+
+    // The socket is still open.
+    ws.send(tungstenite::Message::Text(
+        json!({"type": "ping"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(body["type"], "pong");
 }
 
 /// SSE: when the history fills its last page exactly, the empty pull after

@@ -17,6 +17,11 @@
 //! }
 //! # }
 //! ```
+//!
+//! A subscriber that falls more than the channel capacity behind loses
+//! events. [`LiveCursor`] turns that into a [`LaggedNotice`] that says where
+//! to resume, so the subscription can end with it instead of going on with a
+//! silent gap.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +29,9 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use serde::Serialize;
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 use tracing::debug;
 
 use crate::ServiceState;
@@ -139,6 +146,84 @@ impl Default for ChangeHub {
 }
 
 // ---------------------------------------------------------------------------
+// Live subscribers
+// ---------------------------------------------------------------------------
+
+/// Where a live subscriber stands: which broadcast events it still needs,
+/// and where it resumes if it falls behind.
+#[derive(Debug, Clone)]
+pub struct LiveCursor {
+    /// Events before this epoch are dropped: the subscriber has them already
+    /// (from its history pull, or it asked to start here), and the hub may
+    /// be behind it.
+    since: u64,
+    /// Epoch of the last event handed out, if any.
+    last_sent: Option<u64>,
+}
+
+impl LiveCursor {
+    /// A subscriber that needs the events from epoch `since` on.
+    #[must_use]
+    pub fn new(since: u64) -> Self {
+        Self {
+            since,
+            last_sent: None,
+        }
+    }
+
+    /// The next event `receiver` has for this subscriber, skipping the ones
+    /// before its `since`.
+    pub async fn next(&mut self, receiver: &mut broadcast::Receiver<ChangeEventDto>) -> LiveItem {
+        loop {
+            match receiver.recv().await {
+                Ok(event) if event.epoch < self.since => {}
+                Ok(event) => {
+                    self.last_sent = Some(event.epoch);
+                    return LiveItem::Change(Box::new(event));
+                }
+                Err(RecvError::Lagged(skipped)) => return LiveItem::Lagged(self.lagged(skipped)),
+                Err(RecvError::Closed) => return LiveItem::Closed,
+            }
+        }
+    }
+
+    /// The notice for this subscriber after `skipped` events were dropped.
+    /// The epoch of the last event sent may have lost events of its own, so
+    /// it does not count as delivered in full.
+    fn lagged(&self, skipped: u64) -> LaggedNotice {
+        let first_open = self.last_sent.unwrap_or(self.since);
+        LaggedNotice {
+            skipped,
+            last_epoch: first_open.saturating_sub(1),
+        }
+    }
+}
+
+/// What [`LiveCursor::next`] found.
+#[derive(Debug)]
+pub enum LiveItem {
+    /// An event for the subscriber.
+    Change(Box<ChangeEventDto>),
+    /// The subscriber fell behind and lost events: end the subscription
+    /// with this notice.
+    Lagged(LaggedNotice),
+    /// The hub's channel closed.
+    Closed,
+}
+
+/// Ends a live subscription that fell behind the hub.
+///
+/// Resume with a pull or a new subscription at `since = last_epoch + 1`.
+/// Events of that epoch already received may arrive again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LaggedNotice {
+    /// Events the subscriber lost.
+    pub skipped: u64,
+    /// The newest epoch whose events were all delivered.
+    pub last_epoch: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Background poll task
 // ---------------------------------------------------------------------------
 
@@ -240,6 +325,89 @@ mod tests {
         let events = received(&mut rx);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].labels.as_deref(), Some(&["B".to_string()][..]));
+    }
+
+    fn event_at(epoch: u64) -> ChangeEventDto {
+        ChangeEventDto {
+            id: epoch,
+            entity_type: "node".to_string(),
+            kind: "create".to_string(),
+            epoch,
+            timestamp: epoch,
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            graph: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_cursor_skips_what_the_subscriber_has() {
+        let (sender, mut rx) = broadcast::channel(8);
+        let mut cursor = LiveCursor::new(3);
+        for epoch in 1..=4 {
+            sender.send(event_at(epoch)).unwrap();
+        }
+        for expected in [3, 4] {
+            match cursor.next(&mut rx).await {
+                LiveItem::Change(event) => assert_eq!(event.epoch, expected),
+                other => panic!("expected epoch {expected}, got {other:?}"),
+            }
+        }
+        drop(sender);
+        assert!(matches!(cursor.next(&mut rx).await, LiveItem::Closed));
+    }
+
+    #[tokio::test]
+    async fn live_cursor_turns_a_lag_into_a_resumable_notice() {
+        let (sender, mut rx) = broadcast::channel(4);
+        let mut cursor = LiveCursor::new(5);
+        sender.send(event_at(5)).unwrap();
+        assert!(matches!(cursor.next(&mut rx).await, LiveItem::Change(_)));
+
+        // Ten more than a channel of 4 holds: the oldest 6 are lost.
+        for epoch in 6..16 {
+            sender.send(event_at(epoch)).unwrap();
+        }
+        match cursor.next(&mut rx).await {
+            LiveItem::Lagged(notice) => assert_eq!(
+                notice,
+                LaggedNotice {
+                    skipped: 6,
+                    // Epoch 5 may have had more events: it is not complete.
+                    last_epoch: 4,
+                }
+            ),
+            other => panic!("expected a lag, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn live_cursor_lagged_before_any_event_resumes_at_its_start() {
+        let (sender, mut rx) = broadcast::channel(2);
+        let mut cursor = LiveCursor::new(7);
+        for epoch in 7..12 {
+            sender.send(event_at(epoch)).unwrap();
+        }
+        match cursor.next(&mut rx).await {
+            LiveItem::Lagged(notice) => {
+                assert_eq!(notice.skipped, 3);
+                assert_eq!(notice.last_epoch, 6);
+                assert_eq!(
+                    serde_json::to_value(&notice).unwrap(),
+                    serde_json::json!({"skipped": 3, "last_epoch": 6})
+                );
+            }
+            other => panic!("expected a lag, got {other:?}"),
+        }
     }
 
     #[test]
