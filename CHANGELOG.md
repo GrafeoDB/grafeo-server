@@ -13,7 +13,7 @@ Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation option
 
 ### Added
 
-- **Write counters**: `/query` and the other HTTP query endpoints return `counters` (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`) for statements that write, also when streaming; GWP puts them in `ResultSummary.counters`; Bolt returns Neo4j's `stats`, which drivers expose as `summary.counters`.
+- **Write counters**: `/query` and the other HTTP query endpoints return `counters` (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`) for statements that write, also when streaming; GWP puts them in `ResultSummary.counters`; Bolt returns Neo4j's `stats`, which drivers expose as `summary.counters`. Values above `i64::MAX` are sent as `i64::MAX` on GWP and Bolt.
 - **`POST /db/{name}/upsert/nodes` and `/upsert/edges`**: create or update many nodes or edges by a key property in one all-or-nothing statement, optionally in a named graph. Rows are plain JSON objects. Returns `created`, `updated`, `skipped` and `skipped_rows`.
 - **Change events name their graph and previous labels**: `ChangeEventDto` has `graph` (absent for the default graph) and `before_labels` (on label changes), on the pull feed, SSE and WebSocket.
 - **Graph-aware sync and replication**: `SyncChangeRequest` takes `graph`; replicas replay each write into the graph it came from and create a missing graph (outside schemas) on its first create. Label changes replicate.

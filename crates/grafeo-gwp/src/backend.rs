@@ -968,7 +968,10 @@ impl ResultStream for GrafeoResultStream {
                     grafeo_service::types::WriteCountersInfo::from_result(&self.result)
                 {
                     for (name, value) in written.non_zero() {
-                        counters.insert(name.to_owned(), value as i64);
+                        counters.insert(
+                            name.to_owned(),
+                            grafeo_service::types::saturating_i64(value),
+                        );
                     }
                 }
 

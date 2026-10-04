@@ -792,21 +792,115 @@ impl WriteCountersInfo {
         })
     }
 
+    /// The value of one counter.
+    #[must_use]
+    pub fn get(&self, counter: WriteCounter) -> u64 {
+        match counter {
+            WriteCounter::NodesCreated => self.nodes_created,
+            WriteCounter::NodesDeleted => self.nodes_deleted,
+            WriteCounter::EdgesCreated => self.edges_created,
+            WriteCounter::EdgesDeleted => self.edges_deleted,
+            WriteCounter::PropertiesSet => self.properties_set,
+            WriteCounter::LabelsAdded => self.labels_added,
+            WriteCounter::LabelsRemoved => self.labels_removed,
+        }
+    }
+
+    /// The non-zero counters, in field order.
+    #[must_use]
+    pub fn non_zero_counters(&self) -> Vec<(WriteCounter, u64)> {
+        WriteCounter::ALL
+            .into_iter()
+            .map(|c| (c, self.get(c)))
+            .filter(|&(_, n)| n > 0)
+            .collect()
+    }
+
     /// The non-zero counters as `(name, value)` pairs, in field order.
     #[must_use]
     pub fn non_zero(&self) -> Vec<(&'static str, u64)> {
-        [
-            ("nodes_created", self.nodes_created),
-            ("nodes_deleted", self.nodes_deleted),
-            ("edges_created", self.edges_created),
-            ("edges_deleted", self.edges_deleted),
-            ("properties_set", self.properties_set),
-            ("labels_added", self.labels_added),
-            ("labels_removed", self.labels_removed),
-        ]
-        .into_iter()
-        .filter(|&(_, n)| n > 0)
-        .collect()
+        self.non_zero_counters()
+            .into_iter()
+            .map(|(c, n)| (c.name(), n))
+            .collect()
+    }
+
+    /// The non-zero counters under their Bolt (Neo4j `stats`) names, with
+    /// values saturated to `i64`.
+    #[must_use]
+    pub fn non_zero_bolt(&self) -> Vec<(&'static str, i64)> {
+        self.non_zero_counters()
+            .into_iter()
+            .map(|(c, n)| (c.bolt_name(), saturating_i64(n)))
+            .collect()
+    }
+}
+
+/// A counter value as `i64`, saturating at `i64::MAX` (GWP and Bolt carry
+/// signed integers).
+#[must_use]
+pub fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The kinds of write counter. Matches are exhaustive, so a new counter must
+/// be named for every transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCounter {
+    /// `nodes_created`.
+    NodesCreated,
+    /// `nodes_deleted`.
+    NodesDeleted,
+    /// `edges_created`.
+    EdgesCreated,
+    /// `edges_deleted`.
+    EdgesDeleted,
+    /// `properties_set`.
+    PropertiesSet,
+    /// `labels_added`.
+    LabelsAdded,
+    /// `labels_removed`.
+    LabelsRemoved,
+}
+
+impl WriteCounter {
+    /// Every counter, in field order.
+    pub const ALL: [Self; 7] = [
+        Self::NodesCreated,
+        Self::NodesDeleted,
+        Self::EdgesCreated,
+        Self::EdgesDeleted,
+        Self::PropertiesSet,
+        Self::LabelsAdded,
+        Self::LabelsRemoved,
+    ];
+
+    /// The snake_case name used by HTTP and GWP.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NodesCreated => "nodes_created",
+            Self::NodesDeleted => "nodes_deleted",
+            Self::EdgesCreated => "edges_created",
+            Self::EdgesDeleted => "edges_deleted",
+            Self::PropertiesSet => "properties_set",
+            Self::LabelsAdded => "labels_added",
+            Self::LabelsRemoved => "labels_removed",
+        }
+    }
+
+    /// The name Neo4j drivers know in `stats`.
+    #[must_use]
+    pub const fn bolt_name(self) -> &'static str {
+        match self {
+            Self::NodesCreated => "nodes-created",
+            Self::NodesDeleted => "nodes-deleted",
+            Self::EdgesCreated => "relationships-created",
+            Self::EdgesDeleted => "relationships-deleted",
+            Self::PropertiesSet => "properties-set",
+            Self::LabelsAdded => "labels-added",
+            Self::LabelsRemoved => "labels-removed",
+        }
     }
 }
 
@@ -1055,6 +1149,26 @@ mod tests {
         // deserialization; an empty body leaves the field unset.
         let req: ReloadEligibleRequest = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(req.target_fraction, None);
+    }
+
+    #[test]
+    fn write_counter_saturates_and_names_are_distinct() {
+        assert_eq!(saturating_i64(u64::MAX), i64::MAX);
+        assert_eq!(saturating_i64(5), 5);
+        let info = WriteCountersInfo {
+            nodes_created: u64::MAX,
+            edges_deleted: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            info.non_zero_bolt(),
+            vec![("nodes-created", i64::MAX), ("relationships-deleted", 3)]
+        );
+        let mut names: Vec<_> = WriteCounter::ALL.iter().map(|c| c.bolt_name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 7);
+        assert!(WriteCounter::ALL.iter().all(|c| !c.name().contains('-')));
     }
 
     #[test]

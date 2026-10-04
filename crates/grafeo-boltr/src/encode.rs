@@ -318,21 +318,9 @@ pub fn convert_params(
 /// `summary.counters`.
 pub fn write_stats(written: &grafeo_service::types::WriteCountersInfo) -> BoltDict {
     let mut stats: BoltDict = written
-        .non_zero()
+        .non_zero_bolt()
         .into_iter()
-        .map(|(name, value)| {
-            let bolt_name = match name {
-                "nodes_created" => "nodes-created",
-                "nodes_deleted" => "nodes-deleted",
-                "edges_created" => "relationships-created",
-                "edges_deleted" => "relationships-deleted",
-                "properties_set" => "properties-set",
-                "labels_added" => "labels-added",
-                "labels_removed" => "labels-removed",
-                other => other,
-            };
-            (bolt_name.to_string(), BoltValue::Integer(value as i64))
-        })
+        .map(|(name, value)| (name.to_string(), BoltValue::Integer(value)))
         .collect();
     stats.insert("contains-updates".to_string(), BoltValue::Boolean(true));
     stats
@@ -825,6 +813,18 @@ mod tests {
             Some(&BoltValue::Boolean(true))
         );
         assert!(!stats.contains_key("nodes-deleted"));
+    }
+
+    #[test]
+    fn write_stats_saturates_huge_counters() {
+        let written = grafeo_service::types::WriteCountersInfo {
+            properties_set: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            write_stats(&written).get("properties-set"),
+            Some(&BoltValue::Integer(i64::MAX))
+        );
     }
 
     // PR #69 review: `_labels` alone does not make a node.
