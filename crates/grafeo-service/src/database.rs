@@ -167,6 +167,28 @@ fn rollback_create(dir: &Path, created_dir: bool) {
     }
 }
 
+/// Whether `dir` holds a database's files, which a create must never adopt
+/// or overwrite: `data.grafeo` and its WAL, or the legacy `grafeo.db` and its
+/// WAL that startup migrates. An entry of any kind counts, a dangling
+/// symbolic link included (the engine would create the file it points to),
+/// and so does an entry that cannot be checked for any reason but its
+/// absence.
+fn has_database_files(dir: &Path) -> bool {
+    [
+        "data.grafeo",
+        "data.grafeo.wal",
+        "grafeo.db",
+        "grafeo.db.wal",
+    ]
+    .iter()
+    .any(|file| {
+        !matches!(
+            std::fs::symlink_metadata(dir.join(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    })
+}
+
 /// Name validation: starts with letter, then alphanumeric/underscore/hyphen, max 64 chars.
 fn is_valid_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
@@ -720,14 +742,11 @@ impl DatabaseManager {
 
         // Never adopt or overwrite a database that is on disk but absent from
         // the map (skipped at startup because it is corrupt or its options
-        // fail validation). An io error while checking counts as present.
-        // A leftover options.json alone is the remains of an interrupted
-        // create (options.json is written before data.grafeo), so create may
-        // replace it and a rollback may remove it.
+        // fail validation). A leftover options.json alone is the remains of
+        // an interrupted create (options.json is written before data.grafeo),
+        // so create may replace it and a rollback may remove it.
         if let Some(ref dir) = db_dir
-            && (dir.join("data.grafeo").try_exists().unwrap_or(true)
-                || dir.join("grafeo.db").try_exists().unwrap_or(true)
-                || dir.join("data.grafeo.wal").try_exists().unwrap_or(true))
+            && has_database_files(dir)
         {
             return Err(ServiceError::Conflict(format!(
                 "database '{name}' already exists on disk"
@@ -1792,6 +1811,55 @@ mod tests {
         assert_eq!(
             std::fs::read(db_dir.join("data.grafeo.wal")).unwrap(),
             b"unreplayed"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_legacy_wal_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("legacy");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("grafeo.db.wal"), b"unreplayed").unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("legacy").is_none(), "a WAL alone is not opened");
+        let err = mgr
+            .create(&persistent_request("legacy", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        assert_eq!(
+            std::fs::read(db_dir.join("grafeo.db.wal")).unwrap(),
+            b"unreplayed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_dangling_database_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("linked");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("target.grafeo");
+        std::os::unix::fs::symlink(&target, db_dir.join("data.grafeo")).unwrap();
+        let before = dir_listing(&db_dir);
+
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        assert!(mgr.get("linked").is_none(), "a dangling link is not opened");
+        let err = mgr
+            .create(&persistent_request("linked", DatabaseOptions::default()))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::Conflict(_)), "got: {err}");
+
+        assert_eq!(dir_listing(&db_dir), before);
+        let link = std::fs::symlink_metadata(db_dir.join("data.grafeo")).unwrap();
+        assert!(link.file_type().is_symlink(), "the link is left as it was");
+        assert!(
+            std::fs::symlink_metadata(&target).is_err(),
+            "nothing is created where the link points"
         );
     }
 

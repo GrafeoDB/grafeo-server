@@ -44,7 +44,7 @@ dashmap = "6.1"
 parking_lot = "0.12"
 uuid = { version = "1.23", features = ["v4"] }
 tracing = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 url = "2"
 
 [workspace.lints.rust]

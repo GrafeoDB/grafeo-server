@@ -1614,7 +1614,7 @@ version = "0.5.44"
 dependencies = [
  "async-stream",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "grafeo-common",
  "grafeo-engine",
@@ -1652,7 +1652,7 @@ name = "grafeo-server"
 version = "0.5.44"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "boltr",
  "clap",
  "futures-util",
@@ -1677,7 +1677,7 @@ name = "grafeo-service"
 version = "0.5.44"
 dependencies = [
  "arc-swap",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dashmap",
  "grafeo-common",
