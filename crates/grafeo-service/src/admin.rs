@@ -865,18 +865,16 @@ mod tests {
 
             release.send(()).unwrap();
             blocker.await.unwrap();
-            let entry = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                loop {
-                    if let Some(entry) = state.databases().get("columns")
-                        && entry.metadata.storage_mode == "compact"
-                    {
-                        break entry;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("the compacted database is back in the registry");
+            // The one blocking thread runs its queue in order: this no-op
+            // runs after the compaction. Nothing here holds the entry while
+            // the compaction takes it.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+
+            let entry = state
+                .databases()
+                .get("columns")
+                .expect("the database is back in the registry");
+            assert_eq!(entry.metadata.storage_mode, "compact");
             assert_eq!(entry.db().node_count(), 3, "readable, nothing lost");
         });
     }
