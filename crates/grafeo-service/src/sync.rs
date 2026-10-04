@@ -301,9 +301,10 @@ impl SyncService {
         Self::pull_from(&entry.db(), since, limit)
     }
 
-    /// [`pull`](Self::pull) from one database instance: the change hub
-    /// checks which instance it reads before it pulls.
-    pub(crate) fn pull_from(
+    /// [`pull`](Self::pull) from one database instance, for callers that
+    /// must keep reading the same instance (a restore swaps in another):
+    /// the change hub and the paged history of a change stream.
+    pub fn pull_from(
         db: &grafeo_engine::GrafeoDB,
         since: u64,
         limit: usize,

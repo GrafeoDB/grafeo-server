@@ -4,7 +4,10 @@
 //!
 //! Requires the `push-changefeed` feature.
 
+use std::sync::{Arc, Weak};
+
 use futures_util::Stream;
+use grafeo_engine::GrafeoDB;
 
 use grafeo_service::changefeed::{LaggedNotice, LiveCursor, LiveItem};
 use grafeo_service::error::ServiceError;
@@ -31,9 +34,20 @@ pub(crate) enum StreamItem {
     Error(String),
 }
 
+/// One page of history and the database instance it was read from.
+pub(crate) struct HistoryPage {
+    page: ChangesResponse,
+    /// Later pages must come from this instance: a restore, a compaction or
+    /// a drop and create puts another one under the name, with another
+    /// history.
+    origin: Weak<GrafeoDB>,
+}
+
 /// The changes of `name` from epoch `since` on: the history page by page
-/// (`first` is its first page, from [`history_page`]), then live events from
-/// the hub. It ends after a `Lagged` or `Error` item. `subscriber` names the
+/// (`first` is its first page, from [`history_page`]), all from the instance
+/// the first page came from, then live events from the hub. When the
+/// database under `name` is another instance by the next page, the stream
+/// ends with the closed outcome instead of joining two histories. It ends after a `Lagged` or `Error` item. `subscriber` names the
 /// stream in the log (an SSE stream, or a WebSocket subscription by its
 /// `sub_id`), so a lag or an error can be traced to it.
 ///
@@ -43,13 +57,14 @@ pub(crate) enum StreamItem {
 pub(crate) fn change_stream(
     state: AppState,
     name: String,
-    first: ChangesResponse,
+    first: HistoryPage,
     since: u64,
     subscriber: String,
 ) -> impl Stream<Item = StreamItem> {
     async_stream::stream! {
         // Each pull resumes after the cursor of the last one that returned
         // events (see `resume_after`).
+        let HistoryPage { page: first, origin } = first;
         let mut page = first;
         let mut next_since = since;
         while page.changes.len() >= HISTORY_PAGE {
@@ -57,10 +72,10 @@ pub(crate) fn change_stream(
             for event in page.changes {
                 yield StreamItem::Change(Box::new(event));
             }
-            page = match history_page(&state, &name, next_since).await {
+            page = match next_page(&state, &name, &subscriber, &origin, next_since).await {
                 Ok(next) => next,
-                Err(e) => {
-                    yield history_failed(&name, &subscriber, &e);
+                Err(end) => {
+                    yield end;
                     return;
                 }
             };
@@ -78,10 +93,10 @@ pub(crate) fn change_stream(
         // What the hub broadcast before the subscription is in the log by
         // now: pull it.
         loop {
-            let page = match history_page(&state, &name, next_since).await {
+            let page = match next_page(&state, &name, &subscriber, &origin, next_since).await {
                 Ok(page) => page,
-                Err(e) => {
-                    yield history_failed(&name, &subscriber, &e);
+                Err(end) => {
+                    yield end;
                     return;
                 }
             };
@@ -151,21 +166,55 @@ fn history_failed(name: &str, subscriber: &str, error: &ApiError) -> StreamItem 
     })
 }
 
-/// Pulls the history of `name` from epoch `since` on, one page. Callers pull
-/// the first page before they start a stream, so a missing database, or one
-/// without CDC, is an error up front rather than a stream that ends at once.
+/// Pulls the history of `name` from epoch `since` on, one page, and notes
+/// the instance it came from. Callers pull the first page before they start
+/// a stream, so a missing database, or one without CDC, is an error up front
+/// rather than a stream that ends at once.
 pub(crate) async fn history_page(
     state: &AppState,
     name: &str,
     since: u64,
-) -> Result<ChangesResponse, ApiError> {
-    let state = state.clone();
-    let name = name.to_string();
-    let page = tokio::task::spawn_blocking(move || {
-        SyncService::pull(state.databases(), &name, since, HISTORY_PAGE)
-    })
-    .await
-    .map_err(|e| ApiError::internal(e.to_string()))??;
+) -> Result<HistoryPage, ApiError> {
+    let db = state.databases().get_available(name)?.db();
+    let origin = Arc::downgrade(&db);
+    let page = pull_page(db, since).await?;
+    Ok(HistoryPage { page, origin })
+}
+
+/// The next page of history of `name`, from the instance `origin` only.
+/// `Err` is the item that ends the stream: the closed outcome when another
+/// instance is under the name now, else the failure.
+async fn next_page(
+    state: &AppState,
+    name: &str,
+    subscriber: &str,
+    origin: &Weak<GrafeoDB>,
+    since: u64,
+) -> Result<ChangesResponse, StreamItem> {
+    let db = state
+        .databases()
+        .get_available(name)
+        .map_err(|e| history_failed(name, subscriber, &ApiError::from(e)))?
+        .db();
+    if !std::ptr::eq(origin.as_ptr(), Arc::as_ptr(&db)) {
+        tracing::warn!(
+            db = %name,
+            subscriber = %subscriber,
+            "database replaced during the history; ending the change stream"
+        );
+        return Err(StreamItem::Error(FEED_CLOSED.to_string()));
+    }
+    pull_page(db, since)
+        .await
+        .map_err(|e| history_failed(name, subscriber, &e))
+}
+
+/// One page of `db`'s history from epoch `since` on.
+async fn pull_page(db: Arc<GrafeoDB>, since: u64) -> Result<ChangesResponse, ApiError> {
+    let page =
+        tokio::task::spawn_blocking(move || SyncService::pull_from(&db, since, HISTORY_PAGE))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(page)
 }
 
@@ -330,6 +379,48 @@ mod tests {
         // Resuming at `since` gets the whole burst.
         let resumed = SyncService::pull(state.databases(), "default", since, 10_000).unwrap();
         assert_eq!(resumed.changes.len(), 5_000);
+    }
+
+    #[tokio::test]
+    async fn a_database_replaced_between_history_pages_ends_the_stream_closed() {
+        let state = cdc_state();
+        let entry = state.databases().get("default").unwrap();
+        // One epoch that fills the first page, so the history goes on to a
+        // second pull.
+        entry
+            .db()
+            .batch_create_nodes_with_labels(
+                &["Old"],
+                vec![std::collections::HashMap::new(); HISTORY_PAGE],
+            )
+            .unwrap();
+        let first = history_page(&state, "default", 0).await.unwrap();
+        assert_eq!(first.page.changes.len(), HISTORY_PAGE);
+
+        // A restore puts another instance, with another history, under the
+        // name before the second page.
+        let replacement = GrafeoDB::new_in_memory();
+        replacement.set_cdc_enabled(true);
+        for _ in 0..3 {
+            replacement.create_node(&["New"]).unwrap();
+        }
+        entry.swap_db(Arc::new(replacement));
+
+        let mut stream = Box::pin(change_stream(
+            state.clone(),
+            "default".to_string(),
+            first,
+            0,
+            "test".to_string(),
+        ));
+        for _ in 0..HISTORY_PAGE {
+            assert_eq!(change_label(next_item(&mut stream).await), "Old");
+        }
+        match next_item(&mut stream).await {
+            StreamItem::Error(message) => assert_eq!(message, FEED_CLOSED),
+            other => panic!("expected the end of the stream, got {other:?}"),
+        }
+        assert!(stream.next().await.is_none(), "nothing of the new history");
     }
 
     #[tokio::test]
