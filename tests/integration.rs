@@ -3558,6 +3558,37 @@ async fn create_database_rejects_invalid_section_tier_value() {
     assert_eq!(resp.status(), 400);
 }
 
+#[tokio::test]
+async fn create_database_rejects_force_disk_for_unspillable_section() {
+    let (base, data_dir, _backup_dir) = spawn_server_persistent_backup().await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({
+            "name": "nospill",
+            "database_type": "Lpg",
+            "storage_mode": "Persistent",
+            "options": {
+                "section_tiers": { "LpgStore": "force_disk" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("cannot be kept on disk"), "body: {text}");
+
+    let resp = client
+        .get(format!("{base}/db/nospill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert!(!data_dir.path().join("nospill").exists());
+}
+
 // ===========================================================================
 // Named graphs (v0.4.7)
 // ===========================================================================

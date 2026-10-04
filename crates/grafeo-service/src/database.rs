@@ -215,6 +215,31 @@ fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, 
     }
 }
 
+/// Rejects `force_disk` for sections the engine cannot spill. Only sections
+/// whose `SectionType::default_flags().mmap_able` is true (CompactStore,
+/// VectorStore, TextIndex, RdfRing, PropertyIndex in engine 0.5.44) can be
+/// kept on disk; for the others the engine silently ignores the override.
+/// Called from `create` only, so the reopen path never rejects a stored file.
+fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceError> {
+    let Some(ref section_tiers) = options.section_tiers else {
+        return Ok(());
+    };
+    for (section_name, tier_str) in section_tiers {
+        let section = parse_section_type(section_name)?;
+        if matches!(
+            parse_tier_override(tier_str)?,
+            grafeo_common::storage::TierOverride::ForceDisk
+        ) && !section.default_flags().mmap_able
+        {
+            return Err(ServiceError::BadRequest(format!(
+                "section '{section_name}' cannot be kept on disk: only CompactStore, \
+                 VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Creation-time metadata stored alongside each database.
 #[derive(Clone)]
 pub struct DatabaseMetadata {
@@ -625,6 +650,7 @@ impl DatabaseManager {
             Some(dir) => Config::persistent(dir.join("data.grafeo")),
             None => Config::in_memory(),
         };
+        validate_spillable_sections(&resolved)?;
         let config = configure(base, req.database_type, &resolved)?;
 
         // Never adopt or overwrite a database that is on disk but absent from
@@ -1637,5 +1663,45 @@ mod tests {
         let err = mgr.create(&req).unwrap_err();
         assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err}");
         assert!(!dir.path().join("b64").exists());
+    }
+
+    #[test]
+    fn create_rejects_force_disk_for_sections_that_cannot_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+
+        for section in ["Catalog", "LpgStore", "RdfStore"] {
+            let mut req = persistent_request("nospill", DatabaseOptions::default());
+            req.options.section_tiers = Some(
+                [(section.to_string(), "force_disk".to_string())]
+                    .into_iter()
+                    .collect(),
+            );
+            let err = mgr.create(&req).expect_err("force_disk must be rejected");
+            let ServiceError::BadRequest(msg) = err else {
+                panic!("expected BadRequest, got: {err}");
+            };
+            assert_eq!(
+                msg,
+                format!(
+                    "section '{section}' cannot be kept on disk: only CompactStore, \
+                     VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                )
+            );
+            assert!(mgr.get("nospill").is_none());
+            assert!(!dir.path().join("nospill").exists());
+        }
+
+        // auto and force_ram stay valid for every section.
+        let mut req = persistent_request("fine", DatabaseOptions::default());
+        req.options.section_tiers = Some(
+            [
+                ("LpgStore".to_string(), "force_ram".to_string()),
+                ("Catalog".to_string(), "auto".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        mgr.create(&req).unwrap();
     }
 }

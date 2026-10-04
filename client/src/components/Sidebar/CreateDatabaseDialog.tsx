@@ -47,6 +47,9 @@ const SECTION_NAMES: SectionName[] = [
   "Catalog",
 ];
 
+/** Sections the engine cannot memory-map, so "Keep on disk" would be ignored. */
+const NON_SPILLABLE: SectionName[] = ["Catalog", "LpgStore", "RdfStore"];
+
 export default function CreateDatabaseDialog({
   open,
   onClose,
@@ -391,7 +394,9 @@ export default function CreateDatabaseDialog({
                     >
                       <option value="auto">Auto</option>
                       <option value="force_ram">Keep in RAM</option>
-                      <option value="force_disk">Keep on disk</option>
+                      {!NON_SPILLABLE.includes(section) && (
+                        <option value="force_disk">Keep on disk</option>
+                      )}
                     </select>
                   </label>
                 ))}
