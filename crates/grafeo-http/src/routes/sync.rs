@@ -133,9 +133,10 @@ mod sse {
     ///   first epoch not delivered in full; inclusive, so epoch 0 is resumed
     ///   too).
     /// - `error`: a history pull failed, or the live feed stopped (the
-    ///   database was dropped, restored or compacted, or its CDC turned
-    ///   off). The data is `{"message": "..."}`; an internal failure reads
-    ///   "internal error", with the detail in the server log.
+    ///   database was dropped, restored, compacted or replaced by a new one
+    ///   of the same name, or its CDC turned off). The data is
+    ///   `{"message": "..."}`; an internal failure reads "internal error",
+    ///   with the detail in the server log.
     ///
     /// Both are terminal: the server ends the stream after either. A browser
     /// `EventSource` then reconnects by itself with the original `?since=`,

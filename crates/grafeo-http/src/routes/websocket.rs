@@ -22,8 +22,8 @@
 //!   `since = e` (the first epoch not delivered in full; inclusive, so epoch
 //!   0 is resumed too).
 //! - `error` is `"closed"`: the database's change feed stopped (the database
-//!   was dropped, restored or compacted, or its CDC turned off), or a
-//!   history read failed. `detail` says which ("change feed closed" for a
+//!   was dropped, restored, compacted or replaced by a new one of the same
+//!   name, or its CDC turned off), or a history read failed. `detail` says which ("change feed closed" for a
 //!   stopped feed).
 
 use axum::extract::State;
