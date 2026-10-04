@@ -55,7 +55,7 @@ Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation option
 - **CDC stopped after a restore on a primary** until a restart.
 - **A full restore went on after the old database failed to close**; it now stops and keeps the database online.
 - **Bolt: a map with a `_labels` key was sent as a node**, and an edge carrying a `_labels` property as a node; only engine node and edge shapes (with `_id`) become Bolt structures.
-- **Studio**: storage tiers can be retried after a failed load; the backups section says when the server has no backup directory, and shows load errors instead of an empty list.
+- **Studio**: storage tiers can be retried after a failed load; the backups section says when the server has no backup directory, shows load errors instead of an empty list, and no longer shows another database's backups when a slow answer arrives after switching databases.
 
 ### Security
 

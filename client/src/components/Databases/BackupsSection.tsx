@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, GrafeoApiError } from "../../api/client";
 import type { BackupEntry, DatabaseSummary } from "../../types/api";
 import btn from "../../styles/buttons.module.css";
@@ -50,16 +50,25 @@ export default function BackupsSection({ database, onMutated }: Props) {
   const [epochError, setEpochError] = useState<string | null>(null);
   const [submittingEpoch, setSubmittingEpoch] = useState(false);
 
+  // Each refresh gets a number; a response is applied only when no later
+  // refresh has started, so a slow answer (for a database no longer shown,
+  // or an older list) cannot overwrite a newer one.
+  const generation = useRef(0);
+
   const refresh = useCallback(() => {
+    const current = ++generation.current;
+    const isLatest = () => current === generation.current;
     setLoading(true);
     api.backup
       .list(database)
       .then((list) => {
+        if (!isLatest()) return;
         setNotConfigured(false);
         setLoadError(null);
         setBackups(list);
       })
       .catch((err) => {
+        if (!isLatest()) return;
         // The server (`require_backup_dir` in
         // crates/grafeo-http/src/routes/backup.rs) answers 400 "backup not
         // configured: ..." when it was started without --backup-dir. Match
@@ -78,7 +87,9 @@ export default function BackupsSection({ database, onMutated }: Props) {
         );
         setBackups([]);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (isLatest()) setLoading(false);
+      });
   }, [database]);
 
   useEffect(() => {

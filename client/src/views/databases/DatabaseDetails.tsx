@@ -208,7 +208,7 @@ export default function DatabaseDetails() {
         <StorageTiersSection key={name} database={name} onMutated={refresh} />
       )}
 
-      <BackupsSection database={name} onMutated={refresh} />
+      <BackupsSection key={name} database={name} onMutated={refresh} />
 
       <DangerZone database={name} />
     </div>
