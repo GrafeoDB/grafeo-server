@@ -48,7 +48,7 @@ impl AuthContext {
 
     /// Build an engine [`Identity`] from the token, or anonymous if auth is off.
     ///
-    /// When `server_read_only` is true, the identity is capped to [`Role::ReadOnly`]
+    /// When `server_read_only` is true, the identity is capped to `Role::ReadOnly`
     /// regardless of the token's role.
     pub fn identity(&self, server_read_only: bool) -> Identity {
         let base = match &self.0 {

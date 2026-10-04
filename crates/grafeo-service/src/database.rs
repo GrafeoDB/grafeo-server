@@ -108,15 +108,35 @@ fn metadata_for(
     }
 }
 
+/// Why [`OPTIONS_FILE`] could not be read as [`StoredOptions`].
+struct StoredOptionsError {
+    message: String,
+    /// The stored graph model, when the file is JSON with a readable
+    /// `database_type` but values of the wrong type (`"threads": "8"`).
+    database_type: Option<DatabaseType>,
+}
+
 /// Reads a database's [`OPTIONS_FILE`]; `Ok(None)` when it has none.
-fn read_stored_options(db_dir: &Path) -> Result<Option<StoredOptions>, String> {
-    match std::fs::read_to_string(db_dir.join(OPTIONS_FILE)) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| e.to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+fn read_stored_options(db_dir: &Path) -> Result<Option<StoredOptions>, StoredOptionsError> {
+    let text = match std::fs::read_to_string(db_dir.join(OPTIONS_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(StoredOptionsError {
+                message: e.to_string(),
+                database_type: None,
+            });
+        }
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e: serde_json::Error| StoredOptionsError {
+            message: e.to_string(),
+            database_type: serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|value| value.get("database_type").cloned())
+                .and_then(|value| serde_json::from_value(value).ok()),
+        })
 }
 
 /// Writes a database's [`OPTIONS_FILE`] through a temp file and a rename,
@@ -606,10 +626,11 @@ impl DatabaseManager {
     /// Applies the options in the database's [`OPTIONS_FILE`] and returns the
     /// metadata they imply. A database without the file (created before
     /// 0.5.44, or the `default` database) opens with engine defaults and
-    /// `None` metadata, as before. A file that cannot be read or parsed is
-    /// logged and ignored (its graph model is unknown then). A file with a
-    /// value the engine refuses (zero threads, zero memory) or an unknown
-    /// name falls back to engine defaults with the stored graph model.
+    /// `None` metadata, as before. A file with a value the engine refuses
+    /// (zero threads, zero memory), an unknown name or a value of the wrong
+    /// type falls back to engine defaults with the stored graph model. A file
+    /// that is not JSON, or has no readable `database_type`, is logged and
+    /// ignored; its graph model is unknown, so it opens as before.
     ///
     /// # Errors
     ///
@@ -651,12 +672,22 @@ impl DatabaseManager {
             Ok(Some(stored)) => stored,
             Ok(None) => return Ok((base, None)),
             Err(e) => {
-                tracing::warn!(
-                    path = %options_path.display(),
-                    error = %e,
-                    "Ignoring unreadable options.json; opening with engine defaults"
-                );
-                return Ok((base, None));
+                // With a readable model the file's values are ignored and the
+                // model is kept. A file that is not JSON, or has no readable
+                // `database_type`, has an unknown model and opens as before.
+                return match e.database_type {
+                    Some(database_type) => {
+                        Self::model_only_config(base, database_type, &options_path, &e.message)
+                    }
+                    None => {
+                        tracing::warn!(
+                            path = %options_path.display(),
+                            error = %e.message,
+                            "Ignoring unreadable options.json; opening with engine defaults"
+                        );
+                        Ok((base, None))
+                    }
+                };
             }
         };
         // `configure` only checks names; the engine checks the values. A file
@@ -668,12 +699,12 @@ impl DatabaseManager {
         let configured = match configure(base.clone(), stored.database_type, &stored.options) {
             Ok(config) => config,
             Err(e) => {
-                tracing::warn!(
-                    path = %options_path.display(),
-                    error = %e,
-                    "Ignoring invalid options.json; opening with engine defaults"
+                return Self::model_only_config(
+                    base,
+                    stored.database_type,
+                    &options_path,
+                    &e.to_string(),
                 );
-                return Self::model_only_config(base, &stored, &options_path);
             }
         };
         match configured.validate() {
@@ -690,29 +721,30 @@ impl DatabaseManager {
                 | ConfigError::ZeroThreads
                 | ConfigError::ZeroWalFlushInterval
                 | ConfigError::ZeroAdaptiveFlushInterval),
-            ) => {
-                tracing::warn!(
-                    path = %options_path.display(),
-                    error = %e,
-                    "Ignoring invalid options.json; opening with engine defaults"
-                );
-                Self::model_only_config(base, &stored, &options_path)
-            }
+            ) => Self::model_only_config(base, stored.database_type, &options_path, &e.to_string()),
             Err(e) => Err(Self::keep_closed(&options_path, &e)),
         }
     }
 
     /// The base config with the stored graph model, for a file whose options
-    /// are ignored. The model itself must pass validation, or the database
-    /// stays closed.
+    /// are ignored because of `reason`. The model itself must pass
+    /// validation, or the database stays closed.
     fn model_only_config(
         base: Config,
-        stored: &StoredOptions,
+        database_type: DatabaseType,
         options_path: &Path,
+        reason: &str,
     ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
-        let config = base.with_graph_model(stored.database_type.graph_model());
+        let config = base.with_graph_model(database_type.graph_model());
         match config.validate() {
-            Ok(()) => Ok((config, None)),
+            Ok(()) => {
+                tracing::warn!(
+                    path = %options_path.display(),
+                    error = %reason,
+                    "Ignoring invalid options.json; falling back to engine defaults with the stored graph model"
+                );
+                Ok((config, None))
+            }
             // A value error cannot come from a base config; treat it like any
             // other error and keep the database closed.
             Err(e) => Err(Self::keep_closed(options_path, &e)),
@@ -2363,6 +2395,34 @@ mod tests {
         }
         std::fs::write(&file, json.to_string()).unwrap();
         std::fs::read(data_dir.join(name).join("data.grafeo")).unwrap()
+    }
+
+    #[cfg(not(feature = "triple-store"))]
+    #[test]
+    fn rdf_database_with_mistyped_options_stays_closed_without_the_triple_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let mgr = DatabaseManager::new(Some(path), false);
+            mgr.create(&persistent_request("typed", DatabaseOptions::default()))
+                .unwrap();
+        }
+        let file = dir.path().join("typed").join(OPTIONS_FILE);
+        std::fs::write(
+            &file,
+            r#"{"database_type": "Rdf", "options": {"threads": "8"}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(dir.path().join("typed").join("data.grafeo")).unwrap();
+
+        let mgr = DatabaseManager::new(Some(path), false);
+        assert!(mgr.get("typed").is_none(), "it must stay closed");
+        drop(mgr);
+        assert_eq!(
+            std::fs::read(dir.path().join("typed").join("data.grafeo")).unwrap(),
+            before,
+            "the file is untouched"
+        );
     }
 
     #[cfg(not(feature = "triple-store"))]
