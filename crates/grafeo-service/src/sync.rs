@@ -82,9 +82,18 @@ pub struct ChangeEventDto {
     /// Properties after the change. Absent for deletes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<serde_json::Value>,
-    /// Node labels. Present only on node Create events.
+    /// Node labels: on create the node's labels, on delete the labels it had,
+    /// on a label change the labels after it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    /// Node labels before a label change. Present only on label changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_labels: Option<Vec<String>>,
+    /// Graph the entity is in: its storage key (`name`, or `schema/name`
+    /// inside a schema). Absent for the default graph. Entity IDs repeat
+    /// across graphs, so an ID names an entity only together with this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
     /// Edge relationship type. Present only on edge Create events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_type: Option<String>,
@@ -692,6 +701,8 @@ fn to_dto(event: grafeo_engine::cdc::ChangeEvent) -> ChangeEventDto {
         before: event.before.map(props_to_json),
         after: event.after.map(props_to_json),
         labels: event.labels,
+        before_labels: event.before_labels,
+        graph: event.graph,
         edge_type: event.edge_type,
         src_id: event.src_id,
         dst_id: event.dst_id,
@@ -1352,5 +1363,50 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn pull_names_the_graph_of_each_event() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.execute("CREATE GRAPH g2").unwrap();
+        db.session().execute("INSERT (:InDefault)").unwrap();
+        let session = db.session();
+        session.use_graph("g2");
+        session.execute("INSERT (:InG2)").unwrap();
+
+        let changes = SyncService::pull(&mgr, "default", 0, 1000).unwrap().changes;
+        let graph_of = |label: &str| {
+            changes
+                .iter()
+                .find(|e| e.labels.as_deref() == Some(&[label.to_string()][..]))
+                .map(|e| e.graph.clone())
+        };
+        assert_eq!(graph_of("InDefault"), Some(None));
+        assert_eq!(graph_of("InG2"), Some(Some("g2".to_string())));
+    }
+
+    #[test]
+    fn pull_reports_labels_before_a_label_change() {
+        let mgr = make_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.session().execute("INSERT (:Draft {k: 1})").unwrap();
+        db.session()
+            .execute("MATCH (n:Draft) SET n:Published")
+            .unwrap();
+
+        let changes = SyncService::pull(&mgr, "default", 0, 1000).unwrap().changes;
+        let change = changes
+            .iter()
+            .find(|e| e.before_labels.is_some())
+            .expect("a label-change event");
+        assert_eq!(
+            change.before_labels.as_deref(),
+            Some(&["Draft".to_string()][..])
+        );
+        assert_eq!(
+            change.labels.as_deref(),
+            Some(&["Draft".to_string(), "Published".to_string()][..])
+        );
     }
 }
