@@ -14,6 +14,10 @@
 //!
 //! The task runs indefinitely until the process exits.  Transient HTTP errors
 //! are logged and retried; the error is recorded in `ReplicationState`.
+//! Changes of a batch that cannot be applied are logged at `warn` and
+//! summarised in `ReplicationState` (see `ReplicationState::set_conflict`);
+//! the epoch still advances, since replaying the batch would duplicate its
+//! creates.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,11 +25,13 @@ use std::time::Duration;
 use grafeo_service::ServiceState;
 use grafeo_service::error::ServiceError;
 use grafeo_service::replication::ReplicationState;
-use grafeo_service::sync::{SyncChangeRequest, SyncRequest, SyncService};
+use grafeo_service::sync::{ConflictRecord, SyncChangeRequest, SyncRequest, SyncService};
 use tracing::{debug, error, info, warn};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BATCH_LIMIT: usize = 500;
+/// Conflicts of one batch logged one by one; the rest are counted.
+const MAX_LOGGED_CONFLICTS: usize = 20;
 
 /// Starts background replication tasks for all databases on a replica.
 ///
@@ -80,17 +86,28 @@ async fn poll_loop(
         }
 
         for db_name in &names {
-            if let Err(e) =
-                replicate_database(&http, &state, &primary_url, db_name, &replication_state).await
-            {
-                warn!(db = %db_name, error = %e, "Replication poll failed");
-                replication_state.set_error(db_name, e.to_string());
-            } else {
-                replication_state.clear_error(db_name);
-            }
+            poll_database(&http, &state, &primary_url, db_name, &replication_state).await;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Replicates one batch for `db_name` and records how the poll went: its
+/// error, or no error once a poll succeeds. A conflict summary recorded by
+/// the batch stays (see `ReplicationState::set_conflict`).
+async fn poll_database(
+    http: &reqwest::Client,
+    state: &ServiceState,
+    primary_url: &str,
+    db_name: &str,
+    replication_state: &ReplicationState,
+) {
+    if let Err(e) = replicate_database(http, state, primary_url, db_name, replication_state).await {
+        warn!(db = %db_name, error = %e, "Replication poll failed");
+        replication_state.set_error(db_name, e.to_string());
+    } else {
+        replication_state.clear_error(db_name);
     }
 }
 
@@ -188,6 +205,9 @@ async fn replicate_database(
 
     match result {
         Ok(resp) => {
+            if !resp.conflicts.is_empty() {
+                report_conflicts(db_name, new_epoch, &resp.conflicts, replication_state);
+            }
             if resp.applied > 0 || resp.skipped > 0 {
                 debug!(
                     db = %db_name,
@@ -204,6 +224,44 @@ async fn replicate_database(
 
     replication_state.advance_epoch(db_name, new_epoch);
     Ok(())
+}
+
+/// Logs the changes of the batch up to `up_to_epoch` that could not be
+/// applied (the first `MAX_LOGGED_CONFLICTS`, then a count) and records a
+/// summary for the replication status.
+fn report_conflicts(
+    db_name: &str,
+    up_to_epoch: u64,
+    conflicts: &[ConflictRecord],
+    replication_state: &ReplicationState,
+) {
+    for conflict in conflicts.iter().take(MAX_LOGGED_CONFLICTS) {
+        warn!(
+            db = %db_name,
+            up_to_epoch,
+            request_index = conflict.request_index,
+            reason = %conflict.reason,
+            "Replicated change could not be applied"
+        );
+    }
+    if conflicts.len() > MAX_LOGGED_CONFLICTS {
+        warn!(
+            db = %db_name,
+            up_to_epoch,
+            more = conflicts.len() - MAX_LOGGED_CONFLICTS,
+            "More replicated changes could not be applied"
+        );
+    }
+    replication_state.set_conflict(db_name, conflict_summary(conflicts, up_to_epoch));
+}
+
+/// One line on the changes of a batch that could not be applied.
+fn conflict_summary(conflicts: &[ConflictRecord], up_to_epoch: u64) -> String {
+    let first = conflicts.first().map_or("", |c| c.reason.as_str());
+    format!(
+        "{} change(s) could not be applied in the batch up to epoch {up_to_epoch}; first: {first}",
+        conflicts.len()
+    )
 }
 
 /// Converts a `ChangeEventDto` to a `SyncChangeRequest` for replay.
@@ -332,6 +390,64 @@ mod tests {
         assert_eq!(
             progress.last_epoch("default"),
             default_db(&primary).current_epoch().0
+        );
+    }
+
+    fn last_error(progress: &ReplicationState) -> Option<String> {
+        progress
+            .status(&grafeo_service::replication::ReplicationMode::Standalone)
+            .databases["default"]
+            .last_error
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn apply_conflicts_are_reported_and_stay_visible() {
+        let primary = primary();
+        let db = default_db(&primary);
+        let alix = db.create_node(&["Person"]).unwrap();
+        let gus = db.create_node(&["Person"]).unwrap();
+        let nodes_epoch = db.current_epoch().0;
+        db.create_edge(alix, gus, "KNOWS").unwrap();
+        let edge_epoch = db.current_epoch().0;
+        let url = serve(primary.clone()).await;
+
+        // The replica starts after the nodes, so the edge's endpoints are
+        // missing there and its create cannot be applied.
+        let replica = ServiceState::new_in_memory(300);
+        let progress = ReplicationState::new();
+        progress.advance_epoch("default", nodes_epoch);
+        let http = reqwest::Client::new();
+        poll_database(&http, &replica, &url, "default", &progress).await;
+
+        assert_eq!(progress.last_epoch("default"), edge_epoch, "still advances");
+        assert_eq!(default_db(&replica).edge_count(), 0);
+        let error = last_error(&progress).expect("the conflict is reported");
+        let expected = format!(
+            "1 change(s) could not be applied in the batch up to epoch {edge_epoch}; first: write_failed:"
+        );
+        assert!(error.starts_with(&expected), "{error}");
+
+        // A later clean poll does not wipe it.
+        poll_database(&http, &replica, &url, "default", &progress).await;
+        assert_eq!(last_error(&progress), Some(error));
+    }
+
+    #[test]
+    fn conflict_summary_counts_and_names_the_first() {
+        let conflicts = vec![
+            ConflictRecord {
+                request_index: 4,
+                reason: "write_failed: node 9 not found".to_string(),
+            },
+            ConflictRecord {
+                request_index: 7,
+                reason: "server_newer".to_string(),
+            },
+        ];
+        assert_eq!(
+            conflict_summary(&conflicts, 12),
+            "2 change(s) could not be applied in the batch up to epoch 12; first: write_failed: node 9 not found"
         );
     }
 }

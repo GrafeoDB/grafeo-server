@@ -23,6 +23,10 @@
 //! `ReplicationState` holds a `DashMap<db_name, AtomicU64>` tracking the
 //! last successfully applied epoch per database. The background task
 //! (in `grafeo-http`) updates these after each successful batch.
+//!
+//! A batch whose changes the replica could not all apply still advances the
+//! epoch (replaying its creates would duplicate them); a summary of what was
+//! not applied is kept per database and reported as its `last_error`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,7 +78,9 @@ impl ReplicationMode {
 pub struct DbReplicationStatus {
     /// The last CDC epoch successfully applied on this replica.
     pub last_applied_epoch: u64,
-    /// Last error encountered, if any.
+    /// Last error encountered, if any: the error of the last poll when it
+    /// failed, else the summary of the last batch the replica could not
+    /// apply in full (which stays, as the divergence it reports does).
     pub last_error: Option<String>,
 }
 
@@ -100,6 +106,9 @@ pub struct ReplicationState {
     pub epochs: DashMap<String, Arc<AtomicU64>>,
     /// Per-database last error.
     pub errors: DashMap<String, String>,
+    /// Per-database summary of the last batch whose changes could not all
+    /// be applied. Kept until the process restarts.
+    pub conflicts: DashMap<String, String>,
     /// Data directory for epoch persistence. None = in-memory only.
     data_dir: Option<std::path::PathBuf>,
 }
@@ -109,6 +118,7 @@ impl Default for ReplicationState {
         Self {
             epochs: DashMap::new(),
             errors: DashMap::new(),
+            conflicts: DashMap::new(),
             data_dir: None,
         }
     }
@@ -130,6 +140,7 @@ impl ReplicationState {
         let state = Self {
             epochs: DashMap::new(),
             errors: DashMap::new(),
+            conflicts: DashMap::new(),
             data_dir: Some(data_dir),
         };
         state.load_epochs();
@@ -194,9 +205,17 @@ impl ReplicationState {
         self.errors.insert(db.to_string(), err);
     }
 
-    /// Clears the error for `db`.
+    /// Clears the error for `db`. A recorded conflict summary stays.
     pub fn clear_error(&self, db: &str) {
         self.errors.remove(db);
+    }
+
+    /// Records that a batch for `db` had changes the replica could not
+    /// apply. Unlike [`set_error`](Self::set_error) it survives
+    /// [`clear_error`](Self::clear_error): a later clean batch does not undo
+    /// the divergence.
+    pub fn set_conflict(&self, db: &str, summary: String) {
+        self.conflicts.insert(db.to_string(), summary);
     }
 
     /// Returns the current status snapshot.
@@ -206,7 +225,11 @@ impl ReplicationState {
         for entry in &self.epochs {
             let db = entry.key().clone();
             let last_applied_epoch = entry.value().load(Ordering::Relaxed);
-            let last_error = self.errors.get(&db).map(|e| e.value().clone());
+            let last_error = self
+                .errors
+                .get(&db)
+                .or_else(|| self.conflicts.get(&db))
+                .map(|e| e.value().clone());
             databases.insert(
                 db,
                 DbReplicationStatus {
@@ -289,6 +312,33 @@ mod tests {
             primary_url: "http://primary:7474".to_string(),
         });
         assert!(status.databases["default"].last_error.is_none());
+    }
+
+    #[test]
+    fn conflict_summary_survives_clear_error() {
+        let state = ReplicationState::new();
+        state.advance_epoch("default", 3);
+        let last_error = |state: &ReplicationState| {
+            state.status(&ReplicationMode::Standalone).databases["default"]
+                .last_error
+                .clone()
+        };
+
+        state.set_conflict("default", "1 change(s) could not be applied".to_string());
+        state.clear_error("default");
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some("1 change(s) could not be applied")
+        );
+
+        // A poll error shows while it lasts, then the conflict is back.
+        state.set_error("default", "connection refused".to_string());
+        assert_eq!(last_error(&state).as_deref(), Some("connection refused"));
+        state.clear_error("default");
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some("1 change(s) could not be applied")
+        );
     }
 
     #[test]
