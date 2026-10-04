@@ -118,7 +118,9 @@ curl -X POST http://localhost:7474/sparql \
 A statement that writes also returns a `counters` object saying what it changed (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`). Reads leave it out. GWP puts the same numbers in `ResultSummary.counters`.
 
 ```bash
-curl -X POST http://localhost:7474/query   -H "Content-Type: application/json"   -d '{"query": "INSERT (:Person {name: '''Alix'''})-[:KNOWS]->(:Person {name: '''Gus'''})"}'
+curl -X POST http://localhost:7474/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT (:Person {name: '\''Alix'\''})-[:KNOWS]->(:Person {name: '\''Gus'\''})"}'
 # "counters": {"nodes_created": 2, "nodes_deleted": 0, "edges_created": 1, "edges_deleted": 0,
 #              "properties_set": 2, "labels_added": 2, "labels_removed": 0}
 ```
@@ -225,11 +227,15 @@ Create or update many nodes or edges by a key property in one all-or-nothing sta
 
 ```bash
 # Nodes: labels, rows (the key defaults to `id`, set `key` to change it)
-curl -X POST http://localhost:7474/db/default/upsert/nodes   -H "Content-Type: application/json"   -d '{"labels": ["Person"], "rows": [{"id": 1, "name": "Alix"}, {"id": 2, "name": "Gus"}]}'
+curl -X POST http://localhost:7474/db/default/upsert/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"labels": ["Person"], "rows": [{"id": 1, "name": "Alix"}, {"id": 2, "name": "Gus"}]}'
 # {"created": 2, "updated": 0, "skipped": 0, "skipped_rows": []}
 
 # Edges: edge_type, rows with id, src and dst (the key values of the end nodes)
-curl -X POST http://localhost:7474/db/default/upsert/edges   -H "Content-Type: application/json"   -d '{"edge_type": "KNOWS", "rows": [{"id": "k1", "src": 1, "dst": 2, "since": 2020}]}'
+curl -X POST http://localhost:7474/db/default/upsert/edges \
+  -H "Content-Type: application/json" \
+  -d '{"edge_type": "KNOWS", "rows": [{"id": "k1", "src": 1, "dst": 2, "since": 2020}]}'
 ```
 
 ### Transactions
