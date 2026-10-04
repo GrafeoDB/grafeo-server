@@ -216,6 +216,7 @@ fn change_event_to_sync_request(event: &grafeo_service::sync::ChangeEventDto) ->
         after,
         crdt_op: None,
         crdt_property: None,
+        graph: event.graph.clone(),
     }
 }
 

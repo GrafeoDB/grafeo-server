@@ -176,6 +176,11 @@ pub struct SyncChangeRequest {
     pub crdt_op: Option<CrdtOp>,
     /// Property key targeted by `crdt_op`. Required when `crdt_op` is set.
     pub crdt_property: Option<String>,
+    /// Graph to write to: a storage key as in `ChangeEventDto::graph`
+    /// (`name` or `schema/name`). Absent: the default graph. A missing graph
+    /// outside a schema is created; a missing graph inside one is a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
 }
 
 /// A CRDT operation applied to a single property on a node or edge.
@@ -334,12 +339,23 @@ impl SyncService {
         let mut skipped = 0usize;
         let mut conflicts: Vec<ConflictRecord> = Vec::new();
         let mut id_mappings: Vec<IdMapping> = Vec::new();
+        let mut sessions = GraphSessions::new(db);
 
         // Use the database directly for mutations. Each operation auto-commits.
         // TODO: wrap in a session transaction once the deadlock in persistent
         // mode is resolved (see replication_task spawn_blocking investigation).
 
         for (idx, change) in request.changes.iter().enumerate() {
+            let target = match sessions.get(change.graph.as_deref()) {
+                Ok(session) => session,
+                Err(reason) => {
+                    conflicts.push(ConflictRecord {
+                        request_index: idx,
+                        reason,
+                    });
+                    continue;
+                }
+            };
             match change.kind.as_str() {
                 "create" => match change.entity_type.as_str() {
                     "node" => {
@@ -355,9 +371,9 @@ impl SyncService {
                                 json_to_props(after).collect();
                             let props_refs: Vec<(&str, grafeo_common::types::Value)> =
                                 props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                            db.create_node_with_props(&labels, props_refs)
+                            target.create_node_with_props(&labels, props_refs)
                         } else {
-                            db.create_node(&labels)
+                            target.create_node(&labels)
                         };
                         match created {
                             Ok(new_id) => {
@@ -377,14 +393,14 @@ impl SyncService {
                                     json_to_props(after).collect();
                                 let props_refs: Vec<(&str, grafeo_common::types::Value)> =
                                     props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                                db.create_edge_with_props(
+                                target.create_edge_with_props(
                                     NodeId::new(src),
                                     NodeId::new(dst),
                                     et,
                                     props_refs,
                                 )
                             } else {
-                                db.create_edge(NodeId::new(src), NodeId::new(dst), et)
+                                target.create_edge(NodeId::new(src), NodeId::new(dst), et)
                             };
                             match created {
                                 Ok(new_id) => {
@@ -429,24 +445,24 @@ impl SyncService {
                         match change.entity_type.as_str() {
                             "node" => {
                                 let node_id = NodeId::new(raw_id);
-                                let current = db
+                                let current = target
                                     .get_node(node_id)
                                     .and_then(|n| n.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                match db.set_node_property(node_id, prop_key, merged) {
+                                match target.set_node_property(node_id, prop_key, merged) {
                                     Ok(()) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
                             }
                             "edge" => {
                                 let edge_id = EdgeId::new(raw_id);
-                                let current = db
+                                let current = target
                                     .get_edge(edge_id)
                                     .and_then(|e| e.get_property(prop_key).cloned())
                                     .unwrap_or(grafeo_common::types::Value::Null);
                                 let merged = crate::crdt::apply_op(&current, op);
-                                match db.set_edge_property(edge_id, prop_key, merged) {
+                                match target.set_edge_property(edge_id, prop_key, merged) {
                                     Ok(()) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
@@ -477,7 +493,7 @@ impl SyncService {
                         "node" => {
                             let node_id = NodeId::new(raw_id);
                             if server_is_newer(
-                                db,
+                                target,
                                 grafeo_engine::cdc::EntityId::Node(node_id),
                                 change.timestamp,
                             ) {
@@ -488,7 +504,7 @@ impl SyncService {
                                 skipped += 1;
                             } else {
                                 match json_to_props(after).try_for_each(|(key, val)| {
-                                    db.set_node_property(node_id, &key, val)
+                                    target.set_node_property(node_id, &key, val)
                                 }) {
                                     Ok(()) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
@@ -498,7 +514,7 @@ impl SyncService {
                         "edge" => {
                             let edge_id = EdgeId::new(raw_id);
                             if server_is_newer(
-                                db,
+                                target,
                                 grafeo_engine::cdc::EntityId::Edge(edge_id),
                                 change.timestamp,
                             ) {
@@ -509,7 +525,7 @@ impl SyncService {
                                 skipped += 1;
                             } else {
                                 match json_to_props(after).try_for_each(|(key, val)| {
-                                    db.set_edge_property(edge_id, &key, val)
+                                    target.set_edge_property(edge_id, &key, val)
                                 }) {
                                     Ok(()) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
@@ -541,7 +557,7 @@ impl SyncService {
                         "node" => {
                             let node_id = NodeId::new(raw_id);
                             if server_is_newer(
-                                db,
+                                target,
                                 grafeo_engine::cdc::EntityId::Node(node_id),
                                 change.timestamp,
                             ) {
@@ -551,7 +567,7 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                match db.delete_node(node_id) {
+                                match target.delete_node(node_id) {
                                     Ok(_) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
@@ -560,7 +576,7 @@ impl SyncService {
                         "edge" => {
                             let edge_id = EdgeId::new(raw_id);
                             if server_is_newer(
-                                db,
+                                target,
                                 grafeo_engine::cdc::EntityId::Edge(edge_id),
                                 change.timestamp,
                             ) {
@@ -570,7 +586,7 @@ impl SyncService {
                                 });
                                 skipped += 1;
                             } else {
-                                match db.delete_edge(edge_id) {
+                                match target.delete_edge(edge_id) {
                                     Ok(_) => applied += 1,
                                     Err(e) => conflicts.push(write_failed(idx, &e)),
                                 }
@@ -623,14 +639,68 @@ impl SyncService {
 /// GQL session, which does not record to the CDC log), the function returns
 /// `false` — the client change is applied unconditionally.
 fn server_is_newer(
-    db: &grafeo_engine::GrafeoDB,
+    session: &grafeo_engine::Session,
     entity_id: grafeo_engine::cdc::EntityId,
     client_timestamp: u64,
 ) -> bool {
-    db.history(entity_id).is_ok_and(|events| {
+    session.history(entity_id).is_ok_and(|events| {
         let client_ts = grafeo_common::types::HlcTimestamp::from_u64(client_timestamp);
         events.iter().any(|e| e.timestamp > client_ts)
     })
+}
+
+/// Sessions for the graphs one sync request writes to, opened on first use.
+///
+/// Writes go through a session so the CDC log names the right graph: engine
+/// 0.5.44 `GraphHandle` direct writes log their events under the default
+/// graph, session writes are tagged with the session's graph.
+struct GraphSessions<'db> {
+    db: &'db grafeo_engine::GrafeoDB,
+    sessions: HashMap<Option<String>, grafeo_engine::Session>,
+}
+
+impl<'db> GraphSessions<'db> {
+    fn new(db: &'db grafeo_engine::GrafeoDB) -> Self {
+        Self {
+            db,
+            sessions: HashMap::new(),
+        }
+    }
+
+    /// The session for `graph` (`None`: the default graph). The error is a
+    /// conflict reason.
+    fn get(&mut self, graph: Option<&str>) -> Result<&grafeo_engine::Session, String> {
+        let key = graph.map(str::to_owned);
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.sessions.entry(key.clone()) {
+            let session = match graph {
+                None => self.db.session(),
+                Some(storage_key) => open_graph_session(self.db, storage_key)?,
+            };
+            slot.insert(session);
+        }
+        Ok(&self.sessions[&key])
+    }
+}
+
+/// Opens a session on the graph a CDC storage key names (`name` or
+/// `schema/name`). A missing graph outside a schema is created, so a replica
+/// follows a primary's `CREATE GRAPH`; schemas are not created.
+fn open_graph_session(
+    db: &grafeo_engine::GrafeoDB,
+    storage_key: &str,
+) -> Result<grafeo_engine::Session, String> {
+    let (schema, name) = match storage_key.split_once('/') {
+        Some((schema, "__default__")) => (Some(schema), "default"),
+        Some((schema, name)) => (Some(schema), name),
+        None => (None, storage_key),
+    };
+    if schema.is_none() && db.graph_in(None, name).is_err() {
+        db.create_graph(name)
+            .map_err(|e| format!("graph_unavailable:{storage_key}: {e}"))?;
+    }
+    db.graph_in(schema, name)
+        .and_then(|graph| graph.session())
+        .map_err(|e| format!("graph_unavailable:{storage_key}: {e}"))
 }
 
 /// Records an engine write error as a conflict. Since engine 0.5.44 direct
@@ -861,6 +931,7 @@ mod tests {
                 after: None,
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -894,6 +965,7 @@ mod tests {
                 after: Some(serde_json::json!({ "name": { "String": "Alix" } })),
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -930,6 +1002,7 @@ mod tests {
                 after: None,
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -966,6 +1039,7 @@ mod tests {
                 after: Some(serde_json::json!({ "name": { "String": "Stale" } })),
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -1130,6 +1204,7 @@ mod tests {
                 timestamp: dto.timestamp,
                 crdt_op: None,
                 crdt_property: None,
+                graph: dto.graph,
             })
             .collect();
 
@@ -1210,6 +1285,7 @@ mod tests {
                 timestamp: dto.timestamp,
                 crdt_op: None,
                 crdt_property: None,
+                graph: dto.graph,
             })
             .collect();
 
@@ -1269,6 +1345,7 @@ mod tests {
                 after: Some(serde_json::json!({"name": {"String": "Ghost"}})),
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -1300,6 +1377,7 @@ mod tests {
                 after: None,
                 crdt_op: None,
                 crdt_property: None,
+                graph: None,
             }],
             schema_version: None,
         };
@@ -1407,6 +1485,113 @@ mod tests {
         assert_eq!(
             change.labels.as_deref(),
             Some(&["Draft".to_string(), "Published".to_string()][..])
+        );
+    }
+
+    fn to_sync_change(dto: ChangeEventDto) -> SyncChangeRequest {
+        SyncChangeRequest {
+            kind: dto.kind,
+            entity_type: dto.entity_type,
+            id: Some(dto.id),
+            timestamp: dto.timestamp,
+            labels: dto.labels,
+            edge_type: dto.edge_type,
+            src_id: dto.src_id,
+            dst_id: dto.dst_id,
+            after: dto.after,
+            crdt_op: None,
+            crdt_property: None,
+            graph: dto.graph,
+        }
+    }
+
+    #[test]
+    fn replication_replays_named_graph_writes_into_the_same_graph() {
+        let primary = make_manager();
+        let pdb = primary.get("default").unwrap().db();
+        pdb.execute("CREATE GRAPH g2").unwrap();
+        let session = pdb.session();
+        session.use_graph("g2");
+        session
+            .execute("INSERT (:InG2 {name: 'Alix'})-[:KNOWS]->(:InG2 {name: 'Gus'})")
+            .unwrap();
+        pdb.session()
+            .execute("INSERT (:InDefault {name: 'Vincent'})")
+            .unwrap();
+
+        let changes = SyncService::pull(&primary, "default", 0, 1000)
+            .unwrap()
+            .changes;
+        let replica = make_manager();
+        let resp = SyncService::apply(
+            &replica,
+            "default",
+            SyncRequest {
+                client_id: "replica-1".to_string(),
+                last_seen_epoch: 0,
+                changes: changes.into_iter().map(to_sync_change).collect(),
+                schema_version: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(resp.conflicts.len(), 0, "{:?}", resp.conflicts);
+
+        let rdb = replica.get("default").unwrap().db();
+        let g2 = rdb.graph("g2").expect("replay creates the missing graph");
+        let count = |q: &str| g2.execute(q).unwrap().rows()[0][0].clone();
+        assert_eq!(
+            count("MATCH (n:InG2) RETURN count(n)"),
+            grafeo_common::Value::Int64(2)
+        );
+        assert_eq!(
+            count("MATCH ()-[r:KNOWS]->() RETURN count(r)"),
+            grafeo_common::Value::Int64(1)
+        );
+        let in_default = rdb.execute("MATCH (n:InG2) RETURN count(n)").unwrap();
+        assert_eq!(in_default.rows()[0][0], grafeo_common::Value::Int64(0));
+
+        // What the replica applied is logged under the same graph.
+        let replica_changes = SyncService::pull(&replica, "default", 0, 1000)
+            .unwrap()
+            .changes;
+        assert!(
+            replica_changes
+                .iter()
+                .filter(|e| e.labels.as_deref() == Some(&["InG2".to_string()][..]))
+                .all(|e| e.graph.as_deref() == Some("g2"))
+        );
+    }
+
+    #[test]
+    fn apply_to_a_missing_graph_inside_a_schema_is_a_conflict() {
+        let mgr = make_manager();
+        let req = SyncRequest {
+            client_id: "device-1".to_string(),
+            last_seen_epoch: 0,
+            changes: vec![SyncChangeRequest {
+                kind: "create".to_string(),
+                entity_type: "node".to_string(),
+                id: None,
+                timestamp: 0,
+                labels: Some(vec!["X".to_string()]),
+                edge_type: None,
+                src_id: None,
+                dst_id: None,
+                after: None,
+                crdt_op: None,
+                crdt_property: None,
+                graph: Some("s1/g3".to_string()),
+            }],
+            schema_version: None,
+        };
+        let resp = SyncService::apply(&mgr, "default", req).unwrap();
+        assert_eq!(resp.applied, 0);
+        assert!(
+            resp.conflicts[0]
+                .reason
+                .starts_with("graph_unavailable:s1/g3"),
+            "reason: {}",
+            resp.conflicts[0].reason
         );
     }
 }
