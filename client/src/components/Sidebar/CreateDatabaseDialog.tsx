@@ -413,7 +413,9 @@ export default function CreateDatabaseDialog({
         <div className={styles.actions}>
           <button
             type="button"
-            className={styles.cancelButton} onClick={onClose}>
+            className={styles.cancelButton}
+            onClick={onClose}
+          >
             Cancel
           </button>
           <button

@@ -39,6 +39,7 @@ export default function BackupsSection({ database, onMutated }: Props) {
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [notConfigured, setNotConfigured] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [submittingCreate, setSubmittingCreate] = useState(false);
@@ -55,15 +56,25 @@ export default function BackupsSection({ database, onMutated }: Props) {
       .list(database)
       .then((list) => {
         setNotConfigured(false);
+        setLoadError(null);
         setBackups(list);
       })
       .catch((err) => {
-        // The server answers 400 "backup not configured: ..." when it was
-        // started without --backup-dir. Match the message, not any 400.
-        setNotConfigured(
+        // The server (`require_backup_dir` in
+        // crates/grafeo-http/src/routes/backup.rs) answers 400 "backup not
+        // configured: ..." when it was started without --backup-dir. Match
+        // the message, not any 400.
+        const unconfigured =
           err instanceof GrafeoApiError &&
-            err.status === 400 &&
-            err.detail.includes("backup not configured"),
+          err.status === 400 &&
+          err.detail.includes("backup not configured");
+        setNotConfigured(unconfigured);
+        setLoadError(
+          unconfigured
+            ? null
+            : err instanceof GrafeoApiError
+              ? err.detail
+              : String(err),
         );
         setBackups([]);
       })
@@ -164,34 +175,34 @@ export default function BackupsSection({ database, onMutated }: Props) {
       <div className={styles.header}>
         <h3 className={styles.heading}>Backups</h3>
         {!notConfigured && (
-        <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={btn.link}
-            onClick={() => {
-              setEpochError(null);
-              setEpochRestoring(true);
-            }}
-            disabled={backups.length === 0}
-            title={
-              backups.length === 0
-                ? "No backups available to restore from"
-                : "Restore to a point in time"
-            }
-          >
-            Restore to epoch…
-          </button>
-          <button
-            type="button"
-            className={btn.secondary}
-            onClick={() => {
-              setCreateError(null);
-              setCreating(true);
-            }}
-          >
-            + New backup
-          </button>
-        </div>
+          <div className={styles.headerActions}>
+            <button
+              type="button"
+              className={btn.link}
+              onClick={() => {
+                setEpochError(null);
+                setEpochRestoring(true);
+              }}
+              disabled={backups.length === 0}
+              title={
+                backups.length === 0
+                  ? "No backups available to restore from"
+                  : "Restore to a point in time"
+              }
+            >
+              Restore to epoch…
+            </button>
+            <button
+              type="button"
+              className={btn.secondary}
+              onClick={() => {
+                setCreateError(null);
+                setCreating(true);
+              }}
+            >
+              + New backup
+            </button>
+          </div>
         )}
       </div>
 
@@ -203,6 +214,8 @@ export default function BackupsSection({ database, onMutated }: Props) {
         <div className={styles.empty}>
           Backups are not configured on this server
         </div>
+      ) : loadError ? (
+        <div className={styles.error}>{loadError}</div>
       ) : backups.length === 0 ? (
         <div className={styles.empty}>
           No backups yet. Create one with the button above.

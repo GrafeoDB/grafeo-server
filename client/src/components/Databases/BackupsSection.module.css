@@ -97,3 +97,12 @@
   gap: var(--space-xs);
   justify-content: flex-end;
 }
+
+.error {
+  padding: var(--space-xs) var(--space-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  color: var(--error);
+  font-size: 12px;
+}
