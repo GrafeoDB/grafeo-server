@@ -156,8 +156,8 @@ mod sse {
         // The first page is pulled up front so a missing database, or one
         // without CDC, is an HTTP error rather than an empty stream.
         let first = history_page(&state, &name, params.since).await?;
-        let stream =
-            change_stream(state, name, first, params.since).map(|item| Ok(sse_event(item)));
+        let stream = change_stream(state, name, first, params.since, "SSE".to_string())
+            .map(|item| Ok(sse_event(item)));
         Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
     }
 

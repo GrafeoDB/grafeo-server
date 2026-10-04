@@ -230,7 +230,13 @@ async fn handle_with_subscriptions<S, R>(
                                 Ok(first) => {
                                     let handle = tokio::spawn(forward_subscription(
                                         sub_id.clone(),
-                                        change_stream(state.clone(), db, first, since),
+                                        change_stream(
+                                            state.clone(),
+                                            db,
+                                            first,
+                                            since,
+                                            format!("WebSocket sub_id {sub_id}"),
+                                        ),
                                         event_tx.clone(),
                                     ));
                                     // A sub_id in use: the new subscription

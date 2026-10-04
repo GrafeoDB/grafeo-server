@@ -33,7 +33,9 @@ pub(crate) enum StreamItem {
 
 /// The changes of `name` from epoch `since` on: the history page by page
 /// (`first` is its first page, from [`history_page`]), then live events from
-/// the hub. It ends after a `Lagged` or `Error` item.
+/// the hub. It ends after a `Lagged` or `Error` item. `subscriber` names the
+/// stream in the log (an SSE stream, or a WebSocket subscription by its
+/// `sub_id`), so a lag or an error can be traced to it.
 ///
 /// It subscribes to the hub before it sends the last history page and then
 /// pulls once more, so nothing the hub broadcasts while the history streams
@@ -43,6 +45,7 @@ pub(crate) fn change_stream(
     name: String,
     first: ChangesResponse,
     since: u64,
+    subscriber: String,
 ) -> impl Stream<Item = StreamItem> {
     async_stream::stream! {
         // Each pull resumes after the cursor of the last one that returned
@@ -57,7 +60,7 @@ pub(crate) fn change_stream(
             page = match history_page(&state, &name, next_since).await {
                 Ok(next) => next,
                 Err(e) => {
-                    yield history_failed(&name, &e);
+                    yield history_failed(&name, &subscriber, &e);
                     return;
                 }
             };
@@ -78,7 +81,7 @@ pub(crate) fn change_stream(
             let page = match history_page(&state, &name, next_since).await {
                 Ok(page) => page,
                 Err(e) => {
-                    yield history_failed(&name, &e);
+                    yield history_failed(&name, &subscriber, &e);
                     return;
                 }
             };
@@ -99,6 +102,7 @@ pub(crate) fn change_stream(
                 LiveItem::Lagged(notice) => {
                     tracing::warn!(
                         db = %name,
+                        subscriber = %subscriber,
                         skipped = notice.skipped,
                         since = notice.since,
                         "change stream fell behind; ending it"
@@ -107,7 +111,11 @@ pub(crate) fn change_stream(
                     break;
                 }
                 LiveItem::Closed => {
-                    tracing::warn!(db = %name, "change feed stopped; ending the change stream");
+                    tracing::warn!(
+                        db = %name,
+                        subscriber = %subscriber,
+                        "change feed stopped; ending the change stream"
+                    );
                     yield StreamItem::Error(FEED_CLOSED.to_string());
                     break;
                 }
@@ -130,8 +138,13 @@ fn resume_after(next_since: u64, page: &ChangesResponse) -> u64 {
 
 /// The `Error` item for a failed history pull. An internal error's text stays
 /// in the log, as in the HTTP error mapping.
-fn history_failed(name: &str, error: &ApiError) -> StreamItem {
-    tracing::warn!(db = %name, error = %error, "change stream history pull failed; ending it");
+fn history_failed(name: &str, subscriber: &str, error: &ApiError) -> StreamItem {
+    tracing::warn!(
+        db = %name,
+        subscriber = %subscriber,
+        error = %error,
+        "change stream history pull failed; ending it"
+    );
     StreamItem::Error(match &error.0 {
         ServiceError::Internal(_) => "internal error".to_string(),
         _ => error.to_string(),
@@ -191,12 +204,20 @@ mod tests {
 
     #[test]
     fn a_history_error_hides_internal_detail_only() {
-        let internal = history_failed("default", &ApiError::internal("disk at /var/x full"));
+        let internal = history_failed(
+            "default",
+            "test",
+            &ApiError::internal("disk at /var/x full"),
+        );
         match internal {
             StreamItem::Error(message) => assert_eq!(message, "internal error"),
             other => panic!("expected an error, got {other:?}"),
         }
-        let bad = history_failed("default", &ApiError::bad_request("CDC is not enabled"));
+        let bad = history_failed(
+            "default",
+            "test",
+            &ApiError::bad_request("CDC is not enabled"),
+        );
         match bad {
             StreamItem::Error(message) => assert!(message.contains("CDC is not enabled")),
             other => panic!("expected an error, got {other:?}"),
@@ -244,6 +265,7 @@ mod tests {
             "default".to_string(),
             first,
             0,
+            "test".to_string(),
         ));
         assert_eq!(change_label(next_item(&mut stream).await), "Old");
 
@@ -277,6 +299,7 @@ mod tests {
             "default".to_string(),
             first,
             0,
+            "test".to_string(),
         ));
         db.create_node(&["Warmup"]).unwrap();
         let warmup_epoch = db.current_epoch().0;
@@ -320,6 +343,7 @@ mod tests {
             "default".to_string(),
             first,
             0,
+            "test".to_string(),
         ));
         assert_eq!(change_label(next_item(&mut stream).await), "Old");
 
@@ -353,7 +377,13 @@ mod tests {
         db.create_node(&["Old"]).unwrap();
 
         let first = history_page(&state, "gone", 0).await.unwrap();
-        let mut stream = Box::pin(change_stream(state.clone(), "gone".to_string(), first, 0));
+        let mut stream = Box::pin(change_stream(
+            state.clone(),
+            "gone".to_string(),
+            first,
+            0,
+            "test".to_string(),
+        ));
         assert_eq!(change_label(next_item(&mut stream).await), "Old");
         // Once this has arrived the stream pulls no more history.
         db.create_node(&["Live"]).unwrap();
