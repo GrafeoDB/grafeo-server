@@ -1,11 +1,11 @@
 //! Middleware that rejects write operations when the server is in replica mode.
 //!
-//! On a replica, PUT, PATCH and DELETE requests, and POST requests to routes
-//! that write data or storage, return `503 Service Unavailable` with
+//! On a replica, PUT, PATCH, DELETE and POST requests that write data or
+//! storage return `503 Service Unavailable` with
 //! `{"error": "replica_mode", "message": "..."}`: a local write would make
 //! the replica diverge from its primary and shift the IDs that replicated
 //! changes refer to. GET and HEAD requests are always allowed, and so are the
-//! POST routes [`post_allowed_on_replica`] lists.
+//! requests [`write_allowed_on_replica`] lists.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -43,92 +43,110 @@ pub async fn replica_guard_middleware(
 /// Whether a replica rejects a `method` request to `path`.
 fn rejected_on_replica(method: &Method, path: &str) -> bool {
     match *method {
-        Method::PUT | Method::PATCH | Method::DELETE => true,
-        Method::POST => !post_allowed_on_replica(path),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
+            !write_allowed_on_replica(method, path)
+        }
         _ => false,
     }
 }
 
-/// The POST routes a replica serves. Any other POST is treated as a write,
-/// including a route added later until it is listed here.
+/// The POST, PUT, PATCH and DELETE requests a replica serves. Any other is
+/// treated as a write, including a route added later until it is listed
+/// here.
 ///
-/// - queries, batches and explicit transactions: the engine's read-only
-///   session flag rejects the writes among them (`/db/{name}/sparql` is the
-///   SPARQL Protocol form of `/sparql`);
-/// - search;
-/// - `/db/{name}/sync`: replication itself;
+/// - queries, batches and explicit transactions (POST): the engine's
+///   read-only session flag rejects the writes among them
+///   (`/db/{name}/sparql` is the SPARQL Protocol form of `/sparql`);
+/// - search (POST);
+/// - `POST /db/{name}/sync`: replication itself;
 /// - admin operations that keep or inspect the current state without
-///   changing it: WAL checkpoint, snapshot, backups, reloading spilled
-///   sections, clearing the plan cache, SHACL validation;
-/// - token management: server-local credentials, not replicated data.
-fn post_allowed_on_replica(path: &str) -> bool {
+///   changing it (POST): WAL checkpoint, snapshot, backups, reloading
+///   spilled sections, clearing the plan cache, SHACL validation;
+/// - token management (`POST /admin/tokens`, `DELETE /admin/tokens/{id}`):
+///   tokens live in the instance's own token store, not in replicated data.
+fn write_allowed_on_replica(method: &Method, path: &str) -> bool {
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-    matches!(
-        segments.as_slice(),
-        ["query" | "cypher" | "graphql" | "gremlin" | "sparql" | "sql" | "batch"]
-            | ["tx", "begin" | "query" | "commit" | "rollback"]
-            | ["search", "vector" | "text" | "hybrid"]
-            | ["db", _, "sparql" | "sync"]
-            | ["admin", _, "wal", "checkpoint"]
-            | ["admin", _, "snapshot" | "backup" | "reload-eligible"]
-            | ["admin", _, "backup", "incremental"]
-            | ["admin", _, "cache", "clear"]
-            | ["admin", _, "validate", "shacl"]
-            | ["admin", "tokens"]
-    )
+    match *method {
+        Method::POST => matches!(
+            segments.as_slice(),
+            ["query" | "cypher" | "graphql" | "gremlin" | "sparql" | "sql" | "batch"]
+                | ["tx", "begin" | "query" | "commit" | "rollback"]
+                | ["search", "vector" | "text" | "hybrid"]
+                | ["db", _, "sparql" | "sync"]
+                | ["admin", _, "wal", "checkpoint"]
+                | ["admin", _, "snapshot" | "backup" | "reload-eligible"]
+                | ["admin", _, "backup", "incremental"]
+                | ["admin", _, "cache", "clear"]
+                | ["admin", _, "validate", "shacl"]
+                | ["admin", "tokens"]
+        ),
+        Method::DELETE => matches!(segments.as_slice(), ["admin", "tokens", _]),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every POST route of the router, and whether a replica serves it.
-    const POST_ROUTES: &[(&str, bool)] = &[
-        ("/query", true),
-        ("/cypher", true),
-        ("/graphql", true),
-        ("/gremlin", true),
-        ("/sparql", true),
-        ("/sql", true),
-        ("/batch", true),
-        ("/tx/begin", true),
-        ("/tx/query", true),
-        ("/tx/commit", true),
-        ("/tx/rollback", true),
-        ("/db", false),
-        ("/db/default/graphs", false),
-        ("/db/default/schemas", false),
-        ("/db/default/import/tsv", false),
-        ("/db/default/upsert/nodes", false),
-        ("/db/default/upsert/edges", false),
-        ("/db/default/sparql", true),
-        ("/db/default/graph-store", false),
-        ("/db/default/sync", true),
-        ("/admin/default/wal/checkpoint", true),
-        ("/admin/default/index", false),
-        ("/admin/default/cache/clear", true),
-        ("/admin/default/reload-eligible", true),
-        ("/admin/default/snapshot", true),
-        ("/admin/default/compact", false),
-        ("/admin/default/projections", false),
-        ("/admin/default/validate/shacl", true),
-        ("/admin/default/backup", true),
-        ("/admin/default/backup/incremental", true),
-        ("/admin/default/restore", false),
-        ("/admin/default/restore/epoch", false),
-        ("/search/vector", true),
-        ("/search/text", true),
-        ("/search/hybrid", true),
-        ("/admin/tokens", true),
+    /// Every write route of the router (method, path), and whether a
+    /// replica serves it.
+    const WRITE_ROUTES: &[(&str, &str, bool)] = &[
+        ("POST", "/query", true),
+        ("POST", "/cypher", true),
+        ("POST", "/graphql", true),
+        ("POST", "/gremlin", true),
+        ("POST", "/sparql", true),
+        ("POST", "/sql", true),
+        ("POST", "/batch", true),
+        ("POST", "/tx/begin", true),
+        ("POST", "/tx/query", true),
+        ("POST", "/tx/commit", true),
+        ("POST", "/tx/rollback", true),
+        ("POST", "/db", false),
+        ("DELETE", "/db/default", false),
+        ("POST", "/db/default/graphs", false),
+        ("DELETE", "/db/default/graphs/g2", false),
+        ("POST", "/db/default/schemas", false),
+        ("DELETE", "/db/default/schemas/s1", false),
+        ("POST", "/db/default/import/tsv", false),
+        ("POST", "/db/default/upsert/nodes", false),
+        ("POST", "/db/default/upsert/edges", false),
+        ("POST", "/db/default/sparql", true),
+        ("PUT", "/db/default/graph-store", false),
+        ("POST", "/db/default/graph-store", false),
+        ("DELETE", "/db/default/graph-store", false),
+        ("POST", "/db/default/sync", true),
+        ("POST", "/admin/default/wal/checkpoint", true),
+        ("POST", "/admin/default/index", false),
+        ("DELETE", "/admin/default/index", false),
+        ("POST", "/admin/default/cache/clear", true),
+        ("POST", "/admin/default/reload-eligible", true),
+        ("POST", "/admin/default/snapshot", true),
+        ("POST", "/admin/default/compact", false),
+        ("POST", "/admin/default/projections", false),
+        ("DELETE", "/admin/default/projections/p1", false),
+        ("POST", "/admin/default/validate/shacl", true),
+        ("POST", "/admin/default/backup", true),
+        ("POST", "/admin/default/backup/incremental", true),
+        ("POST", "/admin/default/restore", false),
+        ("POST", "/admin/default/restore/epoch", false),
+        ("DELETE", "/admin/default/backups/b1.grafeo", false),
+        ("POST", "/search/vector", true),
+        ("POST", "/search/text", true),
+        ("POST", "/search/hybrid", true),
+        ("POST", "/admin/tokens", true),
+        ("DELETE", "/admin/tokens/tok-1", true),
     ];
 
     #[test]
-    fn post_routes_are_classified() {
-        for &(path, allowed) in POST_ROUTES {
+    fn write_routes_are_classified() {
+        for &(method, path, allowed) in WRITE_ROUTES {
+            let method = Method::from_bytes(method.as_bytes()).unwrap();
             assert_eq!(
-                rejected_on_replica(&Method::POST, path),
+                rejected_on_replica(&method, path),
                 !allowed,
-                "POST {path}"
+                "{method} {path}"
             );
         }
     }
@@ -155,5 +173,11 @@ mod tests {
         assert!(rejected_on_replica(&Method::POST, "/db/query/upsert/nodes"));
         assert!(rejected_on_replica(&Method::POST, "/admin/tokens/restore"));
         assert!(rejected_on_replica(&Method::POST, "/not/a/route"));
+        assert!(rejected_on_replica(&Method::DELETE, "/admin/tokens"));
+        assert!(rejected_on_replica(&Method::PUT, "/admin/tokens/tok-1"));
+        assert!(rejected_on_replica(
+            &Method::DELETE,
+            "/admin/tokens/projections/p1"
+        ));
     }
 }
