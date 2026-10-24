@@ -123,8 +123,43 @@ pub fn grafeo_to_gwp(value: &grafeo_common::Value) -> GwpValue {
                 ],
             })
         }
+        Value::Decimal(d) => GwpValue::Decimal {
+            unscaled: unscaled_bytes(d.mantissa()),
+            scale: i32::from(d.scale()),
+        },
+        // GWP has no RDF term: a literal of a known XSD type as that value,
+        // any other term as its text.
+        Value::RdfTerm(term) => grafeo_to_gwp(&term.export_value()),
         _ => GwpValue::Null,
     }
+}
+
+/// The shortest big-endian two's complement bytes of `value` (GWP's decimal
+/// encoding).
+fn unscaled_bytes(value: i128) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let mut start = 0;
+    // Drop leading bytes that only repeat the sign of the next one.
+    while start < bytes.len() - 1 {
+        let (byte, next) = (bytes[start], bytes[start + 1]);
+        if (byte == 0x00 && next & 0x80 == 0) || (byte == 0xFF && next & 0x80 != 0) {
+            start += 1;
+        } else {
+            break;
+        }
+    }
+    bytes[start..].to_vec()
+}
+
+/// The value of big-endian two's complement bytes, when it fits an `i128`.
+fn unscaled_value(bytes: &[u8]) -> Option<i128> {
+    if bytes.is_empty() || bytes.len() > 16 {
+        return None;
+    }
+    let fill = if bytes[0] & 0x80 == 0 { 0x00 } else { 0xFF };
+    let mut full = [fill; 16];
+    full[16 - bytes.len()..].copy_from_slice(bytes);
+    Some(i128::from_be_bytes(full))
 }
 
 /// Converts GWP parameters to grafeo-engine parameters.
@@ -189,6 +224,12 @@ fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
                 d.months, days, nanos,
             )))
         }
+        GwpValue::Decimal { unscaled, scale } => {
+            let scale = u8::try_from(*scale).ok()?;
+            grafeo_common::types::Decimal::new(unscaled_value(unscaled)?, scale)
+                .ok()
+                .map(Value::Decimal)
+        }
         // Graph types and datetime not yet supported as engine parameters
         _ => None,
     }
@@ -198,6 +239,27 @@ fn gwp_to_grafeo(value: &GwpValue) -> Option<grafeo_common::Value> {
 mod tests {
     use super::*;
     use grafeo_common::Value;
+
+    #[test]
+    fn rdf_terms_become_plain_values() {
+        use grafeo_common::types::rdf::Term;
+        let term = |t: Term| Value::RdfTerm(std::sync::Arc::new(t));
+        assert!(matches!(
+            grafeo_to_gwp(&term(Term::iri("http://example.org/a"))),
+            GwpValue::String(ref s) if s == "http://example.org/a"
+        ));
+        assert!(matches!(
+            grafeo_to_gwp(&term(Term::literal("Alix"))),
+            GwpValue::String(ref s) if s == "Alix"
+        ));
+        assert!(matches!(
+            grafeo_to_gwp(&term(Term::typed_literal(
+                "30",
+                grafeo_common::types::rdf::Literal::XSD_INTEGER
+            ))),
+            GwpValue::Integer(30)
+        ));
+    }
 
     #[test]
     fn grafeo_to_gwp_primitives() {
@@ -214,6 +276,38 @@ mod tests {
             grafeo_to_gwp(&Value::Float64(1.23)),
             GwpValue::Float(f) if (f - 1.23).abs() < f64::EPSILON
         ));
+    }
+
+    #[test]
+    fn decimals_keep_their_digits_and_scale() {
+        for text in [
+            "1.50",
+            "-1.50",
+            "0.01",
+            "-128",
+            "127",
+            "12345678901234567890.123",
+        ] {
+            let dec = grafeo_common::types::Decimal::parse(text).unwrap();
+            let gwp = grafeo_to_gwp(&grafeo_common::Value::Decimal(dec));
+            let GwpValue::Decimal {
+                ref unscaled,
+                scale,
+            } = gwp
+            else {
+                panic!("{text} encodes as {gwp:?}");
+            };
+            assert_eq!(scale, i32::from(dec.scale()), "{text}");
+            assert_eq!(unscaled_value(unscaled), Some(dec.mantissa()), "{text}");
+            assert_eq!(
+                gwp_to_grafeo(&gwp),
+                Some(grafeo_common::Value::Decimal(dec)),
+                "{text}"
+            );
+        }
+        assert_eq!(unscaled_bytes(150), vec![0x00, 0x96]);
+        assert_eq!(unscaled_bytes(-150), vec![0xFF, 0x6A]);
+        assert_eq!(unscaled_bytes(0), vec![0x00]);
     }
 
     #[test]
