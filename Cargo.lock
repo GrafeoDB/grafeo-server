@@ -1574,7 +1574,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
- "sha2 0.11.1",
+ "sha2",
  "smallvec",
  "thiserror",
  "tokenizers",
@@ -1676,10 +1676,10 @@ dependencies = [
  "hex",
  "jsonschema",
  "parking_lot 0.13.0",
- "rand 0.9.5",
+ "rand 0.10.3",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2",
  "sophia_api",
  "sophia_inmem",
  "sophia_turtle",
@@ -1862,7 +1862,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-retry",
@@ -3575,7 +3575,7 @@ version = "8.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d84e8ba78bd384263e5922f084cbe1b081c3b7e69add59c8fb097b879ba968a"
 dependencies = [
- "sha2 0.11.1",
+ "sha2",
  "walkdir",
 ]
 
@@ -3858,17 +3858,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -5360,7 +5349,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
