@@ -115,6 +115,12 @@ pub fn grafeo_to_bolt(value: &grafeo_common::Value) -> BoltValue {
             let neg_sum: u64 = neg.values().sum();
             BoltValue::Integer(pos_sum as i64 - neg_sum as i64)
         }
+        // Bolt has no decimal type: the exact text, with its scale ("1.50"),
+        // as Neo4j sends values it cannot type. A float would round it.
+        Value::Decimal(d) => BoltValue::String(d.to_string()),
+        // Bolt has no RDF term: a literal of a known XSD type as that value,
+        // any other term as its text.
+        Value::RdfTerm(term) => grafeo_to_bolt(&term.export_value()),
         _ => BoltValue::Null,
     }
 }
