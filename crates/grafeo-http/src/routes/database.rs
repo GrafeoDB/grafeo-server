@@ -12,6 +12,7 @@ use crate::types::{
 };
 
 use grafeo_service::admin::AdminService;
+use grafeo_service::error::ServiceError;
 
 /// List all databases.
 ///
@@ -71,8 +72,8 @@ pub async fn create_database(
     let db = entry.db();
     Ok(Json(DatabaseSummary {
         name,
-        node_count: db.node_count(),
-        edge_count: db.edge_count(),
+        node_count: db.node_count().map_err(ServiceError::from_engine)?,
+        edge_count: db.edge_count().map_err(ServiceError::from_engine)?,
         persistent: db.path().is_some(),
         database_type: db_type.as_str().to_string(),
     }))
@@ -131,7 +132,7 @@ pub async fn database_info(
     let entry = state.databases().get_available(&name)?;
 
     let db = entry.db();
-    let info = db.info();
+    let info = db.info().map_err(ServiceError::from_engine)?;
     let metadata = &entry.metadata;
     Ok(Json(DatabaseInfoResponse {
         name,
@@ -171,7 +172,10 @@ pub async fn database_stats(
     auth.check_db_access(&name)?;
     let entry = state.databases().get_available(&name)?;
 
-    let stats = entry.db().detailed_stats();
+    let stats = entry
+        .db()
+        .detailed_stats()
+        .map_err(ServiceError::from_engine)?;
     Ok(Json(DatabaseStatsResponse {
         name,
         node_count: stats.node_count,
@@ -208,7 +212,7 @@ pub async fn database_schema(
     auth.check_db_access(&name)?;
     let entry = state.databases().get_available(&name)?;
 
-    let schema = entry.db().schema();
+    let schema = entry.db().schema().map_err(ServiceError::from_engine)?;
     match schema {
         grafeo_engine::admin::SchemaInfo::Lpg(lpg) => Ok(Json(DatabaseSchemaResponse {
             name,
