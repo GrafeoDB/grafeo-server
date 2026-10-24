@@ -9491,3 +9491,149 @@ async fn bolt_returns_rdf_terms_as_plain_values() {
     );
     session.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// GWP catalog: IF NOT EXISTS, OR REPLACE and IF EXISTS (#80)
+// ---------------------------------------------------------------------------
+
+/// A catalog `CreateGraph` of an in-memory LPG graph with the given flags.
+#[cfg(feature = "gwp")]
+fn gwp_graph(name: &str, if_not_exists: bool, or_replace: bool) -> gwp::server::CreateGraphConfig {
+    gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
+        name: name.to_string(),
+        if_not_exists,
+        or_replace,
+        type_spec: None,
+        copy_of: None,
+        storage_mode: "inmemory".to_string(),
+        memory_limit_bytes: None,
+        backward_edges: None,
+        threads: None,
+        wal_enabled: None,
+        wal_durability: None,
+    }
+}
+
+/// The gRPC code of a catalog error.
+#[cfg(feature = "gwp")]
+fn grpc_code(err: &gwp::error::GqlError) -> tonic::Code {
+    match err {
+        gwp::error::GqlError::Grpc(status) => status.code(),
+        other => panic!("expected a gRPC error, got {other:?}"),
+    }
+}
+
+/// Inserts one node into database `db` over HTTP.
+#[cfg(feature = "gwp")]
+async fn insert_one_node(http: &str, db: &str) {
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": "INSERT (:Kept)", "database": db}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_if_not_exists_keeps_an_existing_graph() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let created = catalog
+        .create_graph(gwp_graph("g80", true, false))
+        .await
+        .unwrap();
+    assert_eq!(created.name, "g80");
+    insert_one_node(&http, "g80").await;
+
+    let again = catalog
+        .create_graph(gwp_graph("g80", true, false))
+        .await
+        .expect("IF NOT EXISTS on an existing graph succeeds");
+    assert_eq!(again.node_count, 1, "the existing graph is kept");
+
+    let err = catalog
+        .create_graph(gwp_graph("g80", false, false))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::AlreadyExists);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_or_replace_replaces_the_graph() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("g80", false, true))
+        .await
+        .expect("OR REPLACE creates a missing graph");
+    insert_one_node(&http, "g80").await;
+
+    let replaced = catalog
+        .create_graph(gwp_graph("g80", false, true))
+        .await
+        .expect("OR REPLACE on an existing graph succeeds");
+    assert_eq!(replaced.node_count, 0, "the graph is a new, empty one");
+    let graphs = catalog.list_graphs("default").await.unwrap();
+    assert_eq!(graphs.iter().filter(|g| g.name == "g80").count(), 1);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_refuses_or_replace_with_if_not_exists() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let err = catalog
+        .create_graph(gwp_graph("g80", true, true))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+    let graphs = catalog.list_graphs("default").await.unwrap();
+    assert!(
+        graphs.iter().all(|g| g.name != "g80"),
+        "nothing was created"
+    );
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_drop_graph_if_exists_on_a_missing_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let existed = catalog
+        .drop_graph("default", "nope", true)
+        .await
+        .expect("IF EXISTS on a missing graph succeeds");
+    assert!(!existed, "a missing graph did not exist");
+
+    let err = catalog
+        .drop_graph("default", "nope", false)
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
+
+    catalog
+        .create_graph(gwp_graph("g80", false, false))
+        .await
+        .unwrap();
+    assert!(catalog.drop_graph("default", "g80", true).await.unwrap());
+}

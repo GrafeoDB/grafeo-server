@@ -126,6 +126,34 @@ impl GrafeoBackend {
             threads: Some(entry.metadata.threads as u32),
         })
     }
+
+    /// Deletes the database behind graph `name`, after invalidating the GWP
+    /// sessions that target it.
+    #[allow(clippy::result_large_err)]
+    fn delete_graph(&self, name: &str) -> Result<(), GqlError> {
+        let sessions_to_remove: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.value().lock().database == name)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if !sessions_to_remove.is_empty() {
+            tracing::info!(
+                graph = %name,
+                count = sessions_to_remove.len(),
+                "Invalidating GWP sessions for dropped graph"
+            );
+            for sid in &sessions_to_remove {
+                self.sessions.remove(sid);
+            }
+        }
+
+        self.state
+            .databases()
+            .delete(name)
+            .map_err(|e| GqlError::Session(e.to_string()))
+    }
 }
 
 #[tonic::async_trait]
@@ -527,6 +555,18 @@ impl GqlBackend for GrafeoBackend {
         };
         use gwp::server::GraphTypeSpec;
 
+        // ISO/IEC 39075 12.4: a statement takes OR REPLACE or IF NOT EXISTS,
+        // not both.
+        if config.or_replace && config.if_not_exists {
+            return Err(GqlError::Session(
+                "OR REPLACE and IF NOT EXISTS cannot both be set".to_owned(),
+            ));
+        }
+        let exists = || self.state.databases().get(&config.name).is_some();
+        if config.if_not_exists && exists() {
+            return self.build_graph_info(&config.name);
+        }
+
         let database_type = match &config.type_spec {
             Some(GraphTypeSpec::Named(name)) => match name.to_lowercase().as_str() {
                 "lpg" => DatabaseType::Lpg,
@@ -567,10 +607,15 @@ impl GqlBackend for GrafeoBackend {
             schema_filename: None,
         };
 
-        self.state
-            .databases()
-            .create(&req)
-            .map_err(|e| GqlError::Session(e.to_string()))?;
+        if config.or_replace && exists() {
+            self.delete_graph(&config.name)?;
+        }
+        match self.state.databases().create(&req) {
+            Ok(()) => {}
+            // Created by a concurrent request since the check above.
+            Err(ServiceError::Conflict(_)) if config.if_not_exists && exists() => {}
+            Err(e) => return Err(GqlError::Session(e.to_string())),
+        }
 
         self.build_graph_info(&config.name)
     }
@@ -579,33 +624,21 @@ impl GqlBackend for GrafeoBackend {
         &self,
         _schema: &str,
         name: &str,
-        _if_exists: bool,
+        if_exists: bool,
     ) -> Result<bool, GqlError> {
-        // Invalidate GWP sessions targeting this graph before deleting
-        let sessions_to_remove: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|entry| entry.value().lock().database == name)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        if !sessions_to_remove.is_empty() {
-            tracing::info!(
-                graph = %name,
-                count = sessions_to_remove.len(),
-                "Invalidating GWP sessions for dropped graph"
-            );
-            for sid in &sessions_to_remove {
-                self.sessions.remove(sid);
-            }
+        if self.state.databases().get(name).is_none() {
+            return if if_exists {
+                Ok(false)
+            } else {
+                Err(GqlError::Session(format!("database '{name}' not found")))
+            };
         }
-
-        self.state
-            .databases()
-            .delete(name)
-            .map_err(|e| GqlError::Session(e.to_string()))?;
-
-        Ok(true)
+        match self.delete_graph(name) {
+            Ok(()) => Ok(true),
+            // Dropped by a concurrent request since the check above.
+            Err(_) if if_exists && self.state.databases().get(name).is_none() => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     async fn get_graph_info(&self, _schema: &str, name: &str) -> Result<GraphInfo, GqlError> {
