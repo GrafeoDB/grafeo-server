@@ -587,7 +587,7 @@ async fn readme_examples_sparql() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rows"][0][0], "Alice");
+    assert_eq!(body["rows"][0][0], "Alice", "{body}");
 }
 
 #[tokio::test]
@@ -4002,8 +4002,10 @@ async fn import_tsv_database_not_found() {
 // Compact endpoint
 // ---------------------------------------------------------------------------
 
+/// Engine 0.6 compacts in every build: the `compact-store` feature is no
+/// longer needed, and the response carries the engine's report.
 #[tokio::test]
-async fn compact_feature_not_enabled_returns_400() {
+async fn compact_works_in_every_build() {
     let base = spawn_server().await;
     let client = Client::new();
 
@@ -4012,14 +4014,21 @@ async fn compact_feature_not_enabled_returns_400() {
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["compacted"], true, "{body}");
+    assert_eq!(body["checkpointed"], false, "in memory: {body}");
+    assert!(body["versions_collected"].is_u64(), "{body}");
+    assert!(body["duration_ms"].is_u64(), "{body}");
 
-    let status = resp.status().as_u16();
-    let expected = if cfg!(feature = "compact-store") {
-        200
-    } else {
-        400
-    };
-    assert_eq!(status, expected, "unexpected status: {status}");
+    // The database keeps taking writes.
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:AfterCompact)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]
@@ -4032,14 +4041,7 @@ async fn compact_not_found() {
         .send()
         .await
         .unwrap();
-
-    // 404 (database not found) or 400 (feature not enabled).
-    let status = resp.status().as_u16();
-    assert!(
-        (cfg!(feature = "compact-store") && status == 404)
-            || (!cfg!(feature = "compact-store") && status == 400),
-        "unexpected status: {status}"
-    );
+    assert_eq!(resp.status(), 404);
 }
 
 // ---------------------------------------------------------------------------
@@ -7351,6 +7353,74 @@ async fn bolt_auth_invalid_token_rejected() {
     assert!(result.is_err(), "invalid token should be rejected");
 }
 
+/// Regression for the RESET authentication bypass (boltr 0.2.0): a failed
+/// LOGON, then RESET, then RUN must not run the statement. boltr 0.2.1 closes
+/// the connection after the failed LOGON; with 0.2.0 the server's own guard
+/// (no engine session before LOGON) refuses the RUN. Either way nothing runs.
+#[cfg(all(feature = "bolt", feature = "auth"))]
+#[tokio::test]
+async fn bolt_failed_logon_then_reset_then_run_is_refused() {
+    use boltr::message::ClientMessage;
+    use boltr::message::ServerMessage;
+
+    let service =
+        grafeo_service::ServiceState::new_in_memory_with_auth(300, "the-token".to_string());
+    let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
+    drop(bolt_listener);
+    let options = grafeo_boltr::BoltrOptions {
+        auth_provider: service.auth().cloned(),
+        ..Default::default()
+    };
+    let backend = grafeo_boltr::GrafeoBackend::new(service.clone());
+    tokio::spawn(async move {
+        grafeo_boltr::serve(backend, bolt_addr, options)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = boltr::client::BoltConnection::connect(bolt_addr)
+        .await
+        .unwrap();
+    conn.hello(boltr::types::BoltDict::from([(
+        "user_agent".to_string(),
+        boltr::types::BoltValue::String("bypass-test".to_string()),
+    )]))
+    .await
+    .unwrap();
+    assert!(
+        conn.logon("bearer", None, Some("wrong-token"))
+            .await
+            .is_err()
+    );
+
+    // RESET, then RUN a write. The server either closed the connection or
+    // answers RUN with a FAILURE (after RESET's own answer); it never
+    // answers RUN with SUCCESS.
+    let mut ran = false;
+    if conn.send(&ClientMessage::Reset).await.is_ok() {
+        let _reset_answer = conn.recv().await;
+        if conn
+            .send(&ClientMessage::Run {
+                query: "INSERT (:Bypass)".to_string(),
+                parameters: std::collections::HashMap::new(),
+                extra: boltr::types::BoltDict::new(),
+            })
+            .await
+            .is_ok()
+        {
+            ran = matches!(conn.recv().await, Ok(ServerMessage::Success { .. }));
+            if conn.send(&ClientMessage::pull_all()).await.is_ok() {
+                let _ = conn.recv().await;
+            }
+        }
+    }
+    assert!(!ran, "RUN after a failed LOGON and RESET succeeded");
+    let db = service.databases().get("default").unwrap().db();
+    assert_eq!(db.node_count().unwrap(), 0, "the unauthenticated write ran");
+}
+
 #[cfg(all(feature = "bolt", feature = "auth"))]
 #[tokio::test]
 async fn bolt_auth_read_only_token_cannot_write() {
@@ -8871,13 +8941,13 @@ async fn upsert_into_named_graph_and_missing_graph() {
     .await;
     assert_eq!(body["rows"][0][0], 0, "the default graph is untouched");
 
-    let (status, _) = post_json(
+    let (status, body) = post_json(
         &client,
         format!("{base}/db/default/upsert/nodes"),
         json!({"labels": ["X"], "rows": [{"id": 1}], "graph": "nope"}),
     )
     .await;
-    assert_eq!(status, 404);
+    assert_eq!(status, 404, "{body}");
 }
 
 #[tokio::test]
@@ -8918,4 +8988,473 @@ async fn upsert_rejects_integer_keys_beyond_i64() {
     let text = resp.text().await.unwrap();
     assert!(text.contains("row 3"), "body: {text}");
     assert!(text.contains("out of range"), "body: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// Write conflicts: 409 over HTTP, a transient error over Bolt, 40001 over GWP
+// ---------------------------------------------------------------------------
+
+/// Begins an HTTP transaction and returns its session id.
+async fn http_begin(client: &Client, base: &str) -> String {
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["session_id"].as_str().unwrap().to_string()
+}
+
+/// Runs a statement in an HTTP transaction; the status and the body.
+async fn http_tx_query(client: &Client, base: &str, session: &str, query: &str) -> (u16, Value) {
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("X-Session-Id", session)
+        .json(&json!({ "query": query }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Commits an HTTP transaction; the status and the body.
+async fn http_commit(client: &Client, base: &str, session: &str) -> (u16, Value) {
+    let resp = client
+        .post(format!("{base}/tx/commit"))
+        .header("X-Session-Id", session)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Two transactions write the same node: the second gets 409 `conflict` with
+/// the engine's reason (on its write or on its commit, whichever the engine
+/// detects it at), its session is gone, and a retry succeeds.
+#[tokio::test]
+async fn http_write_conflict_is_409_and_a_retry_succeeds() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let first = http_begin(&client, &base).await;
+    let second = http_begin(&client, &base).await;
+    let (status, body) =
+        http_tx_query(&client, &base, &first, "MATCH (n:Acct {id: 1}) SET n.v = 1").await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = http_tx_query(
+        &client,
+        &base,
+        &second,
+        "MATCH (n:Acct {id: 1}) SET n.v = 2",
+    )
+    .await;
+    let conflict = if status == 409 {
+        body
+    } else {
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &first).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &second).await;
+        assert_eq!(status, 409, "the second commit conflicts: {body}");
+        // The engine ended the transaction: the session is gone.
+        let (status, _) = http_commit(&client, &base, &second).await;
+        assert_eq!(status, 404);
+        body
+    };
+    assert_eq!(conflict["error"], "conflict", "{conflict}");
+    assert!(
+        conflict["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "the reason is in the response: {conflict}"
+    );
+
+    // Whatever was left open, finish it, then retry the second write.
+    let _ = http_commit(&client, &base, &first).await;
+    let _ = http_commit(&client, &base, &second).await;
+    let retry = http_begin(&client, &base).await;
+    let (status, body) =
+        http_tx_query(&client, &base, &retry, "MATCH (n:Acct {id: 1}) SET n.v = 2").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http_commit(&client, &base, &retry).await;
+    assert_eq!(status, 200, "{body}");
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Acct {id: 1}) RETURN n.v AS v"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 2, "{body}");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_write_conflict_is_gqlstatus_40001() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut first_session = conn.create_session().await.unwrap();
+    let mut second_session = conn.create_session().await.unwrap();
+    let mut first = first_session.begin_transaction().await.unwrap();
+    let mut second = second_session.begin_transaction().await.unwrap();
+
+    let mut cursor = first
+        .execute_simple("MATCH (n:Acct {id: 1}) SET n.v = 1")
+        .await
+        .unwrap();
+    assert!(cursor.is_success().await.unwrap());
+
+    let mut cursor = second
+        .execute_simple("MATCH (n:Acct {id: 1}) SET n.v = 2")
+        .await
+        .unwrap();
+    let code = if cursor.is_success().await.unwrap() {
+        first.commit().await.unwrap();
+        match second.commit().await {
+            Err(gwp::error::GqlError::Status { status }) => status.code.clone(),
+            other => panic!("expected a GQLSTATUS from the commit, got {other:?}"),
+        }
+    } else {
+        let summary = cursor.summary().await.unwrap().cloned().unwrap();
+        summary.status.unwrap().code
+    };
+    assert_eq!(code, "40001", "a write conflict is a serialization failure");
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_write_conflict_is_a_transient_error() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut first = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let mut second = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    first.begin().await.unwrap();
+    second.begin().await.unwrap();
+    let _summary = first
+        .run("MATCH (n:Acct {id: 1}) SET n.v = 1")
+        .await
+        .unwrap();
+
+    let code = match second.run("MATCH (n:Acct {id: 1}) SET n.v = 2").await {
+        Err(boltr::BoltError::Query { code, .. }) => code,
+        Err(other) => panic!("expected a FAILURE with a code, got {other:?}"),
+        Ok(_) => {
+            first.commit().await.unwrap();
+            match second.commit().await {
+                Err(boltr::BoltError::Query { code, .. }) => code,
+                other => panic!("expected a FAILURE with a code, got {other:?}"),
+            }
+        }
+    };
+    assert!(
+        code.starts_with("Neo.TransientError."),
+        "drivers retry transient errors only: {code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Query language names
+// ---------------------------------------------------------------------------
+
+/// An unknown language is a 400 that names it and the supported ones; it ran
+/// as GQL before 0.6.
+#[tokio::test]
+async fn unknown_language_is_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    for language in ["aql", "cyper", ""] {
+        let resp = client
+            .post(format!("{base}/query"))
+            .json(&json!({"query": "RETURN 1 AS x", "language": language}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "language {language:?}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "bad_request");
+        let detail = body["detail"].as_str().unwrap();
+        assert!(
+            detail.contains(&format!("unsupported language '{language}'"))
+                && detail.contains("sql-pgq"),
+            "{detail}"
+        );
+    }
+}
+
+/// Language names match without regard to case: `"Cypher"` runs as Cypher.
+#[cfg(feature = "cypher")]
+#[tokio::test]
+async fn language_names_ignore_case() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    for language in ["Cypher", "CYPHER", "cypher"] {
+        let resp = client
+            .post(format!("{base}/query"))
+            .json(&json!({"query": "RETURN toInteger('7') AS x", "language": language}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "language {language:?}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["rows"][0][0], 7, "{body}");
+    }
+}
+
+/// A batch with an unknown language fails before anything runs.
+#[tokio::test]
+async fn batch_with_unknown_language_is_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": [
+            {"query": "INSERT (:Batch)"},
+            {"query": "RETURN 1", "language": "aql"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("query at index 1 failed: unsupported language 'aql'"),
+        "{body}"
+    );
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Batch) RETURN count(n) AS c"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0, "nothing ran: {body}");
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_unknown_language_is_refused() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut conn = boltr::client::BoltConnection::connect(bolt_addr)
+        .await
+        .unwrap();
+    conn.hello(boltr::types::BoltDict::new()).await.unwrap();
+    conn.logon("none", None, None).await.unwrap();
+    let extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("aql".to_string()),
+    )]);
+    let err = conn
+        .run("RETURN 1", std::collections::HashMap::new(), extra)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported language 'aql'"),
+        "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exact decimals (engine 0.6: a GQL number with a point is a decimal)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn http_returns_a_decimal_with_its_scale() {
+    let base = spawn_server().await;
+    let resp = Client::new()
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "RETURN 1.50 AS d, 0.1 + 0.2 = 0.3 AS exact"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], json!({"$decimal": "1.50"}), "{body}");
+    assert_eq!(body["rows"][0][1], true, "{body}");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_returns_a_decimal() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    let mut cursor = session
+        .execute("RETURN 1.50 AS d", std::collections::HashMap::new())
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    match &rows[0][0] {
+        gwp::types::Value::Decimal { unscaled, scale } => {
+            assert_eq!(unscaled, &vec![0x00, 0x96], "150");
+            assert_eq!(*scale, 2);
+        }
+        other => panic!("expected a decimal, got {other:?}"),
+    }
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_returns_a_decimal_as_its_text() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let result = session.run("RETURN 1.50 AS d").await.unwrap();
+    assert_eq!(
+        result.records[0][0],
+        boltr::types::BoltValue::String("1.50".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RDF terms (engine 0.6: SPARQL results hold typed terms)
+// ---------------------------------------------------------------------------
+
+/// Inserts an IRI, a tagged literal and a typed literal for the term tests.
+async fn insert_rdf_terms(client: &Client, base: &str) {
+    let resp = client
+        .post(format!("{base}/sparql"))
+        .json(&json!({"query": "PREFIX ex: <http://example.org/> INSERT DATA { ex:alix ex:name \"Alix\"@en . ex:alix ex:age 30 }"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+#[tokio::test]
+async fn sparql_rows_hold_plain_values() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .post(format!("{base}/sparql"))
+        .json(&json!({"query": "PREFIX ex: <http://example.org/> SELECT ?s ?name ?age WHERE { ?s ex:name ?name . ?s ex:age ?age }"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["rows"][0],
+        json!(["http://example.org/alix", "Alix", 30]),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn sparql_results_json_keeps_the_terms() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .post(format!("{base}/db/default/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/sparql-results+json")
+        .body("PREFIX ex: <http://example.org/> SELECT ?s ?name ?age WHERE { ?s ex:name ?name . ?s ex:age ?age }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    let binding = &body["results"]["bindings"][0];
+    assert_eq!(
+        binding["s"],
+        json!({"type": "uri", "value": "http://example.org/alix"}),
+        "{body}"
+    );
+    assert_eq!(
+        binding["name"],
+        json!({"type": "literal", "value": "Alix", "xml:lang": "en"}),
+        "{body}"
+    );
+    assert_eq!(
+        binding["age"],
+        json!({"type": "literal", "value": "30", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_store_get_writes_the_terms_as_ntriples() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .get(format!("{base}/db/default/graph-store?default"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<http://example.org/alix> <http://example.org/name> \"Alix\"@en ."),
+        "{body}"
+    );
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_returns_rdf_terms_as_plain_values() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    insert_rdf_terms(&Client::new(), &http).await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let sparql = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("sparql".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "PREFIX ex: <http://example.org/> SELECT ?s ?name WHERE { ?s ex:name ?name }",
+            std::collections::HashMap::new(),
+            sparql,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.records[0],
+        vec![
+            boltr::types::BoltValue::String("http://example.org/alix".to_string()),
+            boltr::types::BoltValue::String("Alix".to_string()),
+        ]
+    );
+    session.close().await.unwrap();
 }
