@@ -2149,299 +2149,197 @@ async fn gwp_health_reports_gwp_feature() {
 // GWP Database Lifecycle (v0.4.1)
 // ---------------------------------------------------------------------------
 
+/// Opens a GWP connection and a session on it.
 #[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_list_databases_returns_default() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+async fn gwp_session(endpoint: &str) -> (gwp::client::GqlConnection, gwp::client::GqlSession) {
+    let conn = gwp::client::GqlConnection::connect(endpoint).await.unwrap();
+    let session = conn.create_session().await.unwrap();
+    (conn, session)
+}
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 1);
-    assert_eq!(databases[0].name, "default");
+/// The names of a catalog listing.
+#[cfg(feature = "gwp")]
+fn graph_names(graphs: &[gwp::server::GraphInfo]) -> Vec<String> {
+    graphs.iter().map(|g| g.name.clone()).collect()
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
-async fn gwp_create_and_delete_database() {
+async fn gwp_catalog_lists_the_graphs_of_the_database() {
     let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    // Create a database
-    let info = catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "gwp-test-db".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(info.name, "gwp-test-db");
-    assert_eq!(info.node_count, 0);
-
-    // List should show 2 databases
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 2);
-
-    // Delete
-    let deleted = catalog_client
-        .drop_graph("default", "gwp-test-db", false)
-        .await
-        .unwrap();
-    assert!(deleted);
-
-    // List should show 1 database
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 1);
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_get_database_info() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let info = catalog_client
-        .get_graph_info("default", "default")
-        .await
-        .unwrap();
-    assert_eq!(info.name, "default");
-    assert_eq!(info.graph_type, "lpg");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_create_database_then_query() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-
-    // Create database via GWP
-    let mut catalog_client = conn.create_catalog_client();
-    catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "query-db".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
-        .await
-        .unwrap();
-
-    // Create session, configure to the new database, execute query
-    let mut session = conn.create_session().await.unwrap();
+    assert!(
+        catalog.list_graphs("default").await.unwrap().is_empty(),
+        "no named graphs yet"
+    );
     session
-        .set_parameter("_database", "query-db")
+        .execute_simple("CREATE GRAPH made_by_gql")
         .await
         .unwrap();
+    assert_eq!(
+        graph_names(&catalog.list_graphs("default").await.unwrap()),
+        vec!["made_by_gql"],
+        "the catalog and GQL statements share one namespace"
+    );
+    session.close().await.unwrap();
+}
 
-    let mut cursor = session
-        .execute(
-            "CREATE (:Widget {name: 'Gear'}) RETURN 'ok'",
-            std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let rows = cursor.collect_rows().await.unwrap();
-    assert_eq!(rows.len(), 1);
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_create_and_drop_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
 
-    // Verify node count via get_info
-    let info = catalog_client
-        .get_graph_info("default", "query-db")
+    let info = catalog
+        .create_graph(gwp_graph("g1", false, false))
         .await
         .unwrap();
+    assert_eq!(info.name, "g1");
+    assert_eq!(info.node_count, 0);
+    assert_eq!(info.graph_type, "lpg", "the graph has its database's model");
+
+    session.set_graph("g1").await.unwrap();
+    session.execute_simple("INSERT (:InG1)").await.unwrap();
+    let info = catalog.get_graph_info("default", "g1").await.unwrap();
     assert_eq!(info.node_count, 1);
 
+    assert!(catalog.drop_graph("default", "g1", false).await.unwrap());
+    assert!(catalog.list_graphs("default").await.unwrap().is_empty());
     session.close().await.unwrap();
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
-async fn gwp_delete_then_recreate_database() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+async fn gwp_catalog_follows_the_session_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    session.set_parameter("_database", "other").await.unwrap();
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+    let mut in_session = session.catalog();
+    in_session
+        .create_graph(gwp_graph("in_other", false, false))
         .await
         .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let config = gwp::server::CreateGraphConfig {
-        schema: "default".to_string(),
-        name: "ephemeral".to_string(),
-        if_not_exists: false,
-        or_replace: false,
-        type_spec: None,
-        copy_of: None,
-        storage_mode: "inmemory".to_string(),
-        memory_limit_bytes: None,
-        backward_edges: None,
-        threads: None,
-        wal_enabled: None,
-        wal_durability: None,
-    };
-
-    // Create, delete, recreate: exercises the close barrier path
-    catalog_client.create_graph(config.clone()).await.unwrap();
-    catalog_client
-        .drop_graph("default", "ephemeral", false)
-        .await
-        .unwrap();
-    catalog_client.create_graph(config).await.unwrap();
-
-    // Should be queryable
-    let mut session = conn.create_session().await.unwrap();
-    session
-        .set_parameter("_database", "ephemeral")
-        .await
-        .unwrap();
-
-    let mut cursor = session
-        .execute(
-            "MATCH (n) RETURN count(n)",
-            std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let rows = cursor.collect_rows().await.unwrap();
-    assert_eq!(rows.len(), 1, "should return a count row");
-
-    session.close().await.unwrap();
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_delete_nonexistent_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let result = catalog_client
-        .drop_graph("default", "nonexistent", false)
-        .await;
-    assert!(result.is_err(), "deleting nonexistent database should fail");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_create_duplicate_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let config = gwp::server::CreateGraphConfig {
-        schema: "default".to_string(),
-        name: "dup".to_string(),
-        if_not_exists: false,
-        or_replace: false,
-        type_spec: None,
-        copy_of: None,
-        storage_mode: "inmemory".to_string(),
-        memory_limit_bytes: None,
-        backward_edges: None,
-        threads: None,
-        wal_enabled: None,
-        wal_durability: None,
-    };
-
-    catalog_client.create_graph(config.clone()).await.unwrap();
-    let result = catalog_client.create_graph(config).await;
-    assert!(result.is_err(), "creating duplicate database should fail");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_configure_deleted_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    // Create then delete a database
-    catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "doomed".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
-        .await
-        .unwrap();
-    catalog_client
-        .drop_graph("default", "doomed", false)
-        .await
-        .unwrap();
-
-    // Configuring a session to the deleted database should fail
-    let mut session = conn.create_session().await.unwrap();
-    let result = session.set_parameter("_database", "doomed").await;
-    assert!(
-        result.is_err(),
-        "configuring session to deleted database should fail"
+    assert_eq!(
+        graph_names(&in_session.list_graphs("default").await.unwrap()),
+        vec!["in_other"]
     );
 
+    let mut without_session = conn.create_catalog_client();
+    assert!(
+        without_session
+            .list_graphs("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a catalog call without a session sees the default database"
+    );
+
+    let resp = Client::new()
+        .get(format!("{http}/db/other/graphs"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.to_string().contains("in_other"), "{body}");
     session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_create_graph_as_copy_of() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("src", false, false))
+        .await
+        .unwrap();
+    session.set_graph("src").await.unwrap();
+    session
+        .execute_simple("INSERT (:A)-[:R]->(:B)")
+        .await
+        .unwrap();
+
+    let mut config = gwp_graph("copy", false, false);
+    config.copy_of = Some("src".to_string());
+    let info = catalog.create_graph(config).await.unwrap();
+    assert_eq!(info.node_count, 2, "COPY OF holds the source's data");
+    assert_eq!(info.edge_count, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_refuses_database_options() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let mut config = gwp_graph("opts", false, false);
+    config.storage_mode = "persistent".to_string();
+    let err = catalog.create_graph(config).await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+
+    let mut config = gwp_graph("opts", false, false);
+    config.memory_limit_bytes = Some(1 << 30);
+    let err = catalog.create_graph(config).await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+    assert!(catalog.list_graphs("default").await.unwrap().is_empty());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_duplicate_and_missing_graphs() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("dup", false, false))
+        .await
+        .unwrap();
+    let err = catalog
+        .create_graph(gwp_graph("dup", false, false))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::AlreadyExists);
+
+    let err = catalog
+        .drop_graph("default", "nope", false)
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
+    let err = catalog.get_graph_info("default", "nope").await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
 async fn gwp_list_schemas() {
     let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
     let mut catalog_client = conn.create_catalog_client();
+    catalog_client
+        .create_graph(gwp_graph("counted", false, false))
+        .await
+        .unwrap();
 
     let schemas = catalog_client.list_schemas().await.unwrap();
     assert_eq!(schemas.len(), 1);
     assert_eq!(schemas[0].name, "default");
-    assert!(schemas[0].graph_count > 0);
+    assert_eq!(schemas[0].graph_count, 1);
 }
 
 #[cfg(feature = "gwp")]
@@ -9530,22 +9428,22 @@ fn grpc_code(err: &gwp::error::GqlError) -> tonic::Code {
     }
 }
 
-/// Inserts one node into database `db` over HTTP.
+/// Inserts one node into engine graph `graph` of the default database.
 #[cfg(feature = "gwp")]
-async fn insert_one_node(http: &str, db: &str) {
-    let resp = Client::new()
-        .post(format!("{http}/query"))
-        .json(&json!({"query": "INSERT (:Kept)", "database": db}))
-        .send()
+async fn insert_one_node(gwp_endpoint: &str, graph: &str) {
+    let conn = gwp::client::GqlConnection::connect(gwp_endpoint)
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let mut session = conn.create_session().await.unwrap();
+    session.set_graph(graph).await.unwrap();
+    session.execute_simple("INSERT (:Kept)").await.unwrap();
+    session.close().await.unwrap();
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
 async fn gwp_create_graph_if_not_exists_keeps_an_existing_graph() {
-    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
@@ -9556,7 +9454,7 @@ async fn gwp_create_graph_if_not_exists_keeps_an_existing_graph() {
         .await
         .unwrap();
     assert_eq!(created.name, "g80");
-    insert_one_node(&http, "g80").await;
+    insert_one_node(&gwp_endpoint, "g80").await;
 
     let again = catalog
         .create_graph(gwp_graph("g80", true, false))
@@ -9574,7 +9472,7 @@ async fn gwp_create_graph_if_not_exists_keeps_an_existing_graph() {
 #[cfg(feature = "gwp")]
 #[tokio::test]
 async fn gwp_create_graph_or_replace_replaces_the_graph() {
-    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
@@ -9584,7 +9482,7 @@ async fn gwp_create_graph_or_replace_replaces_the_graph() {
         .create_graph(gwp_graph("g80", false, true))
         .await
         .expect("OR REPLACE creates a missing graph");
-    insert_one_node(&http, "g80").await;
+    insert_one_node(&gwp_endpoint, "g80").await;
 
     let replaced = catalog
         .create_graph(gwp_graph("g80", false, true))
@@ -9836,4 +9734,38 @@ async fn gwp_handshake_reports_grafeodb() {
     let info = resp.server_info.expect("server info");
     assert_eq!(info.name, "GrafeoDB");
     assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+}
+
+#[cfg(all(feature = "gwp", feature = "auth"))]
+#[tokio::test]
+async fn gwp_auth_catalog_needs_a_session() {
+    let gwp_endpoint = spawn_gwp_with_auth("catalog-token").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+
+    let mut without_session = conn.create_catalog_client();
+    assert!(
+        without_session.list_graphs("default").await.is_err(),
+        "with authentication on, a catalog call without a session has no identity"
+    );
+
+    let session = conn
+        .create_session_with_credentials(gwp::proto::AuthCredentials {
+            method: Some(gwp::proto::auth_credentials::Method::BearerToken(
+                "catalog-token".to_string(),
+            )),
+        })
+        .await
+        .unwrap();
+    let mut catalog = session.catalog();
+    catalog
+        .create_graph(gwp_graph("authorized", false, false))
+        .await
+        .expect("a session-bound catalog call acts as the session");
+    assert_eq!(
+        graph_names(&catalog.list_graphs("default").await.unwrap()),
+        vec!["authorized"]
+    );
+    session.close().await.unwrap();
 }
