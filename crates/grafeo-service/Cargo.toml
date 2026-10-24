@@ -82,8 +82,9 @@ parquet-import = ["grafeo-engine/parquet-import"]
 # Engine: temporal versioning
 temporal = ["grafeo-engine/temporal"]
 
-# Engine: compact columnar store (read-only, memory-efficient)
-compact-store = ["grafeo-engine/compact-store"]
+# Deprecated since 0.6.0: enables nothing. Compaction works in every build
+# (engine 0.6 `compact()` keeps one store); removed in 0.7.0.
+compact-store = []
 
 # Engine: async storage (async WAL and storage backend)
 async-storage = ["grafeo-engine/async-storage"]
