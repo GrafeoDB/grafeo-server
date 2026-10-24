@@ -30,7 +30,6 @@ serde_json = "1.0"
 serde_urlencoded = "0.7"
 
 # Error handling
-thiserror = { workspace = true }
 
 # Observability
 tracing = { workspace = true }

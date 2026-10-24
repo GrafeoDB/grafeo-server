@@ -28,7 +28,6 @@ grafeo-http = { path = "crates/grafeo-http" }
 grafeo-gwp = { path = "crates/grafeo-gwp" }
 grafeo-studio = { path = "crates/grafeo-studio" }
 grafeo-boltr = { path = "crates/grafeo-boltr" }
-grafeo-sync = { path = "crates/grafeo-sync" }
 
 # External protocol crates
 # 0.3: the RESET authentication bypass fix, handshake timeout and the

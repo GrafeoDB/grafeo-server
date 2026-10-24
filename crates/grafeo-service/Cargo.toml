@@ -28,8 +28,6 @@ serde_json = "1"
 # Schema loading (optional)
 sophia_turtle = { version = "0.10", optional = true }
 sophia_api = { version = "0.10", optional = true }
-sophia_inmem = { version = "0.10", optional = true }
-jsonschema = { version = "0.60", optional = true }
 
 # Auth (optional)
 subtle = { version = "2", optional = true }
@@ -109,9 +107,9 @@ ring-index = ["grafeo-engine/ring-index", "triple-store"]
 arrow-export = ["grafeo-engine/arrow-export"]
 
 # Schema loading
-owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
+owl-schema = ["dep:sophia_turtle", "dep:sophia_api"]
 rdfs-schema = ["owl-schema"]
-json-schema = ["dep:jsonschema"]
+json-schema = []
 
 # Sync: pull-based changefeed for offline-first applications
 sync = ["cdc"]
