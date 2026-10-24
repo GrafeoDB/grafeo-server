@@ -24,7 +24,7 @@ impl LanguageMetrics {
 }
 
 /// Recognized query language for metrics labelling.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Language {
     Gql,
     Cypher,
@@ -236,15 +236,30 @@ fn gauge(out: &mut String, name: &str, help: &str, value: impl std::fmt::Display
     writeln!(out, "{name} {value}").unwrap();
 }
 
-/// Map a language string to a `Language` enum variant.
-pub fn determine_language(lang: Option<&str>) -> Language {
-    match lang {
-        Some("cypher") => Language::Cypher,
-        Some("graphql") => Language::Graphql,
-        Some("gremlin") => Language::Gremlin,
-        Some("sparql") => Language::Sparql,
-        Some("sql" | "sql-pgq") => Language::SqlPgq,
-        _ => Language::Gql,
+/// The languages a request may name, for error messages.
+pub const SUPPORTED_LANGUAGES: &str = "gql, cypher, graphql, gremlin, sparql, sql-pgq";
+
+/// Maps a request's `language` to a [`Language`]: `None` is GQL, the names
+/// match without regard to case (`"Cypher"`, `"SPARQL"`), and `sql` is an
+/// alias of `sql-pgq`. Any other name is a bad request; it used to run as
+/// GQL, so a Cypher query sent as `"Cypher"` ran with GQL semantics.
+///
+/// A language this build leaves out is accepted here and refused by the
+/// dispatcher with a bad request that names the missing feature.
+pub fn determine_language(lang: Option<&str>) -> Result<Language, crate::error::ServiceError> {
+    let Some(name) = lang else {
+        return Ok(Language::Gql);
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "gql" => Ok(Language::Gql),
+        "cypher" => Ok(Language::Cypher),
+        "graphql" => Ok(Language::Graphql),
+        "gremlin" => Ok(Language::Gremlin),
+        "sparql" => Ok(Language::Sparql),
+        "sql" | "sql-pgq" => Ok(Language::SqlPgq),
+        _ => Err(crate::error::ServiceError::BadRequest(format!(
+            "unsupported language '{name}' (supported: {SUPPORTED_LANGUAGES})"
+        ))),
     }
 }
 
@@ -254,6 +269,7 @@ mod tests {
 
     #[test]
     fn determine_language_mapping() {
+        let determine_language = |lang| determine_language(lang).unwrap();
         assert!(matches!(determine_language(None), Language::Gql));
         assert!(matches!(determine_language(Some("gql")), Language::Gql));
         assert!(matches!(
@@ -277,7 +293,33 @@ mod tests {
             determine_language(Some("sql-pgq")),
             Language::SqlPgq
         ));
-        assert!(matches!(determine_language(Some("unknown")), Language::Gql));
+        assert!(matches!(determine_language(Some("GQL")), Language::Gql));
+        assert!(matches!(
+            determine_language(Some("Cypher")),
+            Language::Cypher
+        ));
+        assert!(matches!(
+            determine_language(Some("SPARQL")),
+            Language::Sparql
+        ));
+        assert!(matches!(
+            determine_language(Some("SQL-PGQ")),
+            Language::SqlPgq
+        ));
+    }
+
+    #[test]
+    fn unknown_languages_are_bad_requests() {
+        for name in ["unknown", "aql", "cyper", "", "sql_pgq"] {
+            let err = determine_language(Some(name)).unwrap_err();
+            let crate::error::ServiceError::BadRequest(msg) = err else {
+                panic!("expected a bad request for {name:?}, got {err:?}");
+            };
+            assert!(
+                msg.contains(&format!("'{name}'")) && msg.contains(SUPPORTED_LANGUAGES),
+                "{msg}"
+            );
+        }
     }
 
     #[test]
