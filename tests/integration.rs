@@ -587,7 +587,7 @@ async fn readme_examples_sparql() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["rows"][0][0], "Alice");
+    assert_eq!(body["rows"][0][0], "Alice", "{body}");
 }
 
 #[tokio::test]
@@ -2149,293 +2149,197 @@ async fn gwp_health_reports_gwp_feature() {
 // GWP Database Lifecycle (v0.4.1)
 // ---------------------------------------------------------------------------
 
+/// Opens a GWP connection and a session on it.
 #[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_list_databases_returns_default() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+async fn gwp_session(endpoint: &str) -> (gwp::client::GqlConnection, gwp::client::GqlSession) {
+    let conn = gwp::client::GqlConnection::connect(endpoint).await.unwrap();
+    let session = conn.create_session().await.unwrap();
+    (conn, session)
+}
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 1);
-    assert_eq!(databases[0].name, "default");
+/// The names of a catalog listing.
+#[cfg(feature = "gwp")]
+fn graph_names(graphs: &[gwp::server::GraphInfo]) -> Vec<String> {
+    graphs.iter().map(|g| g.name.clone()).collect()
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
-async fn gwp_create_and_delete_database() {
+async fn gwp_catalog_lists_the_graphs_of_the_database() {
     let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+    assert!(
+        catalog.list_graphs("default").await.unwrap().is_empty(),
+        "no named graphs yet"
+    );
+    session
+        .execute_simple("CREATE GRAPH made_by_gql")
         .await
         .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
+    assert_eq!(
+        graph_names(&catalog.list_graphs("default").await.unwrap()),
+        vec!["made_by_gql"],
+        "the catalog and GQL statements share one namespace"
+    );
+    session.close().await.unwrap();
+}
 
-    // Create a database
-    let info = catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "gwp-test-db".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_create_and_drop_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
+
+    let info = catalog
+        .create_graph(gwp_graph("g1", false, false))
         .await
         .unwrap();
-    assert_eq!(info.name, "gwp-test-db");
+    assert_eq!(info.name, "g1");
     assert_eq!(info.node_count, 0);
+    assert_eq!(info.graph_type, "lpg", "the graph has its database's model");
 
-    // List should show 2 databases
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 2);
-
-    // Delete
-    let deleted = catalog_client
-        .drop_graph("default", "gwp-test-db", false)
-        .await
-        .unwrap();
-    assert!(deleted);
-
-    // List should show 1 database
-    let databases = catalog_client.list_graphs("default").await.unwrap();
-    assert_eq!(databases.len(), 1);
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_get_database_info() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let info = catalog_client
-        .get_graph_info("default", "default")
-        .await
-        .unwrap();
-    assert_eq!(info.name, "default");
-    assert_eq!(info.graph_type, "lpg");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_create_database_then_query() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-
-    // Create database via GWP
-    let mut catalog_client = conn.create_catalog_client();
-    catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "query-db".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
-        .await
-        .unwrap();
-
-    // Create session, configure to the new database, execute query
-    let mut session = conn.create_session().await.unwrap();
-    session.set_graph("query-db").await.unwrap();
-
-    let mut cursor = session
-        .execute(
-            "CREATE (:Widget {name: 'Gear'}) RETURN 'ok'",
-            std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let rows = cursor.collect_rows().await.unwrap();
-    assert_eq!(rows.len(), 1);
-
-    // Verify node count via get_info
-    let info = catalog_client
-        .get_graph_info("default", "query-db")
-        .await
-        .unwrap();
+    session.set_graph("g1").await.unwrap();
+    session.execute_simple("INSERT (:InG1)").await.unwrap();
+    let info = catalog.get_graph_info("default", "g1").await.unwrap();
     assert_eq!(info.node_count, 1);
 
+    assert!(catalog.drop_graph("default", "g1", false).await.unwrap());
+    assert!(catalog.list_graphs("default").await.unwrap().is_empty());
     session.close().await.unwrap();
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
-async fn gwp_delete_then_recreate_database() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+async fn gwp_catalog_follows_the_session_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    session.set_parameter("_database", "other").await.unwrap();
 
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+    let mut in_session = session.catalog();
+    in_session
+        .create_graph(gwp_graph("in_other", false, false))
         .await
         .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let config = gwp::server::CreateGraphConfig {
-        schema: "default".to_string(),
-        name: "ephemeral".to_string(),
-        if_not_exists: false,
-        or_replace: false,
-        type_spec: None,
-        copy_of: None,
-        storage_mode: "inmemory".to_string(),
-        memory_limit_bytes: None,
-        backward_edges: None,
-        threads: None,
-        wal_enabled: None,
-        wal_durability: None,
-    };
-
-    // Create, delete, recreate: exercises the close barrier path
-    catalog_client.create_graph(config.clone()).await.unwrap();
-    catalog_client
-        .drop_graph("default", "ephemeral", false)
-        .await
-        .unwrap();
-    catalog_client.create_graph(config).await.unwrap();
-
-    // Should be queryable
-    let mut session = conn.create_session().await.unwrap();
-    session.set_graph("ephemeral").await.unwrap();
-
-    let mut cursor = session
-        .execute(
-            "MATCH (n) RETURN count(n)",
-            std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let rows = cursor.collect_rows().await.unwrap();
-    assert_eq!(rows.len(), 1, "should return a count row");
-
-    session.close().await.unwrap();
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_delete_nonexistent_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let result = catalog_client
-        .drop_graph("default", "nonexistent", false)
-        .await;
-    assert!(result.is_err(), "deleting nonexistent database should fail");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_create_duplicate_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    let config = gwp::server::CreateGraphConfig {
-        schema: "default".to_string(),
-        name: "dup".to_string(),
-        if_not_exists: false,
-        or_replace: false,
-        type_spec: None,
-        copy_of: None,
-        storage_mode: "inmemory".to_string(),
-        memory_limit_bytes: None,
-        backward_edges: None,
-        threads: None,
-        wal_enabled: None,
-        wal_durability: None,
-    };
-
-    catalog_client.create_graph(config.clone()).await.unwrap();
-    let result = catalog_client.create_graph(config).await;
-    assert!(result.is_err(), "creating duplicate database should fail");
-}
-
-#[cfg(feature = "gwp")]
-#[tokio::test]
-async fn gwp_configure_deleted_database_fails() {
-    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
-    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
-        .await
-        .unwrap();
-    let mut catalog_client = conn.create_catalog_client();
-
-    // Create then delete a database
-    catalog_client
-        .create_graph(gwp::server::CreateGraphConfig {
-            schema: "default".to_string(),
-            name: "doomed".to_string(),
-            if_not_exists: false,
-            or_replace: false,
-            type_spec: None,
-            copy_of: None,
-            storage_mode: "inmemory".to_string(),
-            memory_limit_bytes: None,
-            backward_edges: None,
-            threads: None,
-            wal_enabled: None,
-            wal_durability: None,
-        })
-        .await
-        .unwrap();
-    catalog_client
-        .drop_graph("default", "doomed", false)
-        .await
-        .unwrap();
-
-    // Configuring a session to the deleted database should fail
-    let mut session = conn.create_session().await.unwrap();
-    let result = session.set_graph("doomed").await;
-    assert!(
-        result.is_err(),
-        "configuring session to deleted database should fail"
+    assert_eq!(
+        graph_names(&in_session.list_graphs("default").await.unwrap()),
+        vec!["in_other"]
     );
 
+    let mut without_session = conn.create_catalog_client();
+    assert!(
+        without_session
+            .list_graphs("default")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a catalog call without a session sees the default database"
+    );
+
+    let resp = Client::new()
+        .get(format!("{http}/db/other/graphs"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.to_string().contains("in_other"), "{body}");
     session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_create_graph_as_copy_of() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let (conn, mut session) = gwp_session(&gwp_endpoint).await;
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("src", false, false))
+        .await
+        .unwrap();
+    session.set_graph("src").await.unwrap();
+    session
+        .execute_simple("INSERT (:A)-[:R]->(:B)")
+        .await
+        .unwrap();
+
+    let mut config = gwp_graph("copy", false, false);
+    config.copy_of = Some("src".to_string());
+    let info = catalog.create_graph(config).await.unwrap();
+    assert_eq!(info.node_count, 2, "COPY OF holds the source's data");
+    assert_eq!(info.edge_count, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_refuses_database_options() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let mut config = gwp_graph("opts", false, false);
+    config.storage_mode = "persistent".to_string();
+    let err = catalog.create_graph(config).await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+
+    let mut config = gwp_graph("opts", false, false);
+    config.memory_limit_bytes = Some(1 << 30);
+    let err = catalog.create_graph(config).await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+    assert!(catalog.list_graphs("default").await.unwrap().is_empty());
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_catalog_duplicate_and_missing_graphs() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("dup", false, false))
+        .await
+        .unwrap();
+    let err = catalog
+        .create_graph(gwp_graph("dup", false, false))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::AlreadyExists);
+
+    let err = catalog
+        .drop_graph("default", "nope", false)
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
+    let err = catalog.get_graph_info("default", "nope").await.unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
 }
 
 #[cfg(feature = "gwp")]
 #[tokio::test]
 async fn gwp_list_schemas() {
     let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
-
     let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
         .await
         .unwrap();
     let mut catalog_client = conn.create_catalog_client();
+    catalog_client
+        .create_graph(gwp_graph("counted", false, false))
+        .await
+        .unwrap();
 
     let schemas = catalog_client.list_schemas().await.unwrap();
     assert_eq!(schemas.len(), 1);
     assert_eq!(schemas[0].name, "default");
-    assert!(schemas[0].graph_count > 0);
+    assert_eq!(schemas[0].graph_count, 1);
 }
 
 #[cfg(feature = "gwp")]
@@ -4002,8 +3906,10 @@ async fn import_tsv_database_not_found() {
 // Compact endpoint
 // ---------------------------------------------------------------------------
 
+/// Engine 0.6 compacts in every build: the `compact-store` feature is no
+/// longer needed, and the response carries the engine's report.
 #[tokio::test]
-async fn compact_feature_not_enabled_returns_400() {
+async fn compact_works_in_every_build() {
     let base = spawn_server().await;
     let client = Client::new();
 
@@ -4012,14 +3918,21 @@ async fn compact_feature_not_enabled_returns_400() {
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["compacted"], true, "{body}");
+    assert_eq!(body["checkpointed"], false, "in memory: {body}");
+    assert!(body["versions_collected"].is_u64(), "{body}");
+    assert!(body["duration_ms"].is_u64(), "{body}");
 
-    let status = resp.status().as_u16();
-    let expected = if cfg!(feature = "compact-store") {
-        200
-    } else {
-        400
-    };
-    assert_eq!(status, expected, "unexpected status: {status}");
+    // The database keeps taking writes.
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:AfterCompact)"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]
@@ -4032,14 +3945,7 @@ async fn compact_not_found() {
         .send()
         .await
         .unwrap();
-
-    // 404 (database not found) or 400 (feature not enabled).
-    let status = resp.status().as_u16();
-    assert!(
-        (cfg!(feature = "compact-store") && status == 404)
-            || (!cfg!(feature = "compact-store") && status == 400),
-        "unexpected status: {status}"
-    );
+    assert_eq!(resp.status(), 404);
 }
 
 // ---------------------------------------------------------------------------
@@ -7351,6 +7257,107 @@ async fn bolt_auth_invalid_token_rejected() {
     assert!(result.is_err(), "invalid token should be rejected");
 }
 
+/// Regression for the RESET authentication bypass (boltr 0.2.0): a failed
+/// LOGON, then RESET, then RUN must not run the statement. boltr 0.3.0 closes
+/// the connection after the failed LOGON; with 0.2.0 the server's own guard
+/// (no engine session before LOGON) refuses the RUN. Either way nothing runs.
+#[cfg(all(feature = "bolt", feature = "auth"))]
+#[tokio::test]
+async fn bolt_failed_logon_then_reset_then_run_is_refused() {
+    use boltr::message::ClientMessage;
+    use boltr::message::ServerMessage;
+
+    let service =
+        grafeo_service::ServiceState::new_in_memory_with_auth(300, "the-token".to_string());
+    let bolt_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bolt_addr: SocketAddr = bolt_listener.local_addr().unwrap();
+    drop(bolt_listener);
+    let options = grafeo_boltr::BoltrOptions {
+        auth_provider: service.auth().cloned(),
+        ..Default::default()
+    };
+    let backend = grafeo_boltr::GrafeoBackend::new(service.clone());
+    tokio::spawn(async move {
+        grafeo_boltr::serve(backend, bolt_addr, options)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = boltr::client::BoltConnection::connect(bolt_addr)
+        .await
+        .unwrap();
+    conn.hello(boltr::types::BoltDict::from([(
+        "user_agent".to_string(),
+        boltr::types::BoltValue::String("bypass-test".to_string()),
+    )]))
+    .await
+    .unwrap();
+    assert!(
+        conn.logon("bearer", None, Some("wrong-token"))
+            .await
+            .is_err()
+    );
+
+    // RESET, then RUN a write. The server either closed the connection or
+    // answers RUN with a FAILURE (after RESET's own answer); it never
+    // answers RUN with SUCCESS.
+    let mut ran = false;
+    if conn.send(&ClientMessage::Reset).await.is_ok() {
+        let _reset_answer = conn.recv().await;
+        if conn
+            .send(&ClientMessage::Run {
+                query: "INSERT (:Bypass)".to_string(),
+                parameters: std::collections::HashMap::new(),
+                extra: boltr::types::BoltDict::new(),
+            })
+            .await
+            .is_ok()
+        {
+            ran = matches!(conn.recv().await, Ok(ServerMessage::Success { .. }));
+            if conn.send(&ClientMessage::pull_all()).await.is_ok() {
+                let _ = conn.recv().await;
+            }
+        }
+    }
+    assert!(!ran, "RUN after a failed LOGON and RESET succeeded");
+    let db = service.databases().get("default").unwrap().db();
+    assert_eq!(db.node_count().unwrap(), 0, "the unauthenticated write ran");
+}
+
+/// The message cap before LOGON (boltr 0.3): a HELLO larger than
+/// `max_unauthenticated_message_size` is refused, a normal one is not.
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_caps_messages_before_logon() {
+    let service = grafeo_service::ServiceState::new_in_memory(300);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    drop(listener);
+    let options = grafeo_boltr::BoltrOptions {
+        max_unauthenticated_message_size: Some(1024),
+        handshake_timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    };
+    tokio::spawn(async move {
+        grafeo_boltr::serve(grafeo_boltr::GrafeoBackend::new(service), addr, options)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let hello = |agent: String| async move {
+        let mut conn = boltr::client::BoltConnection::connect(addr).await.unwrap();
+        conn.hello(boltr::types::BoltDict::from([(
+            "user_agent".to_string(),
+            boltr::types::BoltValue::String(agent),
+        )]))
+        .await
+    };
+    assert!(hello("small".to_string()).await.is_ok());
+    assert!(hello("x".repeat(4096)).await.is_err());
+}
+
 #[cfg(all(feature = "bolt", feature = "auth"))]
 #[tokio::test]
 async fn bolt_auth_read_only_token_cannot_write() {
@@ -8871,13 +8878,13 @@ async fn upsert_into_named_graph_and_missing_graph() {
     .await;
     assert_eq!(body["rows"][0][0], 0, "the default graph is untouched");
 
-    let (status, _) = post_json(
+    let (status, body) = post_json(
         &client,
         format!("{base}/db/default/upsert/nodes"),
         json!({"labels": ["X"], "rows": [{"id": 1}], "graph": "nope"}),
     )
     .await;
-    assert_eq!(status, 404);
+    assert_eq!(status, 404, "{body}");
 }
 
 #[tokio::test]
@@ -8918,4 +8925,847 @@ async fn upsert_rejects_integer_keys_beyond_i64() {
     let text = resp.text().await.unwrap();
     assert!(text.contains("row 3"), "body: {text}");
     assert!(text.contains("out of range"), "body: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// Write conflicts: 409 over HTTP, a transient error over Bolt, 40001 over GWP
+// ---------------------------------------------------------------------------
+
+/// Begins an HTTP transaction and returns its session id.
+async fn http_begin(client: &Client, base: &str) -> String {
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["session_id"].as_str().unwrap().to_string()
+}
+
+/// Runs a statement in an HTTP transaction; the status and the body.
+async fn http_tx_query(client: &Client, base: &str, session: &str, query: &str) -> (u16, Value) {
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("X-Session-Id", session)
+        .json(&json!({ "query": query }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Commits an HTTP transaction; the status and the body.
+async fn http_commit(client: &Client, base: &str, session: &str) -> (u16, Value) {
+    let resp = client
+        .post(format!("{base}/tx/commit"))
+        .header("X-Session-Id", session)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Two transactions write the same node: the second gets 409 `conflict` with
+/// the engine's reason (on its write or on its commit, whichever the engine
+/// detects it at), its session is gone, and a retry succeeds.
+#[tokio::test]
+async fn http_write_conflict_is_409_and_a_retry_succeeds() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let first = http_begin(&client, &base).await;
+    let second = http_begin(&client, &base).await;
+    let (status, body) =
+        http_tx_query(&client, &base, &first, "MATCH (n:Acct {id: 1}) SET n.v = 1").await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = http_tx_query(
+        &client,
+        &base,
+        &second,
+        "MATCH (n:Acct {id: 1}) SET n.v = 2",
+    )
+    .await;
+    let conflict = if status == 409 {
+        body
+    } else {
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &first).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &second).await;
+        assert_eq!(status, 409, "the second commit conflicts: {body}");
+        // The engine ended the transaction: the session is gone.
+        let (status, _) = http_commit(&client, &base, &second).await;
+        assert_eq!(status, 404);
+        body
+    };
+    assert_eq!(conflict["error"], "conflict", "{conflict}");
+    assert!(
+        conflict["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "the reason is in the response: {conflict}"
+    );
+
+    // Whatever was left open, finish it, then retry the second write.
+    let _ = http_commit(&client, &base, &first).await;
+    let _ = http_commit(&client, &base, &second).await;
+    let retry = http_begin(&client, &base).await;
+    let (status, body) =
+        http_tx_query(&client, &base, &retry, "MATCH (n:Acct {id: 1}) SET n.v = 2").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http_commit(&client, &base, &retry).await;
+    assert_eq!(status, 200, "{body}");
+
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Acct {id: 1}) RETURN n.v AS v"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 2, "{body}");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_write_conflict_is_gqlstatus_40001() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut first_session = conn.create_session().await.unwrap();
+    let mut second_session = conn.create_session().await.unwrap();
+    let mut first = first_session.begin_transaction().await.unwrap();
+    let mut second = second_session.begin_transaction().await.unwrap();
+
+    let mut cursor = first
+        .execute_simple("MATCH (n:Acct {id: 1}) SET n.v = 1")
+        .await
+        .unwrap();
+    assert!(cursor.is_success().await.unwrap());
+
+    let mut cursor = second
+        .execute_simple("MATCH (n:Acct {id: 1}) SET n.v = 2")
+        .await
+        .unwrap();
+    let code = if cursor.is_success().await.unwrap() {
+        first.commit().await.unwrap();
+        match second.commit().await {
+            Err(gwp::error::GqlError::Status { status }) => status.code.clone(),
+            other => panic!("expected a GQLSTATUS from the commit, got {other:?}"),
+        }
+    } else {
+        let summary = cursor.summary().await.unwrap().cloned().unwrap();
+        summary.status.unwrap().code
+    };
+    assert_eq!(code, "40001", "a write conflict is a serialization failure");
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_write_conflict_is_a_transient_error() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": "INSERT (:Acct {id: 1, v: 0})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut first = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let mut second = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    first.begin().await.unwrap();
+    second.begin().await.unwrap();
+    let _summary = first
+        .run("MATCH (n:Acct {id: 1}) SET n.v = 1")
+        .await
+        .unwrap();
+
+    let code = match second.run("MATCH (n:Acct {id: 1}) SET n.v = 2").await {
+        Err(boltr::BoltError::Query { code, .. }) => code,
+        Err(other) => panic!("expected a FAILURE with a code, got {other:?}"),
+        Ok(_) => {
+            first.commit().await.unwrap();
+            match second.commit().await {
+                Err(boltr::BoltError::Query { code, .. }) => code,
+                other => panic!("expected a FAILURE with a code, got {other:?}"),
+            }
+        }
+    };
+    assert!(
+        code.starts_with("Neo.TransientError."),
+        "drivers retry transient errors only: {code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Query language names
+// ---------------------------------------------------------------------------
+
+/// An unknown language is a 400 that names it and the supported ones; it ran
+/// as GQL before 0.6.
+#[tokio::test]
+async fn unknown_language_is_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    for language in ["aql", "cyper", ""] {
+        let resp = client
+            .post(format!("{base}/query"))
+            .json(&json!({"query": "RETURN 1 AS x", "language": language}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "language {language:?}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "bad_request");
+        let detail = body["detail"].as_str().unwrap();
+        assert!(
+            detail.contains(&format!("unsupported language '{language}'"))
+                && detail.contains("sql-pgq"),
+            "{detail}"
+        );
+    }
+}
+
+/// Language names match without regard to case: `"Cypher"` runs as Cypher.
+#[cfg(feature = "cypher")]
+#[tokio::test]
+async fn language_names_ignore_case() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    for language in ["Cypher", "CYPHER", "cypher"] {
+        let resp = client
+            .post(format!("{base}/query"))
+            .json(&json!({"query": "RETURN toInteger('7') AS x", "language": language}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "language {language:?}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["rows"][0][0], 7, "{body}");
+    }
+}
+
+/// A batch with an unknown language fails before anything runs.
+#[tokio::test]
+async fn batch_with_unknown_language_is_400() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/batch"))
+        .json(&json!({"queries": [
+            {"query": "INSERT (:Batch)"},
+            {"query": "RETURN 1", "language": "aql"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("query at index 1 failed: unsupported language 'aql'"),
+        "{body}"
+    );
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Batch) RETURN count(n) AS c"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], 0, "nothing ran: {body}");
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_unknown_language_is_refused() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut conn = boltr::client::BoltConnection::connect(bolt_addr)
+        .await
+        .unwrap();
+    conn.hello(boltr::types::BoltDict::new()).await.unwrap();
+    conn.logon("none", None, None).await.unwrap();
+    let extra = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("aql".to_string()),
+    )]);
+    let err = conn
+        .run("RETURN 1", std::collections::HashMap::new(), extra)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported language 'aql'"),
+        "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exact decimals (engine 0.6: a GQL number with a point is a decimal)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn http_returns_a_decimal_with_its_scale() {
+    let base = spawn_server().await;
+    let resp = Client::new()
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "RETURN 1.50 AS d, 0.1 + 0.2 = 0.3 AS exact"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["rows"][0][0], json!({"$decimal": "1.50"}), "{body}");
+    assert_eq!(body["rows"][0][1], true, "{body}");
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_returns_a_decimal() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    let mut cursor = session
+        .execute("RETURN 1.50 AS d", std::collections::HashMap::new())
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    match &rows[0][0] {
+        gwp::types::Value::Decimal { unscaled, scale } => {
+            assert_eq!(unscaled, &vec![0x00, 0x96], "150");
+            assert_eq!(*scale, 2);
+        }
+        other => panic!("expected a decimal, got {other:?}"),
+    }
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_returns_a_decimal_as_its_text() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let result = session.run("RETURN 1.50 AS d").await.unwrap();
+    assert_eq!(
+        result.records[0][0],
+        boltr::types::BoltValue::String("1.50".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RDF terms (engine 0.6: SPARQL results hold typed terms)
+// ---------------------------------------------------------------------------
+
+/// Inserts an IRI, a tagged literal and a typed literal for the term tests.
+async fn insert_rdf_terms(client: &Client, base: &str) {
+    let resp = client
+        .post(format!("{base}/sparql"))
+        .json(&json!({"query": "PREFIX ex: <http://example.org/> INSERT DATA { ex:alix ex:name \"Alix\"@en . ex:alix ex:age 30 }"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+#[tokio::test]
+async fn sparql_rows_hold_plain_values() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .post(format!("{base}/sparql"))
+        .json(&json!({"query": "PREFIX ex: <http://example.org/> SELECT ?s ?name ?age WHERE { ?s ex:name ?name . ?s ex:age ?age }"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["rows"][0],
+        json!(["http://example.org/alix", "Alix", 30]),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn sparql_results_json_keeps_the_terms() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .post(format!("{base}/db/default/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/sparql-results+json")
+        .body("PREFIX ex: <http://example.org/> SELECT ?s ?name ?age WHERE { ?s ex:name ?name . ?s ex:age ?age }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    let binding = &body["results"]["bindings"][0];
+    assert_eq!(
+        binding["s"],
+        json!({"type": "uri", "value": "http://example.org/alix"}),
+        "{body}"
+    );
+    assert_eq!(
+        binding["name"],
+        json!({"type": "literal", "value": "Alix", "xml:lang": "en"}),
+        "{body}"
+    );
+    assert_eq!(
+        binding["age"],
+        json!({"type": "literal", "value": "30", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn graph_store_get_writes_the_terms_as_ntriples() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    insert_rdf_terms(&client, &base).await;
+    let resp = client
+        .get(format!("{base}/db/default/graph-store?default"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<http://example.org/alix> <http://example.org/name> \"Alix\"@en ."),
+        "{body}"
+    );
+}
+
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_returns_rdf_terms_as_plain_values() {
+    let (http, bolt_addr) = spawn_server_with_bolt().await;
+    insert_rdf_terms(&Client::new(), &http).await;
+    let mut session = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let sparql = boltr::types::BoltDict::from([(
+        "language".to_string(),
+        boltr::types::BoltValue::String("sparql".to_string()),
+    )]);
+    let result = session
+        .run_with_params(
+            "PREFIX ex: <http://example.org/> SELECT ?s ?name WHERE { ?s ex:name ?name }",
+            std::collections::HashMap::new(),
+            sparql,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.records[0],
+        vec![
+            boltr::types::BoltValue::String("http://example.org/alix".to_string()),
+            boltr::types::BoltValue::String("Alix".to_string()),
+        ]
+    );
+    session.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// GWP catalog: IF NOT EXISTS, OR REPLACE and IF EXISTS (#80)
+// ---------------------------------------------------------------------------
+
+/// A catalog `CreateGraph` of an in-memory LPG graph with the given flags.
+#[cfg(feature = "gwp")]
+fn gwp_graph(name: &str, if_not_exists: bool, or_replace: bool) -> gwp::server::CreateGraphConfig {
+    gwp::server::CreateGraphConfig {
+        schema: "default".to_string(),
+        name: name.to_string(),
+        if_not_exists,
+        or_replace,
+        type_spec: None,
+        copy_of: None,
+        storage_mode: "inmemory".to_string(),
+        memory_limit_bytes: None,
+        backward_edges: None,
+        threads: None,
+        wal_enabled: None,
+        wal_durability: None,
+    }
+}
+
+/// The gRPC code of a catalog error.
+#[cfg(feature = "gwp")]
+fn grpc_code(err: &gwp::error::GqlError) -> tonic::Code {
+    match err {
+        gwp::error::GqlError::Grpc(status) => status.code(),
+        other => panic!("expected a gRPC error, got {other:?}"),
+    }
+}
+
+/// Inserts one node into engine graph `graph` of the default database.
+#[cfg(feature = "gwp")]
+async fn insert_one_node(gwp_endpoint: &str, graph: &str) {
+    let conn = gwp::client::GqlConnection::connect(gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    session.set_graph(graph).await.unwrap();
+    session.execute_simple("INSERT (:Kept)").await.unwrap();
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_if_not_exists_keeps_an_existing_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let created = catalog
+        .create_graph(gwp_graph("g80", true, false))
+        .await
+        .unwrap();
+    assert_eq!(created.name, "g80");
+    insert_one_node(&gwp_endpoint, "g80").await;
+
+    let again = catalog
+        .create_graph(gwp_graph("g80", true, false))
+        .await
+        .expect("IF NOT EXISTS on an existing graph succeeds");
+    assert_eq!(again.node_count, 1, "the existing graph is kept");
+
+    let err = catalog
+        .create_graph(gwp_graph("g80", false, false))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::AlreadyExists);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_or_replace_replaces_the_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    catalog
+        .create_graph(gwp_graph("g80", false, true))
+        .await
+        .expect("OR REPLACE creates a missing graph");
+    insert_one_node(&gwp_endpoint, "g80").await;
+
+    let replaced = catalog
+        .create_graph(gwp_graph("g80", false, true))
+        .await
+        .expect("OR REPLACE on an existing graph succeeds");
+    assert_eq!(replaced.node_count, 0, "the graph is a new, empty one");
+    let graphs = catalog.list_graphs("default").await.unwrap();
+    assert_eq!(graphs.iter().filter(|g| g.name == "g80").count(), 1);
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_create_graph_refuses_or_replace_with_if_not_exists() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let err = catalog
+        .create_graph(gwp_graph("g80", true, true))
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::InvalidArgument);
+    let graphs = catalog.list_graphs("default").await.unwrap();
+    assert!(
+        graphs.iter().all(|g| g.name != "g80"),
+        "nothing was created"
+    );
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_drop_graph_if_exists_on_a_missing_graph() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut catalog = conn.create_catalog_client();
+
+    let existed = catalog
+        .drop_graph("default", "nope", true)
+        .await
+        .expect("IF EXISTS on a missing graph succeeds");
+    assert!(!existed, "a missing graph did not exist");
+
+    let err = catalog
+        .drop_graph("default", "nope", false)
+        .await
+        .unwrap_err();
+    assert_eq!(grpc_code(&err), tonic::Code::NotFound);
+
+    catalog
+        .create_graph(gwp_graph("g80", false, false))
+        .await
+        .unwrap();
+    assert!(catalog.drop_graph("default", "g80", true).await.unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// GWP sessions follow ISO/IEC 39075: graph and schema are session state inside
+// one database (`_database`), and session commands keep an open transaction
+// ---------------------------------------------------------------------------
+
+/// Counts the nodes with `label` in database `db` over HTTP.
+#[cfg(feature = "gwp")]
+async fn http_count(http: &str, db: &str, label: &str) -> i64 {
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": format!("MATCH (n:{label}) RETURN count(n)"), "database": db}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["rows"][0][0].as_i64().unwrap()
+}
+
+/// Creates database `name` over HTTP.
+#[cfg(feature = "gwp")]
+async fn http_create_db(http: &str, name: &str) {
+    let resp = Client::new()
+        .post(format!("{http}/db"))
+        .json(&json!({"name": name}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+/// The GQLSTATUS of a GWP error.
+#[cfg(feature = "gwp")]
+fn gql_status(err: &gwp::error::GqlError) -> String {
+    match err {
+        gwp::error::GqlError::Status { status } => status.code.clone(),
+        other => panic!("expected a GQLSTATUS error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_set_graph_selects_a_graph_of_the_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    session.execute_simple("CREATE GRAPH sales").await.unwrap();
+
+    session.set_graph("sales").await.expect("an engine graph");
+    session.execute_simple("INSERT (:InSales)").await.unwrap();
+    assert_eq!(
+        http_count(&http, "default", "InSales").await,
+        0,
+        "not in the default graph"
+    );
+    let mut cursor = session
+        .execute_simple("MATCH (n:InSales) RETURN count(n)")
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    assert!(
+        matches!(rows[0][0], gwp::types::Value::Integer(1)),
+        "{rows:?}"
+    );
+
+    let err = session.set_graph("nope").await.unwrap_err();
+    assert_eq!(
+        gql_status(&err),
+        "42002",
+        "an unknown graph is an invalid reference"
+    );
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_session_commands_keep_the_open_transaction() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    session.execute_simple("CREATE GRAPH side").await.unwrap();
+
+    let mut tx = session.begin_transaction().await.unwrap();
+    tx.execute_simple("INSERT (:Kept)").await.unwrap();
+    session
+        .set_graph("side")
+        .await
+        .expect("SESSION SET GRAPH inside a transaction");
+    session.set_schema("default").await.unwrap();
+    session
+        .reset()
+        .await
+        .expect("SESSION RESET inside a transaction");
+    tx.commit()
+        .await
+        .expect("the transaction survived the session commands");
+
+    assert_eq!(http_count(&http, "default", "Kept").await, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_database_parameter_selects_the_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    session.set_parameter("_database", "other").await.unwrap();
+    session.execute_simple("INSERT (:InOther)").await.unwrap();
+    assert_eq!(http_count(&http, "other", "InOther").await, 1);
+    assert_eq!(http_count(&http, "default", "InOther").await, 0);
+
+    session.reset().await.unwrap();
+    session
+        .execute_simple("INSERT (:StillOther)")
+        .await
+        .unwrap();
+    assert_eq!(
+        http_count(&http, "other", "StillOther").await,
+        1,
+        "a reset keeps the database"
+    );
+
+    assert!(session.set_parameter("_database", "nope").await.is_err());
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_database_switch_with_open_transaction_is_25g01() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut tx = session.begin_transaction().await.unwrap();
+    tx.execute_simple("INSERT (:BeforeSwitch)").await.unwrap();
+    let err = session
+        .set_parameter("_database", "other")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        gql_status(&err),
+        "25G01",
+        "a transaction cannot span two databases"
+    );
+    tx.commit().await.expect("the transaction is still open");
+    assert_eq!(http_count(&http, "default", "BeforeSwitch").await, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_handshake_reports_grafeodb() {
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let backend = grafeo_gwp::GrafeoBackend::new(grafeo_service::ServiceState::new_in_memory(300));
+    tokio::spawn(async move {
+        grafeo_gwp::serve(backend, addr, grafeo_gwp::GwpOptions::default())
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut client =
+        gwp::proto::session_service_client::SessionServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+    let resp = client
+        .handshake(gwp::proto::HandshakeRequest {
+            protocol_version: 1,
+            credentials: None,
+            client_info: std::collections::HashMap::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let info = resp.server_info.expect("server info");
+    assert_eq!(info.name, "GrafeoDB");
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+}
+
+#[cfg(all(feature = "gwp", feature = "auth"))]
+#[tokio::test]
+async fn gwp_auth_catalog_needs_a_session() {
+    let gwp_endpoint = spawn_gwp_with_auth("catalog-token").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+
+    let mut without_session = conn.create_catalog_client();
+    assert!(
+        without_session.list_graphs("default").await.is_err(),
+        "with authentication on, a catalog call without a session has no identity"
+    );
+
+    let session = conn
+        .create_session_with_credentials(gwp::proto::AuthCredentials {
+            method: Some(gwp::proto::auth_credentials::Method::BearerToken(
+                "catalog-token".to_string(),
+            )),
+        })
+        .await
+        .unwrap();
+    let mut catalog = session.catalog();
+    catalog
+        .create_graph(gwp_graph("authorized", false, false))
+        .await
+        .expect("a session-bound catalog call acts as the session");
+    assert_eq!(
+        graph_names(&catalog.list_graphs("default").await.unwrap()),
+        vec!["authorized"]
+    );
+    session.close().await.unwrap();
 }

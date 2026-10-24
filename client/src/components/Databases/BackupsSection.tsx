@@ -55,10 +55,12 @@ export default function BackupsSection({ database, onMutated }: Props) {
   // or an older list) cannot overwrite a newer one.
   const generation = useRef(0);
 
-  const refresh = useCallback(() => {
+  // Loads the list, setting state only when the answer arrives (the first
+  // load starts with `loading` already true; the parent remounts this
+  // section per database).
+  const load = useCallback(() => {
     const current = ++generation.current;
     const isLatest = () => current === generation.current;
-    setLoading(true);
     api.backup
       .list(database)
       .then((list) => {
@@ -92,9 +94,14 @@ export default function BackupsSection({ database, onMutated }: Props) {
       });
   }, [database]);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    load();
+  }, [load]);
+
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    load();
+  }, [load]);
 
   useEffect(() => {
     api.db

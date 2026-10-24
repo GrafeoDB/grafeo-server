@@ -103,3 +103,6 @@ flamegraph.svg
 *.orig
 *.rej
 docker-compose.override.yml
+
+# ── Test fixtures: the 0.5.44 data directory the migration tests open ─
+!tests/fixtures/**

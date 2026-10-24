@@ -56,7 +56,7 @@ impl QueryService {
     ) -> Result<QueryResult, ServiceError> {
         let entry = databases.get_available(db_name)?;
 
-        let lang = determine_language(language);
+        let lang = determine_language(language)?;
         let stmt = statement.to_owned();
 
         let result = run_with_timeout(timeout, move || {
@@ -96,7 +96,7 @@ impl QueryService {
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
-        let lang = determine_language(language);
+        let lang = determine_language(language)?;
         let stmt = statement.to_owned();
 
         let result = run_with_timeout(timeout, move || {
@@ -138,7 +138,7 @@ impl QueryService {
             let mut engine_session = create_session(&db, identity, read_only);
             engine_session
                 .begin_transaction()
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+                .map_err(ServiceError::from_engine)?;
             Ok::<_, ServiceError>(engine_session)
         })
         .await
@@ -149,6 +149,11 @@ impl QueryService {
     }
 
     /// Commit a transaction.
+    ///
+    /// The session leaves the registry whether the commit succeeds or not:
+    /// a commit that fails (a write conflict with a concurrent transaction is
+    /// [`ServiceError::TransactionConflict`], which the client retries with a
+    /// new transaction) has ended the engine transaction.
     pub async fn commit(
         sessions: &SessionRegistry,
         session_id: &str,
@@ -159,18 +164,19 @@ impl QueryService {
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let mut session = session_arc.lock();
             session
                 .engine_session
                 .commit()
-                .map_err(|e| ServiceError::Internal(e.to_string()))
+                .map_err(ServiceError::from_engine)
         })
         .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))??;
+        .map_err(|e| ServiceError::Internal(e.to_string()))
+        .and_then(|r| r);
 
         sessions.remove(session_id);
-        Ok(())
+        result
     }
 
     /// Rollback a transaction.
@@ -184,18 +190,20 @@ impl QueryService {
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let mut session = session_arc.lock();
             session
                 .engine_session
                 .rollback()
-                .map_err(|e| ServiceError::Internal(e.to_string()))
+                .map_err(ServiceError::from_engine)
         })
         .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))??;
+        .map_err(|e| ServiceError::Internal(e.to_string()))
+        .and_then(|r| r);
 
+        // A failed rollback ends the transaction too: the session is gone.
         sessions.remove(session_id);
-        Ok(())
+        result
     }
 
     /// Batch execute: all queries in one implicit transaction.
@@ -219,34 +227,44 @@ impl QueryService {
         // Metrics use atomics (not Clone), so we record after the blocking task.
         let languages: Vec<Language> = queries
             .iter()
-            .map(|q| determine_language(q.language.as_deref()))
-            .collect();
+            .enumerate()
+            .map(|(idx, q)| {
+                determine_language(q.language.as_deref()).map_err(|e| {
+                    ServiceError::BadRequest(format!("query at index {idx} failed: {e}"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let batch_languages = languages.clone();
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
             let mut session = create_session(&db, identity, read_only);
             session
                 .begin_transaction()
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+                .map_err(ServiceError::from_engine)?;
 
             let mut results: Vec<QueryResult> = Vec::with_capacity(queries.len());
 
-            for (idx, item) in queries.iter().enumerate() {
-                let lang = determine_language(item.language.as_deref());
+            for (idx, (item, lang)) in queries.iter().zip(batch_languages).enumerate() {
                 match dispatch_query(&session, &item.statement, lang, item.params.as_ref()) {
                     Ok(qr) => results.push(qr),
                     Err(e) => {
                         let _ = session.rollback();
-                        return Err(ServiceError::BadRequest(format!(
-                            "query at index {idx} failed: {e}"
-                        )));
+                        let message = format!("query at index {idx} failed: {e}");
+                        // A conflict or an unavailable database keeps its kind,
+                        // so the client can tell it may retry.
+                        return Err(match e {
+                            ServiceError::TransactionConflict(_) => {
+                                ServiceError::TransactionConflict(message)
+                            }
+                            ServiceError::Unavailable(_) => ServiceError::Unavailable(message),
+                            _ => ServiceError::BadRequest(message),
+                        });
                     }
                 }
             }
 
-            session
-                .commit()
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            session.commit().map_err(ServiceError::from_engine)?;
 
             Ok(results)
         })
@@ -271,7 +289,7 @@ impl QueryService {
         language: Option<&str>,
         params: Option<&HashMap<String, grafeo_common::Value>>,
     ) -> Result<QueryResult, ServiceError> {
-        let lang = determine_language(language);
+        let lang = determine_language(language)?;
         dispatch_query(session, statement, lang, params)
     }
 
@@ -361,18 +379,13 @@ fn dispatch_query(
         }
     };
 
-    // The engine wraps PermissionDenied as Error::Query(Semantic, ...) with no
-    // distinct error kind, so string matching is the only way to distinguish
-    // permission errors from other semantic errors (type mismatches, unknown
-    // identifiers, etc.). Track: GrafeoDB/grafeo#TBD for a dedicated
-    // QueryErrorKind::PermissionDenied variant.
-    result.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("permission denied") {
-            ServiceError::Forbidden(msg)
-        } else {
-            ServiceError::BadRequest(msg)
-        }
+    // The shared engine-error mapping: a permission error is Forbidden, a
+    // write conflict TransactionConflict, a closed database Unavailable, a
+    // timeout Timeout. A query's other failures stay BadRequest with their
+    // message, internal kinds included, as before 0.6.
+    result.map_err(|e| match ServiceError::from_engine(e) {
+        ServiceError::Internal(msg) => ServiceError::BadRequest(msg),
+        other => other,
     })
 }
 

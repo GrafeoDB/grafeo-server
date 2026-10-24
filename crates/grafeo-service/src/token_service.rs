@@ -121,9 +121,8 @@ impl TokenService {
 
 /// Generate a cryptographically random token (32 bytes, hex-encoded = 64 chars).
 fn generate_token() -> String {
-    use rand::Rng;
     let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
+    rand::fill(&mut bytes);
     hex::encode(bytes)
 }
 

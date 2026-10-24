@@ -26,6 +26,9 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int64(i) => serde_json::json!(i),
         Value::Float64(f) => serde_json::json!(f),
+        // Exact, with its scale: `{"$decimal": "1.50"}`, as the Node.js and
+        // WASM bindings encode it.
+        Value::Decimal(d) => serde_json::json!({ "$decimal": d.to_string() }),
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Bytes(b) => serde_json::json!(b.as_ref()),
         Value::Timestamp(t) => serde_json::Value::String(format!("{t:?}")),
@@ -59,6 +62,10 @@ pub fn value_to_json(value: &grafeo_common::Value) -> serde_json::Value {
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             serde_json::json!({ "$pncounter": true, "$value": pos_sum - neg_sum })
         }
+        // A SPARQL term as a plain value: a literal of a known XSD type as
+        // that value, any other term as its text. The SPARQL results formats
+        // keep the term itself (see `encode_sparql`).
+        Value::RdfTerm(term) => value_to_json(&term.export_value()),
         _ => serde_json::Value::Null,
     }
 }
@@ -286,6 +293,11 @@ mod tests {
 
     #[test]
     fn value_to_json_temporal_types() {
+        // Decimal wraps in {"$decimal": "..."}, keeping its scale
+        let dec = grafeo_common::types::Decimal::parse("1.50").unwrap();
+        let json = value_to_json(&Value::Decimal(dec));
+        assert_eq!(json, serde_json::json!({ "$decimal": "1.50" }));
+
         // Date wraps in {"$date": "..."}
         let date = grafeo_common::types::Date::from_ymd(2024, 6, 15).unwrap();
         let json = value_to_json(&Value::Date(date));

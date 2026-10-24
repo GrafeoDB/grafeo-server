@@ -26,20 +26,18 @@ serde_json = "1"
 
 
 # Schema loading (optional)
-sophia_turtle = { version = "0.9", optional = true }
-sophia_api = { version = "0.9", optional = true }
-sophia_inmem = { version = "0.9", optional = true }
-jsonschema = { version = "0.41", optional = true }
+sophia_turtle = { version = "0.10", optional = true }
+sophia_api = { version = "0.10", optional = true }
 
 # Auth (optional)
 subtle = { version = "2", optional = true }
-sha2 = { version = "0.10", optional = true }
-rand = { version = "0.9", optional = true }
+sha2 = { version = "0.11", optional = true }
+rand = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 
 # OpenAPI (optional — activated by HTTP transport crate)
-utoipa = { version = "5", optional = true }
+utoipa = { version = "6", optional = true }
 
 [features]
 default = ["lpg", "gql", "storage", "algos"]
@@ -82,8 +80,9 @@ parquet-import = ["grafeo-engine/parquet-import"]
 # Engine: temporal versioning
 temporal = ["grafeo-engine/temporal"]
 
-# Engine: compact columnar store (read-only, memory-efficient)
-compact-store = ["grafeo-engine/compact-store"]
+# Deprecated since 0.6.0: enables nothing. Compaction works in every build
+# (engine 0.6 `compact()` keeps one store); removed in 0.7.0.
+compact-store = []
 
 # Engine: async storage (async WAL and storage backend)
 async-storage = ["grafeo-engine/async-storage"]
@@ -108,9 +107,9 @@ ring-index = ["grafeo-engine/ring-index", "triple-store"]
 arrow-export = ["grafeo-engine/arrow-export"]
 
 # Schema loading
-owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "dep:sophia_inmem"]
+owl-schema = ["dep:sophia_turtle", "dep:sophia_api"]
 rdfs-schema = ["owl-schema"]
-json-schema = ["dep:jsonschema"]
+json-schema = []
 
 # Sync: pull-based changefeed for offline-first applications
 sync = ["cdc"]

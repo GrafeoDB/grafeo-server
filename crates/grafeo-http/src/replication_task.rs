@@ -386,7 +386,10 @@ mod tests {
         }
 
         assert_eq!(batches, 3, "650, then 300 + 300, then 300");
-        assert_eq!(default_db(&replica).node_count(), BATCH_LIMIT + 150 + 900);
+        assert_eq!(
+            default_db(&replica).node_count().unwrap(),
+            BATCH_LIMIT + 150 + 900
+        );
         assert_eq!(
             progress.last_epoch("default"),
             default_db(&primary).current_epoch().0
@@ -421,7 +424,7 @@ mod tests {
         poll_database(&http, &replica, &url, "default", &progress).await;
 
         assert_eq!(progress.last_epoch("default"), edge_epoch, "still advances");
-        assert_eq!(default_db(&replica).edge_count(), 0);
+        assert_eq!(default_db(&replica).edge_count().unwrap(), 0);
         let error = last_error(&progress).expect("the conflict is reported");
         let expected = format!(
             "1 change(s) could not be applied in the batch up to epoch {edge_epoch}; first: write_failed:"

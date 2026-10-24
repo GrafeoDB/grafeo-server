@@ -101,8 +101,16 @@ pub async fn serve(
     // Extract the pending auth map before the builder consumes the backend.
     #[cfg(feature = "auth")]
     let pending = backend.pending.clone();
+    // With authentication on, a catalog call must name its session.
+    #[cfg(feature = "auth")]
+    let backend = if options.auth_provider.is_some() {
+        backend.with_catalog_sessions_required()
+    } else {
+        backend
+    };
 
-    let mut builder = gwp::server::GqlServer::builder(backend);
+    let mut builder =
+        gwp::server::GqlServer::builder(backend).server_info("GrafeoDB", env!("CARGO_PKG_VERSION"));
 
     if let Some(timeout) = options.idle_timeout {
         builder = builder.idle_timeout(timeout);

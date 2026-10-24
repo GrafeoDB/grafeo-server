@@ -938,8 +938,11 @@ impl BackupService {
         let db_file_clone = db_file.clone();
         let open_config = reopen_config.clone();
         let open_result = tokio::task::spawn_blocking(move || -> Result<GrafeoDB, String> {
-            let backup_db =
-                GrafeoDB::open(&backup_owned).map_err(|e| format!("failed to open backup: {e}"))?;
+            // Read-only, so the backup stays as it is: engine 0.6 migrates a
+            // 0.5.x file on a read-write open (keeping `.pre-0.6` copies next
+            // to it) and keeps a WAL beside an open file.
+            let backup_db = GrafeoDB::open_read_only(&backup_owned)
+                .map_err(|e| format!("failed to open backup: {e}"))?;
             backup_db
                 .save(&db_file_clone)
                 .map_err(|e| format!("failed to save restored data: {e}"))?;
@@ -1017,14 +1020,11 @@ impl BackupService {
         let db_file_owned = db_file.to_path_buf();
         let config = reopen_config.clone();
         let recovery_result = tokio::task::spawn_blocking(move || {
-            if db_file_owned.exists() {
-                if db_file_owned.is_dir() {
-                    let _ = std::fs::remove_dir_all(&db_file_owned);
-                } else {
-                    let _ = std::fs::remove_file(&db_file_owned);
-                }
-            }
-            if let Ok(safety_db) = GrafeoDB::open(&safety) {
+            // The file and its WAL sidecar: engine 0.6 refuses a new
+            // database next to a leftover WAL.
+            remove_db_files(&db_file_owned);
+            // Read-only, so the safety backup stays as it is.
+            if let Ok(safety_db) = GrafeoDB::open_read_only(&safety) {
                 let _ = safety_db.save(&db_file_owned);
                 safety_db.close().ok();
             }
@@ -1438,7 +1438,7 @@ mod tests {
         db.session()
             .execute("INSERT (:Person {name: 'Gus'})")
             .unwrap();
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
         (mgr, backup)
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Ok(entry) = mgr.get_available("default")
-                    && entry.db().node_count() == nodes
+                    && entry.db().node_count().unwrap() == nodes
                 {
                     return;
                 }
@@ -1739,7 +1739,7 @@ mod tests {
                 .session()
                 .execute("INSERT (:Person {name: 'Alice'})")
                 .unwrap();
-            assert_eq!(entry.db().node_count(), 1);
+            assert_eq!(entry.db().node_count().unwrap(), 1);
         }
 
         let backup = BackupService::backup_database(&mgr, "default", backup_dir.path(), None)
@@ -1753,7 +1753,7 @@ mod tests {
                 .session()
                 .execute("INSERT (:Person {name: 'Bob'})")
                 .unwrap();
-            assert_eq!(entry.db().node_count(), 2);
+            assert_eq!(entry.db().node_count().unwrap(), 2);
         }
 
         let file_path = db_backup_dir(backup_dir.path(), "default")
@@ -1763,7 +1763,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(mgr.get("default").unwrap().db().node_count(), 1);
+        assert_eq!(mgr.get("default").unwrap().db().node_count().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1972,7 +1972,7 @@ mod tests {
             !entry.is_restoring(),
             "a restore that fails before the swap must leave the entry available"
         );
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     #[cfg(unix)]
@@ -2017,7 +2017,7 @@ mod tests {
         let entry = mgr
             .get_available("default")
             .expect("the entry must be available again");
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
         assert!(db_data_dir.join("data.grafeo").exists());
         assert!(!db_data_dir.join("data.grafeo.pre-restore").exists());
         assert!(!db_data_dir.join("data.grafeo.restoring").exists());
@@ -2066,7 +2066,7 @@ mod tests {
         let entry = mgr.get("default").unwrap();
         assert!(!entry.is_restoring());
         assert_eq!(
-            entry.db().node_count(),
+            entry.db().node_count().unwrap(),
             2,
             "the original data must be back in place"
         );
@@ -2116,7 +2116,7 @@ mod tests {
 
         let entry = mgr.get("default").unwrap();
         assert!(!entry.is_restoring());
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2161,7 +2161,7 @@ mod tests {
             Arc::ptr_eq(&handle_before, &entry.db()),
             "the live handle must not be replaced"
         );
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
         insert("INSERT (:Person {name: 'Bob'})");
         let db_dir = data_dir.path().join("default");
         assert!(!db_dir.join("data.grafeo.restoring").exists());
@@ -2199,7 +2199,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(mgr.get("default").unwrap().db().node_count(), 1);
+        assert_eq!(mgr.get("default").unwrap().db().node_count().unwrap(), 1);
         assert!(!db_dir.join("data.grafeo.restoring").exists());
         assert!(!db_dir.join("data.grafeo.pre-restore").exists());
     }
@@ -2235,7 +2235,7 @@ mod tests {
                 .session()
                 .execute("INSERT (:Person {name: 'Bob'})")
                 .unwrap();
-            assert_eq!(entry.db().node_count(), 2);
+            assert_eq!(entry.db().node_count().unwrap(), 2);
         }
 
         // Restore to the first backup's end_epoch — rolls Bob away.
@@ -2246,7 +2246,7 @@ mod tests {
         // The entry should be usable after the swap — the old handle was
         // released and a fresh one was opened from the restored file.
         let entry = mgr.get("default").unwrap();
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     #[cfg(feature = "sync")]
@@ -2601,17 +2601,23 @@ mod tests {
     // segment_to_entry
     // -----------------------------------------------------------------------
 
+    /// A backup segment as the engine's manifest stores it: the type is
+    /// `#[non_exhaustive]`, so a test reads one from JSON.
+    fn segment(json: serde_json::Value) -> BackupSegment {
+        serde_json::from_value(json).expect("a backup segment")
+    }
+
     #[test]
     fn segment_to_entry_maps_fields() {
-        let seg = BackupSegment {
-            filename: "test.grafeo".to_string(),
-            kind: BackupKind::Full,
-            size_bytes: 1024,
-            created_at_ms: 1_705_282_245_123,
-            start_epoch: grafeo_common::types::EpochId::new(1),
-            end_epoch: grafeo_common::types::EpochId::new(5),
-            checksum: 42,
-        };
+        let seg = segment(serde_json::json!({
+            "filename": "test.grafeo",
+            "kind": BackupKind::Full,
+            "size_bytes": 1024,
+            "created_at_ms": 1_705_282_245_123_u64,
+            "start_epoch": 1,
+            "end_epoch": 5,
+            "checksum": 42,
+        }));
         let entry = segment_to_entry(seg, "mydb".to_string());
         assert_eq!(entry.filename, "test.grafeo");
         assert_eq!(entry.database, "mydb");
@@ -2625,15 +2631,15 @@ mod tests {
 
     #[test]
     fn segment_to_entry_incremental() {
-        let seg = BackupSegment {
-            filename: "inc.grafeo".to_string(),
-            kind: BackupKind::Incremental,
-            size_bytes: 512,
-            created_at_ms: 0,
-            start_epoch: grafeo_common::types::EpochId::new(3),
-            end_epoch: grafeo_common::types::EpochId::new(7),
-            checksum: 99,
-        };
+        let seg = segment(serde_json::json!({
+            "filename": "inc.grafeo",
+            "kind": BackupKind::Incremental,
+            "size_bytes": 512,
+            "created_at_ms": 0,
+            "start_epoch": 3,
+            "end_epoch": 7,
+            "checksum": 99,
+        }));
         let entry = segment_to_entry(seg, "db2".to_string());
         assert_eq!(entry.kind, "incremental");
     }

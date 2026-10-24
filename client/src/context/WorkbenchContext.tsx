@@ -104,6 +104,9 @@ function loadTabs(): TabState {
   return { tabs: [{ id, name: "Query 1", language: "gql" }], activeTabId: id };
 }
 
+const RDF_LANGUAGES = new Set(["gql", "sparql"]);
+const LPG_LANGUAGES = new Set(["gql", "cypher", "graphql", "gremlin"]);
+
 function persistTabs(state: TabState) {
   localStorage.setItem(TABS_KEY, JSON.stringify(state));
 }
@@ -124,7 +127,19 @@ export function WorkbenchProvider({ children }: Props) {
 
   const activeTab =
     tabState.tabs.find((t) => t.id === tabState.activeTabId) ?? tabState.tabs[0];
-  const activeLanguage = activeTab.language;
+  // The tab's language when the current database's graph model runs it,
+  // otherwise that model's default (derived, so switching databases changes
+  // no state and the tab gets its language back on a compatible database).
+  const isRdf =
+    databaseType === "rdf" ||
+    databaseType === "owl-schema" ||
+    databaseType === "rdfs-schema";
+  const validLangs = isRdf ? RDF_LANGUAGES : LPG_LANGUAGES;
+  const activeLanguage = validLangs.has(activeTab.language)
+    ? activeTab.language
+    : isRdf
+      ? "sparql"
+      : "gql";
 
   const onLanguageChange = useCallback((lang: string) => {
     setTabState((prev) => {
@@ -138,20 +153,6 @@ export function WorkbenchProvider({ children }: Props) {
       return next;
     });
   }, []);
-
-  // Auto-switch language when the current database switches graph models.
-  useEffect(() => {
-    const isRdf =
-      databaseType === "rdf" ||
-      databaseType === "owl-schema" ||
-      databaseType === "rdfs-schema";
-    const validLangs = isRdf
-      ? new Set(["gql", "sparql"])
-      : new Set(["gql", "cypher", "graphql", "gremlin"]);
-    if (!validLangs.has(activeLanguage)) {
-      onLanguageChange(isRdf ? "sparql" : "gql");
-    }
-  }, [databaseType, activeLanguage, onLanguageChange]);
 
   const onSelectTab = useCallback((id: string) => {
     const content = editorRef.current?.getContent() ?? "";

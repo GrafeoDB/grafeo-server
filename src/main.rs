@@ -435,6 +435,13 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         } else {
             None
         },
+        max_message_size: (config.bolt_max_message_size > 0)
+            .then_some(config.bolt_max_message_size),
+        max_unauthenticated_message_size: (config.bolt_max_unauthenticated_message_size > 0)
+            .then_some(config.bolt_max_unauthenticated_message_size),
+        handshake_timeout: Some(std::time::Duration::from_secs(
+            config.bolt_handshake_timeout,
+        )),
         #[cfg(feature = "tls")]
         tls_cert: config.tls_cert.clone(),
         #[cfg(feature = "tls")]

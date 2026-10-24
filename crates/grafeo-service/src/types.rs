@@ -320,6 +320,22 @@ pub enum IndexDef {
     Text { label: String, property: String },
 }
 
+/// What a compaction did (engine 0.6 `CompactReport`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CompactInfo {
+    /// Always `true`: kept from the 0.5 response.
+    pub compacted: bool,
+    /// Whether a checkpoint of the database file was written (persistent
+    /// databases only).
+    pub checkpointed: bool,
+    /// Old versions dropped, in every graph: versions no open transaction can
+    /// see any more.
+    pub versions_collected: u64,
+    /// How long the compaction took, in milliseconds.
+    pub duration_ms: u64,
+}
+
 /// Query plan cache statistics.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

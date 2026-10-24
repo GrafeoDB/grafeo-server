@@ -16,7 +16,7 @@ jobs:
     name: Rust Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -27,7 +27,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -55,25 +55,25 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   msrv:
-    name: MSRV (1.91.1)
+    name: MSRV (1.99.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.91.1
+        uses: dtolnay/rust-toolchain@1.99.0
 
       # Create empty client/dist so rust-embed compiles
       - run: mkdir -p client/dist
 
       - name: Check on the MSRV
-        run: cargo +1.91.1 check --workspace
+        run: cargo +1.99.0 check --workspace
 
       - name: Check on the MSRV (all features, all targets)
-        run: cargo +1.91.1 check --workspace --all-features --all-targets
+        run: cargo +1.99.0 check --workspace --all-features --all-targets
 
   # Per-crate unit tests (fast, no integration deps)
   crate-tests:
@@ -84,7 +84,7 @@ jobs:
       matrix:
         crate: [grafeo-service, grafeo-http, grafeo-gwp, grafeo-boltr, grafeo-sync]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -93,7 +93,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -129,7 +129,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -140,7 +140,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -170,7 +170,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
       - name: Install cargo-audit
@@ -186,8 +186,8 @@ jobs:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -203,15 +203,15 @@ jobs:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci
       - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: client-dist
           path: client/dist/
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust-test, build-client]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -232,7 +232,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -243,7 +243,7 @@ jobs:
             ${{ runner.os }}-cargo-e2e-
 
       - name: Download client dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: client-dist
           path: client/dist/
@@ -259,7 +259,7 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -281,7 +281,7 @@ jobs:
             --ignore-filename-regex '(tests/|client/)'
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -295,7 +295,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust-test, build-client]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -304,7 +304,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -315,7 +315,7 @@ jobs:
             ${{ runner.os }}-cargo-seed-
 
       - name: Download client dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: client-dist
           path: client/dist/
@@ -397,7 +397,7 @@ jobs:
 
       - name: Upload server log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dev-seed-smoke-server-log
           path: /tmp/server.log
@@ -416,7 +416,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust-check, rust-test, build-client]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build Docker image
         run: docker build -t grafeo-server:test .

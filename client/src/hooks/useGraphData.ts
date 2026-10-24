@@ -3,6 +3,18 @@ import Graph from "graphology";
 import type { QueryResponse } from "../types/api";
 
 /**
+ * A starting position for the `index`-th node: a sunflower spiral, so nodes
+ * start spread out and apart. Deterministic (rendering stays pure); the force
+ * layout moves them from here.
+ */
+function initialPosition(index: number): { x: number; y: number } {
+  const angle = index * 2.399963; // the golden angle, in radians
+  const radius = 10 * Math.sqrt(index + 1);
+  return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+}
+
+
+/**
  * Shape returned by grafeo's Cypher/GQL adapter for node-valued columns.
  * The server prefixes internal fields with underscores and exposes user
  * properties at the top level alongside them.
@@ -37,6 +49,21 @@ function isNode(cell: unknown): cell is GrafeoNode {
   if ("_id" in obj && "_labels" in obj) return true;
   // Legacy / third-party shape fallback.
   return "id" in obj && ("labels" in obj || "label" in obj);
+}
+
+/** An edge as Grafeo returns it: `{_id, _type, _source, _target, ...props}`. */
+interface GrafeoEdge {
+  _id: number | string;
+  _type?: string;
+  _source: number | string;
+  _target: number | string;
+  [key: string]: unknown;
+}
+
+function isEdge(cell: unknown): cell is GrafeoEdge {
+  if (typeof cell !== "object" || cell === null) return false;
+  const obj = cell as Record<string, unknown>;
+  return "_source" in obj && "_target" in obj;
 }
 
 function nodeId(node: GrafeoNode): string {
@@ -104,14 +131,13 @@ function buildGraphFromScalars(result: QueryResponse): GraphData | null {
 
   const ensureNode = (id: string, colName: string) => {
     if (addedNodes.has(id)) return;
-    addedNodes.add(id);
     graph.addNode(id, {
       label: `${colName} ${id}`,
       size: 10,
       color: labelColor(colName),
-      x: Math.random() * 100,
-      y: Math.random() * 100,
+      ...initialPosition(addedNodes.size),
     });
+    addedNodes.add(id);
     nodeData.set(id, { id: Number(id), column: colName });
   };
 
@@ -179,142 +205,166 @@ function buildGraphFromScalars(result: QueryResponse): GraphData | null {
   return { graph, nodeData };
 }
 
-export function useGraphData(result: QueryResponse | null): GraphData | null {
-  return useMemo(() => {
-    if (!result || result.rows.length === 0) return null;
+/** Builds the graph a result draws, or `null` when it holds nothing to draw. */
+function buildGraphData(result: QueryResponse | null): GraphData | null {
+  if (!result || result.rows.length === 0) return null;
 
-    const graph = new Graph({ multi: true, type: "directed" });
-    const nodes = new Map<string, GrafeoNode>();
+  const graph = new Graph({ multi: true, type: "directed" });
+  const nodes = new Map<string, GrafeoNode>();
 
-    // Strategy 1: pull node objects out of every cell.
-    for (const row of result.rows) {
-      for (const cell of row) {
-        if (isNode(cell)) {
-          nodes.set(nodeId(cell), cell);
-        }
+  // Strategy 1: pull node objects out of every cell.
+  for (const row of result.rows) {
+    for (const cell of row) {
+      if (isNode(cell)) {
+        nodes.set(nodeId(cell), cell);
       }
     }
+  }
 
-    if (nodes.size > 0) {
-      const nodeData = new Map<string, Record<string, unknown>>();
+  if (nodes.size > 0) {
+    const nodeData = new Map<string, Record<string, unknown>>();
 
-      for (const [id, node] of nodes) {
-        const labels = nodeLabels(node);
-        const primaryLabel = labels[0] ?? "Node";
-        const displayName = nodeDisplayName(node, id);
+    for (const [id, node] of nodes) {
+      const labels = nodeLabels(node);
+      const primaryLabel = labels[0] ?? "Node";
+      const displayName = nodeDisplayName(node, id);
 
-        graph.addNode(id, {
-          label: displayName,
-          size: 10,
-          color: labelColor(primaryLabel),
-          x: Math.random() * 100,
-          y: Math.random() * 100,
-        });
-
-        nodeData.set(id, node as Record<string, unknown>);
-      }
-
-      // Strategy 1b: infer edges from the column layout.
-      //
-      // Grafeo's Cypher/GQL adapter returns relationships as bare
-      // integer ids (e.g. `[nodeA, 0, nodeB]` for a
-      // `MATCH (a)-[r]->(b) RETURN a, r, b` query). There's no object
-      // to inspect for source/target — we have to reconstruct the
-      // path from the column types.
-      //
-      // Classify each column by what it holds across rows (ignoring
-      // nulls), then if the columns resolve to K node columns and
-      // (K-1) integer columns we treat each row as a path of K nodes
-      // with the integers as the edges between them. Column order in
-      // the RETURN clause defines the path order, so `RETURN n, m, r`
-      // and `RETURN n, r, m` both draw an edge from n to m regardless
-      // of where the integer column lands.
-      const { columns, rows } = result;
-      type ColKind = "node" | "integer" | "other";
-
-      // Columns named like a function call — count(*), sum(x), id(n),
-      // length(path) — are aggregations or projections, not edge ids.
-      // Excluding them here stops the path heuristic from false-firing
-      // on queries like RETURN n, m, count(*), where the column shape
-      // (2 nodes + 1 integer) otherwise looks exactly like an edge.
-      const looksLikeAggregation = (colName: string): boolean =>
-        /\w\s*\(/.test(colName);
-
-      const kinds: ColKind[] = columns.map((colName, ci) => {
-        if (looksLikeAggregation(colName)) return "other";
-        let sawNode = false;
-        let sawInt = false;
-        let sawOther = false;
-        for (const row of rows) {
-          const v = row[ci];
-          if (v == null) continue;
-          if (isNode(v)) {
-            sawNode = true;
-          } else if (typeof v === "number" && Number.isInteger(v)) {
-            sawInt = true;
-          } else {
-            sawOther = true;
-          }
-        }
-        // Homogeneous columns only — mixed-type columns fall through
-        // as "other" and don't participate in edge inference.
-        if (sawNode && !sawInt && !sawOther) return "node";
-        if (sawInt && !sawNode && !sawOther) return "integer";
-        return "other";
+      graph.addNode(id, {
+        label: displayName,
+        size: 10,
+        color: labelColor(primaryLabel),
+        ...initialPosition(graph.order),
       });
 
-      const nodeColIndices = kinds
-        .map((k, i) => (k === "node" ? i : -1))
-        .filter((i) => i >= 0);
-      const intColIndices = kinds
-        .map((k, i) => (k === "integer" ? i : -1))
-        .filter((i) => i >= 0);
+      nodeData.set(id, node as Record<string, unknown>);
+    }
 
-      // Only wire edges when the shape is a clean path: K node columns
-      // and exactly (K-1) integer columns, K >= 2. This catches the
-      // common MATCH (a)-[r]->(b) case and the multi-hop
-      // MATCH (a)-[r1]->(b)-[r2]->(c) case without firing on
-      // aggregations like RETURN n, count(n) (1 node + 1 int).
-      const looksLikePath =
-        nodeColIndices.length >= 2 &&
-        intColIndices.length === nodeColIndices.length - 1;
+    // Strategy 1a: edge objects (engine 0.6 returns a relationship as
+    // `{_id, _type, _source, _target}`), drawn between their endpoints
+    // when both are in the result.
+    let sawEdgeObject = false;
+    for (const row of result.rows) {
+      for (const cell of row) {
+        if (!isEdge(cell)) continue;
+        sawEdgeObject = true;
+        const src = String(cell._source);
+        const tgt = String(cell._target);
+        const key = `e${cell._id}`;
+        if (graph.hasNode(src) && graph.hasNode(tgt) && !graph.hasEdge(key)) {
+          graph.addEdgeWithKey(key, src, tgt, {
+            label: cell._type ?? String(cell._id),
+            size: 2,
+            color: "#64748b",
+          });
+        }
+      }
+    }
+    if (sawEdgeObject) return { graph, nodeData };
 
-      if (looksLikePath) {
-        for (const row of rows) {
-          for (let k = 0; k < intColIndices.length; k++) {
-            const srcCell = row[nodeColIndices[k]];
-            const tgtCell = row[nodeColIndices[k + 1]];
-            const edgeIdCell = row[intColIndices[k]];
-            if (
-              !isNode(srcCell) ||
-              !isNode(tgtCell) ||
-              typeof edgeIdCell !== "number"
-            ) {
-              continue;
-            }
+    // Strategy 1b: infer edges from the column layout.
+    //
+    // Older engines return relationships as bare
+    // integer ids (e.g. `[nodeA, 0, nodeB]` for a
+    // `MATCH (a)-[r]->(b) RETURN a, r, b` query). There's no object
+    // to inspect for source/target — we have to reconstruct the
+    // path from the column types.
+    //
+    // Classify each column by what it holds across rows (ignoring
+    // nulls), then if the columns resolve to K node columns and
+    // (K-1) integer columns we treat each row as a path of K nodes
+    // with the integers as the edges between them. Column order in
+    // the RETURN clause defines the path order, so `RETURN n, m, r`
+    // and `RETURN n, r, m` both draw an edge from n to m regardless
+    // of where the integer column lands.
+    const { columns, rows } = result;
+    type ColKind = "node" | "integer" | "other";
 
-            const src = nodeId(srcCell);
-            const tgt = nodeId(tgtCell);
-            if (!graph.hasNode(src) || !graph.hasNode(tgt)) continue;
+    // Columns named like a function call — count(*), sum(x), id(n),
+    // length(path) — are aggregations or projections, not edge ids.
+    // Excluding them here stops the path heuristic from false-firing
+    // on queries like RETURN n, m, count(*), where the column shape
+    // (2 nodes + 1 integer) otherwise looks exactly like an edge.
+    const looksLikeAggregation = (colName: string): boolean =>
+      /\w\s*\(/.test(colName);
 
-            // Key by (edge_id, src, tgt) so parallel edges and
-            // self-loops don't collide in the multigraph.
-            const key = `e${edgeIdCell}-${src}-${tgt}`;
-            if (!graph.hasEdge(key)) {
-              graph.addEdgeWithKey(key, src, tgt, {
-                label: String(edgeIdCell),
-                size: 2,
-                color: "#64748b",
-              });
-            }
+    const kinds: ColKind[] = columns.map((colName, ci) => {
+      if (looksLikeAggregation(colName)) return "other";
+      let sawNode = false;
+      let sawInt = false;
+      let sawOther = false;
+      for (const row of rows) {
+        const v = row[ci];
+        if (v == null) continue;
+        if (isNode(v)) {
+          sawNode = true;
+        } else if (typeof v === "number" && Number.isInteger(v)) {
+          sawInt = true;
+        } else {
+          sawOther = true;
+        }
+      }
+      // Homogeneous columns only — mixed-type columns fall through
+      // as "other" and don't participate in edge inference.
+      if (sawNode && !sawInt && !sawOther) return "node";
+      if (sawInt && !sawNode && !sawOther) return "integer";
+      return "other";
+    });
+
+    const nodeColIndices = kinds
+      .map((k, i) => (k === "node" ? i : -1))
+      .filter((i) => i >= 0);
+    const intColIndices = kinds
+      .map((k, i) => (k === "integer" ? i : -1))
+      .filter((i) => i >= 0);
+
+    // Only wire edges when the shape is a clean path: K node columns
+    // and exactly (K-1) integer columns, K >= 2. This catches the
+    // common MATCH (a)-[r]->(b) case and the multi-hop
+    // MATCH (a)-[r1]->(b)-[r2]->(c) case without firing on
+    // aggregations like RETURN n, count(n) (1 node + 1 int).
+    const looksLikePath =
+      nodeColIndices.length >= 2 &&
+      intColIndices.length === nodeColIndices.length - 1;
+
+    if (looksLikePath) {
+      for (const row of rows) {
+        for (let k = 0; k < intColIndices.length; k++) {
+          const srcCell = row[nodeColIndices[k]];
+          const tgtCell = row[nodeColIndices[k + 1]];
+          const edgeIdCell = row[intColIndices[k]];
+          if (
+            !isNode(srcCell) ||
+            !isNode(tgtCell) ||
+            typeof edgeIdCell !== "number"
+          ) {
+            continue;
+          }
+
+          const src = nodeId(srcCell);
+          const tgt = nodeId(tgtCell);
+          if (!graph.hasNode(src) || !graph.hasNode(tgt)) continue;
+
+          // Key by (edge_id, src, tgt) so parallel edges and
+          // self-loops don't collide in the multigraph.
+          const key = `e${edgeIdCell}-${src}-${tgt}`;
+          if (!graph.hasEdge(key)) {
+            graph.addEdgeWithKey(key, src, tgt, {
+              label: String(edgeIdCell),
+              size: 2,
+              color: "#64748b",
+            });
           }
         }
       }
-
-      return { graph, nodeData };
     }
 
-    // Strategy 2: bare integer columns (legacy engine output).
-    return buildGraphFromScalars(result);
-  }, [result]);
+    return { graph, nodeData };
+  }
+
+  // Strategy 2: bare integer columns (legacy engine output).
+  return buildGraphFromScalars(result);
+}
+
+export function useGraphData(result: QueryResponse | null): GraphData | null {
+  return useMemo(() => buildGraphData(result), [result]);
 }

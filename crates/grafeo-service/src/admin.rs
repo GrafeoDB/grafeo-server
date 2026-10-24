@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-#[cfg(feature = "compact-store")]
 use crate::database::DatabaseEntry;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
@@ -43,7 +42,8 @@ impl AdminService {
 
         let stats = tokio::task::spawn_blocking(move || entry.db().detailed_stats())
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(ServiceError::from_engine)?;
 
         let disk_bytes = per_db_dir.and_then(|p| calculate_db_disk_usage(&p));
 
@@ -118,7 +118,8 @@ impl AdminService {
 
         let result = tokio::task::spawn_blocking(move || entry.db().validate())
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(ServiceError::from_engine)?;
 
         Ok(types::ValidationInfo {
             valid: result.is_valid(),
@@ -156,10 +157,10 @@ impl AdminService {
         let entry = databases.get_available(db_name)?;
 
         tokio::task::spawn_blocking(move || match index {
-            types::IndexDef::Property { property } => {
-                entry.db().create_property_index(&property);
-                Ok(())
-            }
+            types::IndexDef::Property { property } => entry
+                .db()
+                .create_property_index(&property)
+                .map_err(ServiceError::from_engine),
             #[cfg(feature = "vector-index")]
             types::IndexDef::Vector {
                 label,
@@ -179,7 +180,7 @@ impl AdminService {
                     ef_construction.map(|v| v as usize),
                     None, // quantization: expose in a future release
                 )
-                .map_err(|e| ServiceError::BadRequest(e.to_string())),
+                .map_err(ServiceError::from_engine),
             #[cfg(not(feature = "vector-index"))]
             types::IndexDef::Vector { .. } => Err(ServiceError::BadRequest(
                 "vector-index feature not enabled".to_owned(),
@@ -188,7 +189,7 @@ impl AdminService {
             types::IndexDef::Text { label, property } => entry
                 .db()
                 .create_text_index(&label, &property)
-                .map_err(|e| ServiceError::BadRequest(e.to_string())),
+                .map_err(ServiceError::from_engine),
             #[cfg(not(feature = "text-index"))]
             types::IndexDef::Text { .. } => Err(ServiceError::BadRequest(
                 "text-index feature not enabled".to_owned(),
@@ -332,7 +333,7 @@ impl AdminService {
         tokio::task::spawn_blocking(move || entry.db().create_graph(&graph_name))
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?
-            .map_err(|e| ServiceError::Internal(e.to_string()))
+            .map_err(ServiceError::from_engine)
     }
 
     /// Drop a named graph within a database.
@@ -351,7 +352,8 @@ impl AdminService {
 
         tokio::task::spawn_blocking(move || entry.db().drop_graph(&graph_name))
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(ServiceError::from_engine)
     }
 
     /// Drop an index from a database.
@@ -373,33 +375,41 @@ impl AdminService {
                 label, property, ..
             } => entry.db().drop_vector_index(&label, &property),
             #[cfg(not(feature = "vector-index"))]
-            types::IndexDef::Vector { .. } => false,
+            types::IndexDef::Vector { .. } => Ok(false),
             #[cfg(feature = "text-index")]
             types::IndexDef::Text { label, property } => {
                 entry.db().drop_text_index(&label, &property)
             }
             #[cfg(not(feature = "text-index"))]
-            types::IndexDef::Text { .. } => false,
+            types::IndexDef::Text { .. } => Ok(false),
         })
         .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))
+        .map_err(|e| ServiceError::Internal(e.to_string()))?
+        .map_err(ServiceError::from_engine)
     }
 
-    /// Compact a database into a read-only columnar store.
+    /// Compact a database: write a checkpoint of a persistent database and
+    /// drop the old versions no open transaction can see any more, in every
+    /// graph (engine 0.6 `compact()`).
     ///
-    /// This is a **one-way operation**: the database becomes permanently
-    /// read-only after compaction. The columnar format uses significantly
-    /// less memory and is optimized for analytical read workloads.
+    /// The database stays one store that takes writes as before; writes after
+    /// a compaction are logged and recovered like any other (engine 0.5.x
+    /// built a separate columnar store whose later writes skipped the WAL,
+    /// grafeo#558). Works in every build: the `compact-store` feature is no
+    /// longer needed.
     ///
     /// Requires exclusive access to the database (no active sessions or
-    /// concurrent requests holding a reference).
+    /// concurrent requests holding a reference), since the engine call takes
+    /// the database by `&mut`.
     ///
     /// Taking the database out of the registry, compacting it and putting it
     /// back run in one blocking task that owns a handle on the service, so a
     /// caller that stops waiting (a dropped request) cannot leave the
     /// database out of the registry: the task finishes and puts it back.
-    #[cfg(feature = "compact-store")]
-    pub async fn compact(state: &crate::ServiceState, db_name: &str) -> Result<(), ServiceError> {
+    pub async fn compact(
+        state: &crate::ServiceState,
+        db_name: &str,
+    ) -> Result<types::CompactInfo, ServiceError> {
         if state.databases().is_read_only() {
             return Err(ServiceError::ReadOnly);
         }
@@ -408,21 +418,6 @@ impl AdminService {
         tokio::task::spawn_blocking(move || compact_in_place(state.databases(), &name))
             .await
             .map_err(|e| ServiceError::Internal(format!("compaction task failed: {e}")))?
-    }
-
-    /// Compact stub when the `compact-store` feature is disabled.
-    #[cfg(not(feature = "compact-store"))]
-    pub fn compact(
-        state: &crate::ServiceState,
-        _db_name: &str,
-    ) -> impl Future<Output = Result<(), ServiceError>> {
-        std::future::ready(if state.databases().is_read_only() {
-            Err(ServiceError::ReadOnly)
-        } else {
-            Err(ServiceError::BadRequest(
-                "compact-store feature not enabled".to_string(),
-            ))
-        })
     }
 
     /// Bulk-import a TSV edge list into a database.
@@ -586,7 +581,10 @@ impl AdminService {
             let spec = grafeo_engine::ProjectionSpec::new()
                 .with_node_labels(req.node_labels)
                 .with_edge_types(req.edge_types);
-            Ok(entry.db().create_projection(req.name, spec))
+            entry
+                .db()
+                .create_projection(req.name, spec)
+                .map_err(ServiceError::from_engine)
         })
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
@@ -715,34 +713,43 @@ impl AdminService {
     }
 }
 
-/// Takes `db_name` out of the registry, compacts it and puts it back, the
-/// original when compaction fails. Blocking.
-#[cfg(feature = "compact-store")]
-fn compact_in_place(databases: &DatabaseManager, db_name: &str) -> Result<(), ServiceError> {
+/// Takes `db_name` out of the registry, compacts it and puts it back, also
+/// when compaction fails. Blocking.
+fn compact_in_place(
+    databases: &DatabaseManager,
+    db_name: &str,
+) -> Result<types::CompactInfo, ServiceError> {
     let db_entry = databases.take_exclusive(db_name)?;
-    let result = compact_entry(db_entry);
-
-    match result {
-        Ok(compacted) => {
-            databases.reinsert(db_name.to_owned(), compacted);
-            tracing::info!(name = %db_name, "Database compacted to columnar read-only store");
-            Ok(())
-        }
-        Err((original, err)) => {
-            databases.reinsert(db_name.to_owned(), original);
-            Err(err)
-        }
-    }
+    let (entry, result) = compact_entry(db_entry);
+    databases.reinsert(db_name.to_owned(), entry);
+    let report = result?;
+    tracing::info!(
+        name = %db_name,
+        checkpointed = report.checkpointed,
+        versions_collected = report.versions_collected,
+        duration_ms = report.duration_ms,
+        "Database compacted"
+    );
+    Ok(types::CompactInfo {
+        compacted: true,
+        checkpointed: report.checkpointed,
+        versions_collected: report.versions_collected,
+        duration_ms: report.duration_ms,
+    })
 }
 
-/// Compacts the database of `db_entry`: the compacted entry, or the original
-/// with the error.
-#[cfg(feature = "compact-store")]
-fn compact_entry(db_entry: DatabaseEntry) -> Result<DatabaseEntry, (DatabaseEntry, ServiceError)> {
+/// Compacts the database of `db_entry`: the entry to put back, and the
+/// engine's report or the error.
+fn compact_entry(
+    db_entry: DatabaseEntry,
+) -> (
+    DatabaseEntry,
+    Result<grafeo_engine::admin::CompactReport, ServiceError>,
+) {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
 
-    let (db_arc, mut metadata) = db_entry.into_parts();
+    let (db_arc, metadata) = db_entry.into_parts();
     // `try_unwrap` needs only the one strong reference; weak ones
     // (a live change feed keeps one to tell instances apart) do not
     // stand in the way, unlike with `Arc::get_mut`. The database
@@ -751,29 +758,26 @@ fn compact_entry(db_entry: DatabaseEntry) -> Result<DatabaseEntry, (DatabaseEntr
     let mut db = match Arc::try_unwrap(db_arc) {
         Ok(db) => db,
         Err(shared) => {
-            return Err((
+            return (
                 DatabaseEntry::new(shared, metadata),
-                ServiceError::Conflict(
+                Err(ServiceError::Conflict(
                     "inner Arc<GrafeoDB> still shared after take_exclusive".to_string(),
-                ),
-            ));
+                )),
+            );
         }
     };
 
-    match catch_unwind(AssertUnwindSafe(|| db.compact())) {
-        Ok(Ok(())) => {
-            metadata.storage_mode = "compact".to_string();
-            Ok(DatabaseEntry::new(Arc::new(db), metadata))
-        }
-        Ok(Err(e)) => Err((
-            DatabaseEntry::new(Arc::new(db), metadata),
-            ServiceError::Internal(format!("compaction failed: {e}")),
-        )),
-        Err(_panic) => Err((
-            DatabaseEntry::new(Arc::new(db), metadata),
-            ServiceError::Internal("compaction panicked".to_string()),
-        )),
-    }
+    let result = match catch_unwind(AssertUnwindSafe(|| db.compact())) {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(e)) => Err(match ServiceError::from_engine(e) {
+            ServiceError::Internal(msg) => {
+                ServiceError::Internal(format!("compaction failed: {msg}"))
+            }
+            other => other,
+        }),
+        Err(_panic) => Err(ServiceError::Internal("compaction panicked".to_string())),
+    };
+    (DatabaseEntry::new(Arc::new(db), metadata), result)
 }
 
 /// Reject names containing `/`, which grafeo-engine uses internally as the
@@ -822,7 +826,6 @@ mod tests {
     use super::*;
     use crate::ServiceState;
 
-    #[cfg(feature = "compact-store")]
     #[test]
     fn a_dropped_compaction_request_still_puts_the_database_back() {
         // One blocking thread, held by a task that waits for a signal: the
@@ -874,8 +877,19 @@ mod tests {
                 .databases()
                 .get("columns")
                 .expect("the database is back in the registry");
-            assert_eq!(entry.metadata.storage_mode, "compact");
-            assert_eq!(entry.db().node_count(), 3, "readable, nothing lost");
+            assert_eq!(
+                entry.metadata.storage_mode, "in-memory",
+                "a compacted database keeps its storage mode"
+            );
+            assert_eq!(
+                entry.db().node_count().unwrap(),
+                3,
+                "readable, nothing lost"
+            );
+            entry
+                .db()
+                .create_node(&["Later"])
+                .expect("a compacted database takes writes");
         });
     }
 

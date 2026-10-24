@@ -324,11 +324,11 @@ impl SyncService {
         let mut raw = db
             .changes_between(since_id, until_id)
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        // Engine 0.5.44 keeps the log per (graph, entity) and sorts only by
-        // epoch, so events of one transaction come back in hash order. Their
-        // HLC timestamps strictly increase, so (epoch, timestamp) restores
-        // the order they happened in: an edge after its endpoints, a node's
-        // delete after its edges'.
+        // Engine 0.6 returns the events of a commit in the order it applied
+        // its writes; 0.5.44 returned them in hash order, with strictly
+        // increasing HLC timestamps. A stable sort by (epoch, timestamp)
+        // gives the order they happened in from either: an edge after its
+        // endpoints, a node's delete after its edges'.
         raw.sort_by_key(|e| (e.epoch, e.timestamp.as_u64()));
 
         let (end, server_epoch) = resume_point(&raw, |e| e.epoch.0, limit, since, current_epoch);
@@ -425,7 +425,7 @@ impl SyncService {
             }
         }
 
-        let server_schema = compute_schema_version(db);
+        let server_schema = compute_schema_version(db).map_err(ServiceError::from_engine)?;
         let schema_mismatch = request
             .schema_version
             .as_deref()
@@ -681,15 +681,18 @@ fn apply_op(target: &grafeo_engine::Session, op: ChangeOp<'_>, timestamp: u64) -
             op,
             property,
         } => {
-            let current = match entity {
+            let read = match entity {
                 Entity::Node(id) => target
                     .get_node(id)
-                    .and_then(|n| n.get_property(property).cloned()),
+                    .map(|n| n.and_then(|n| n.get_property(property).cloned())),
                 Entity::Edge(id) => target
                     .get_edge(id)
-                    .and_then(|e| e.get_property(property).cloned()),
-            }
-            .unwrap_or(grafeo_common::types::Value::Null);
+                    .map(|e| e.and_then(|e| e.get_property(property).cloned())),
+            };
+            let current = match read {
+                Ok(value) => value.unwrap_or(grafeo_common::types::Value::Null),
+                Err(e) => return Outcome::Failed(e),
+            };
             let merged = crate::crdt::apply_op(&current, op);
             done(match entity {
                 Entity::Node(id) => target.set_node_property(id, property, merged),
@@ -741,7 +744,7 @@ fn sync_node_labels(
     node_id: NodeId,
     wanted: &[String],
 ) -> Result<(), grafeo_common::utils::error::Error> {
-    let Some(node) = target.get_node(node_id) else {
+    let Some(node) = target.get_node(node_id)? else {
         return Err(grafeo_common::utils::error::Error::Internal(format!(
             "node {} not found",
             node_id.as_u64()
@@ -862,8 +865,10 @@ fn write_failed(request_index: usize, error: &dyn std::fmt::Display) -> Conflict
 ///
 /// RDF databases and any mode without an LPG catalog return the empty-schema
 /// hash (`"cbf29ce484222325"`).
-fn compute_schema_version(db: &grafeo_engine::GrafeoDB) -> String {
-    let mut keys: Vec<String> = match db.schema() {
+fn compute_schema_version(
+    db: &grafeo_engine::GrafeoDB,
+) -> grafeo_common::utils::error::Result<String> {
+    let mut keys: Vec<String> = match db.schema()? {
         grafeo_engine::admin::SchemaInfo::Lpg(lpg) => lpg
             .labels
             .into_iter()
@@ -886,7 +891,7 @@ fn compute_schema_version(db: &grafeo_engine::GrafeoDB) -> String {
         hash = hash.wrapping_mul(1_099_511_628_211);
     }
 
-    format!("{hash:016x}")
+    Ok(format!("{hash:016x}"))
 }
 
 fn to_dto(event: grafeo_engine::cdc::ChangeEvent) -> ChangeEventDto {
@@ -1266,7 +1271,7 @@ mod tests {
         assert!(resp.conflicts.is_empty());
 
         // Verify property was written.
-        let val = entry.db().get_node(node).unwrap();
+        let val = entry.db().get_node(node).unwrap().expect("the node exists");
         assert!(
             val.properties
                 .contains_key(&grafeo_common::types::PropertyKey::new("name"))
@@ -1301,7 +1306,7 @@ mod tests {
         let resp = SyncService::apply(&mgr, "default", req).unwrap();
         assert_eq!(resp.applied, 1);
         assert!(resp.conflicts.is_empty());
-        assert!(entry.db().get_node(node).is_none());
+        assert!(entry.db().get_node(node).unwrap().is_none());
     }
 
     #[test]
@@ -1340,7 +1345,7 @@ mod tests {
         assert_eq!(resp.conflicts.len(), 1);
         assert_eq!(resp.conflicts[0].reason, "server_newer");
         // Property should still be the server's value.
-        let node_data = entry.db().get_node(node).unwrap();
+        let node_data = entry.db().get_node(node).unwrap().expect("the node exists");
         let name_key = grafeo_common::types::PropertyKey::new("name");
         assert_eq!(
             node_data.properties.get(&name_key),
@@ -1522,14 +1527,14 @@ mod tests {
         // Verify replica has the data
         let replica_db = replica.get("default").unwrap();
         assert!(
-            replica_db.db().node_count() >= 2,
+            replica_db.db().node_count().unwrap() >= 2,
             "Replica should have at least 2 nodes, got {}",
-            replica_db.db().node_count()
+            replica_db.db().node_count().unwrap()
         );
         assert!(
-            replica_db.db().edge_count() >= 1,
+            replica_db.db().edge_count().unwrap() >= 1,
             "Replica should have at least 1 edge, got {}",
-            replica_db.db().edge_count()
+            replica_db.db().edge_count().unwrap()
         );
     }
 
@@ -1596,7 +1601,7 @@ mod tests {
 
         let replica_db = replica.get("default").unwrap();
         assert!(
-            replica_db.db().node_count() >= 3,
+            replica_db.db().node_count().unwrap() >= 3,
             "Replica should have at least 3 nodes from session mutations"
         );
     }
@@ -2039,7 +2044,7 @@ mod tests {
             "{:?}",
             resp.conflicts
         );
-        assert!(db.get_node(a).is_some(), "the node is still there");
+        assert!(db.get_node(a).unwrap().is_some(), "the node is still there");
     }
 
     #[test]

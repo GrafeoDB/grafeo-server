@@ -73,7 +73,7 @@ impl SearchService {
         let results = tokio::task::spawn_blocking(move || {
             entry
                 .db()
-                .text_search(&req.label, &req.property, &req.query, req.k as usize)
+                .text_search(&req.label, &req.property, &req.query, req.k as usize, None)
         })
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
@@ -123,6 +123,7 @@ impl SearchService {
                 &req.query_text,
                 query_vec.as_deref(),
                 req.k as usize,
+                None,
                 None,
             )
         })

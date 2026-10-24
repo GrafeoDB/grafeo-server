@@ -1,0 +1,12 @@
+{
+  "database_type": "Lpg",
+  "options": {
+    "backward_edges": false,
+    "memory_limit_bytes": 67108864,
+    "section_tiers": null,
+    "spill_path": null,
+    "threads": 2,
+    "wal_durability": null,
+    "wal_enabled": null
+  }
+}
