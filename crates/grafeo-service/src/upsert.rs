@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use grafeo_common::types::{PropertyKey, Value};
-use grafeo_common::utils::error::{Error, QueryErrorKind, TransactionError};
+use grafeo_common::utils::error::{Error, QueryErrorKind};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::{EdgeUpsertOptions, GraphHandle, UpsertSummary};
 
@@ -53,15 +53,8 @@ impl UpsertService {
             return Err(ServiceError::ReadOnly);
         }
         let entry = databases.get_available(db_name)?;
+        let options = edge_upsert_options(&req);
         let rows = rows_from_json(req.rows)?;
-        let options = EdgeUpsertOptions {
-            key: req.key,
-            endpoint_key: req.endpoint_key,
-            endpoint_labels: req.endpoint_labels,
-            src_field: req.src_field,
-            dst_field: req.dst_field,
-            replace: req.replace,
-        };
         run_blocking(move || {
             let db = entry.db();
             let summary = match req.graph.as_deref() {
@@ -92,48 +85,31 @@ async fn run_blocking(
 }
 
 /// A handle on a named graph of the current schema; 404 only when the graph
-/// is missing (the engine reports that as a semantic query error), anything
+/// is missing (the engine reports that as an invalid reference), anything
 /// else is an internal failure.
 fn graph_handle<'db>(db: &'db GrafeoDB, graph: &str) -> Result<GraphHandle<'db>, ServiceError> {
     db.graph(graph).map_err(|e| match e {
-        Error::Query(ref q) if q.kind == QueryErrorKind::Semantic => {
+        Error::Query(ref q) if q.kind == QueryErrorKind::InvalidReference => {
             ServiceError::NotFound(format!("graph '{graph}' not found"))
         }
         other => upsert_error(other),
     })
 }
 
-/// Maps an engine failure of an upsert: internal kinds (internal, I/O,
-/// serialization and storage errors) are 500; a write-write conflict with a
-/// concurrent transaction (or a serialization failure or deadlock) is 409,
-/// which the caller can retry; constraint violations, query errors and bad
-/// input stay 400, a timeout is a timeout.
+/// Maps an engine failure of an upsert (see [`ServiceError::from_engine`]).
 fn upsert_error(error: Error) -> ServiceError {
-    match error {
-        Error::Internal(_) | Error::Io(_) | Error::Serialization(_) | Error::Storage(_) => {
-            ServiceError::Internal(error.to_string())
-        }
-        Error::Transaction(
-            TransactionError::WriteConflict(_)
-            | TransactionError::Conflict
-            | TransactionError::Aborted
-            | TransactionError::SerializationFailure(_)
-            | TransactionError::Deadlock,
-        ) => ServiceError::Conflict(error.to_string()),
-        Error::Transaction(TransactionError::Timeout) => ServiceError::Timeout,
-        Error::Query(ref q) if q.kind == QueryErrorKind::Timeout => ServiceError::Timeout,
-        Error::NodeNotFound(_)
-        | Error::EdgeNotFound(_)
-        | Error::PropertyNotFound(_)
-        | Error::LabelNotFound(_)
-        | Error::TypeMismatch { .. }
-        | Error::InvalidValue(_)
-        | Error::Transaction(_)
-        | Error::Query(_) => ServiceError::BadRequest(error.to_string()),
-        // `Error` is non-exhaustive: a variant added later is not known to be
-        // the caller's fault.
-        _ => ServiceError::Internal(error.to_string()),
-    }
+    ServiceError::from_engine(error)
+}
+
+/// The engine's edge upsert options for a request.
+fn edge_upsert_options(req: &UpsertEdgesRequest) -> EdgeUpsertOptions {
+    EdgeUpsertOptions::new()
+        .with_key(req.key.clone())
+        .with_endpoint_key(req.endpoint_key.clone())
+        .with_endpoint_labels(req.endpoint_labels.iter().cloned())
+        .with_src_field(req.src_field.clone())
+        .with_dst_field(req.dst_field.clone())
+        .with_replace(req.replace)
 }
 
 /// Converts request rows (plain JSON objects) to engine rows.
@@ -203,7 +179,7 @@ fn json_to_value(json: serde_json::Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_common::utils::error::{QueryError, StorageError};
+    use grafeo_common::utils::error::{QueryError, StorageError, TransactionError};
 
     #[test]
     fn integers_beyond_i64_are_rejected_with_row_and_property() {
@@ -246,25 +222,33 @@ mod tests {
 
     #[test]
     fn engine_errors_map_to_service_errors() {
-        let q = |kind| Error::Query(QueryError::new(kind, "x"));
+        let q = |kind| Error::from(QueryError::new(kind, "x"));
         let tx = Error::Transaction;
         let table: Vec<(Error, &str)> = vec![
             (Error::Internal("x".into()), "internal"),
             (Error::Io(std::io::Error::other("x")), "internal"),
             (Error::Serialization("x".into()), "internal"),
-            (Error::Storage(StorageError::Full), "internal"),
+            (Error::from(StorageError::Full), "internal"),
             (q(QueryErrorKind::Semantic), "bad_request"),
             (q(QueryErrorKind::Execution), "bad_request"),
             (q(QueryErrorKind::Syntax), "bad_request"),
             (q(QueryErrorKind::Timeout), "timeout"),
             (Error::InvalidValue("x".into()), "bad_request"),
             (Error::PropertyNotFound("x".into()), "bad_request"),
+            (Error::type_mismatch("a", "b"), "bad_request"),
+            (tx(TransactionError::DatabaseClosed), "unavailable"),
+            (tx(TransactionError::IncompleteCommit), "unavailable"),
             (
-                Error::TypeMismatch {
-                    expected: "a".into(),
-                    found: "b".into(),
-                },
-                "bad_request",
+                tx(TransactionError::LogWriteFailed("x".into())),
+                "unavailable",
+            ),
+            (
+                tx(TransactionError::CommitOutcomeUnknown("x".into())),
+                "unavailable",
+            ),
+            (
+                tx(TransactionError::LogUnavailable("x".into())),
+                "unavailable",
             ),
             (tx(TransactionError::WriteConflict("x".into())), "conflict"),
             (tx(TransactionError::Conflict), "conflict"),
@@ -286,7 +270,8 @@ mod tests {
             let got = match upsert_error(error) {
                 ServiceError::Internal(_) => "internal",
                 ServiceError::BadRequest(_) => "bad_request",
-                ServiceError::Conflict(_) => "conflict",
+                ServiceError::TransactionConflict(_) => "conflict",
+                ServiceError::Unavailable(_) => "unavailable",
                 ServiceError::Timeout => "timeout",
                 other => panic!("unexpected {other:?}"),
             };
