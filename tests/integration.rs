@@ -2260,7 +2260,10 @@ async fn gwp_create_database_then_query() {
 
     // Create session, configure to the new database, execute query
     let mut session = conn.create_session().await.unwrap();
-    session.set_parameter("_database", "query-db").await.unwrap();
+    session
+        .set_parameter("_database", "query-db")
+        .await
+        .unwrap();
 
     let mut cursor = session
         .execute(
@@ -2317,7 +2320,10 @@ async fn gwp_delete_then_recreate_database() {
 
     // Should be queryable
     let mut session = conn.create_session().await.unwrap();
-    session.set_parameter("_database", "ephemeral").await.unwrap();
+    session
+        .set_parameter("_database", "ephemeral")
+        .await
+        .unwrap();
 
     let mut cursor = session
         .execute(
