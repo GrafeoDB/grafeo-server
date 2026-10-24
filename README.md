@@ -318,7 +318,7 @@ let rows = cursor.collect_rows().await?;
 session.close().await?;
 ```
 
-A session follows ISO/IEC 39075: it works in one database, `default` unless the `_database` session parameter names another (`session.set_parameter("_database", "sales")`), and the graph and schema are session state inside that database (`session.set_graph("q3")` selects a named graph, as `SESSION SET GRAPH` does). Setting the graph or schema and resetting the session keep an open transaction; switching `_database` while a transaction is open is refused with GQLSTATUS `25G01`, since a transaction cannot span two databases. The handshake reports the server as `GrafeoDB` with its version.
+A session follows ISO/IEC 39075: it works in one database, `default` unless the `_database` session parameter names another (`session.set_parameter("_database", "sales")`), and the graph and schema are session state inside that database (`session.set_graph("q3")` selects a named graph, as `SESSION SET GRAPH` does). Setting the graph or schema and resetting the session keep an open transaction; switching `_database` while a transaction is open is refused with GQLSTATUS `25G01`, since a transaction cannot span two databases. The catalog service (`session.catalog()`) shows the session database's schemas and graphs, the same graphs `CREATE GRAPH` makes; databases themselves are created and dropped over HTTP. The handshake reports the server as `GrafeoDB` with its version.
 
 Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 

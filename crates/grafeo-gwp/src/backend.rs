@@ -9,10 +9,10 @@ use dashmap::DashMap;
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{
-    AdminStats, AdminValidationResult, AdminWalStatus, CreateGraphConfig, GqlBackend, GraphInfo,
-    GraphTypeInfo, HybridSearchParams, IndexDefinition, ResetTarget, ResultFrame, ResultStream,
-    SchemaInfo, SearchHit, SessionConfig, SessionHandle, SessionProperty, TextSearchParams,
-    TransactionHandle, ValidationDiagnostic, VectorSearchParams,
+    AdminStats, AdminValidationResult, AdminWalStatus, CatalogContext, CreateGraphConfig,
+    GqlBackend, GraphInfo, GraphTypeInfo, HybridSearchParams, IndexDefinition, ResetTarget,
+    ResultFrame, ResultStream, SchemaInfo, SearchHit, SessionConfig, SessionHandle,
+    SessionProperty, TextSearchParams, TransactionHandle, ValidationDiagnostic, VectorSearchParams,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -66,6 +66,10 @@ pub struct GrafeoBackend {
     sessions: DashMap<String, Arc<Mutex<GrafeoSession>>>,
     #[cfg(feature = "auth")]
     pub(crate) pending: PendingAuth,
+    /// Set when the server authenticates sessions: catalog calls then need
+    /// a session, since one without has no identity to check.
+    #[cfg(feature = "auth")]
+    catalog_needs_session: bool,
 }
 
 impl GrafeoBackend {
@@ -76,6 +80,8 @@ impl GrafeoBackend {
             sessions: DashMap::new(),
             #[cfg(feature = "auth")]
             pending: std::sync::Arc::new(DashMap::new()),
+            #[cfg(feature = "auth")]
+            catalog_needs_session: false,
         }
     }
 
@@ -89,7 +95,17 @@ impl GrafeoBackend {
             state,
             sessions: DashMap::new(),
             pending,
+            catalog_needs_session: false,
         }
+    }
+
+    /// Refuses catalog calls that name no session (the server authenticates
+    /// sessions). [`serve`](crate::serve) sets this with an auth provider.
+    #[cfg(feature = "auth")]
+    #[must_use]
+    pub fn with_catalog_sessions_required(mut self) -> Self {
+        self.catalog_needs_session = true;
+        self
     }
 
     /// Returns `true` if client-facing queries should be read-only.
@@ -180,60 +196,118 @@ impl GrafeoBackend {
         Ok(())
     }
 
-    /// Builds a `GraphInfo` from a database entry.
+    /// The database a catalog call works in, and the identity it acts as:
+    /// the calling session's, or the default database for a call without
+    /// one (refused when the server authenticates sessions).
     #[allow(clippy::result_large_err)]
-    fn build_graph_info(&self, name: &str) -> Result<GraphInfo, GqlError> {
+    fn catalog_target(&self, ctx: &CatalogContext) -> Result<CatalogTarget, GqlError> {
+        match &ctx.session {
+            Some(handle) => {
+                let session_arc = self.get_session(handle)?;
+                let s = session_arc.lock();
+                Ok(CatalogTarget {
+                    database: s.database.clone(),
+                    #[cfg(feature = "auth")]
+                    identity: s.identity.clone(),
+                })
+            }
+            None => {
+                #[cfg(feature = "auth")]
+                if self.catalog_needs_session {
+                    return Err(GqlError::Session(
+                        "catalog calls need an authenticated session (pass its session id)"
+                            .to_owned(),
+                    ));
+                }
+                Ok(CatalogTarget {
+                    database: DEFAULT_DATABASE.to_owned(),
+                    #[cfg(feature = "auth")]
+                    identity: None,
+                })
+            }
+        }
+    }
+
+    /// Runs `statement` in `schema` of the catalog target, on an engine
+    /// session of its own (the caller's session keeps its graph and schema).
+    async fn catalog_execute(
+        &self,
+        target: &CatalogTarget,
+        schema: &str,
+        statement: String,
+    ) -> Result<grafeo_engine::database::QueryResult, GqlError> {
+        let engine_session = self
+            .open_engine_session(
+                &target.database,
+                #[cfg(feature = "auth")]
+                target.identity.clone(),
+            )
+            .await?;
+        let schema = schema_name(schema).map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            if let Some(schema) = schema {
+                engine_session.set_schema(&schema);
+            }
+            engine_session.execute(&statement)
+        })
+        .await
+        .map_err(GqlError::backend)?
+        .map_err(|e| GqlError::Session(e.to_string()))
+    }
+
+    /// Whether graph `name` exists in `schema` of the catalog target.
+    #[allow(clippy::result_large_err)]
+    fn graph_exists(
+        &self,
+        target: &CatalogTarget,
+        schema: &str,
+        name: &str,
+    ) -> Result<bool, GqlError> {
         let entry = self
             .state
             .databases()
-            .get(name)
-            .ok_or_else(|| GqlError::Session(format!("graph '{name}' not found")))?;
+            .get_available(&target.database)
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+        Ok(entry.db().graph_in(schema_name(schema), name).is_ok())
+    }
 
+    /// Describes graph `name` in `schema` of the catalog target. The storage
+    /// settings are its database's: a graph lives in its database.
+    #[allow(clippy::result_large_err)]
+    fn graph_info(
+        &self,
+        target: &CatalogTarget,
+        schema: &str,
+        name: &str,
+    ) -> Result<GraphInfo, GqlError> {
+        let entry = self
+            .state
+            .databases()
+            .get_available(&target.database)
+            .map_err(|e| GqlError::Session(e.to_string()))?;
         let db = entry.db();
-        let count = |result: grafeo_common::Result<usize>| {
-            result
-                .map(|n| n as u64)
-                .map_err(|e| GqlError::backend(ServiceError::from_engine(e)))
-        };
+        let handle = db
+            .graph_in(schema_name(schema), name)
+            .map_err(|_| GqlError::Session(format!("graph '{name}' not found")))?;
+        let engine_error = |e| GqlError::backend(ServiceError::from_engine(e));
+        let snapshot = handle.snapshot().map_err(engine_error)?;
+        let view = snapshot.view();
         Ok(GraphInfo {
-            schema: DEFAULT_SCHEMA.to_owned(),
+            schema: if schema.is_empty() {
+                DEFAULT_SCHEMA
+            } else {
+                schema
+            }
+            .to_owned(),
             name: name.to_owned(),
-            node_count: count(db.node_count())?,
-            edge_count: count(db.edge_count())?,
+            node_count: snapshot.store().node_count(view).map_err(engine_error)? as u64,
+            edge_count: snapshot.store().edge_count(view).map_err(engine_error)? as u64,
             graph_type: entry.metadata.database_type.clone(),
             storage_mode: entry.metadata.storage_mode.clone(),
             memory_limit_bytes: db.memory_limit().map(|v| v as u64),
             backward_edges: Some(entry.metadata.backward_edges),
             threads: Some(entry.metadata.threads as u32),
         })
-    }
-
-    /// Deletes the database behind graph `name`, after invalidating the GWP
-    /// sessions that target it.
-    #[allow(clippy::result_large_err)]
-    fn delete_graph(&self, name: &str) -> Result<(), GqlError> {
-        let sessions_to_remove: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|entry| entry.value().lock().database == name)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        if !sessions_to_remove.is_empty() {
-            tracing::info!(
-                graph = %name,
-                count = sessions_to_remove.len(),
-                "Invalidating GWP sessions for dropped graph"
-            );
-            for sid in &sessions_to_remove {
-                self.sessions.remove(sid);
-            }
-        }
-
-        self.state
-            .databases()
-            .delete(name)
-            .map_err(|e| GqlError::Session(e.to_string()))
     }
 }
 
@@ -473,46 +547,58 @@ impl GqlBackend for GrafeoBackend {
     }
 
     // -----------------------------------------------------------------
-    // Catalog: Schema operations
+    // Catalog: the GQL-catalog of the calling session's database (ISO/IEC
+    // 39075 4.2.5): its engine schemas and graphs, the namespace GQL
+    // `CREATE GRAPH` uses. A call without a session works in `default`.
     // -----------------------------------------------------------------
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, GqlError> {
-        // Query actual engine schemas via SHOW SCHEMAS on the default database.
-        let schemas =
-            AdminService::list_schemas(self.state.databases(), self.state.metrics(), "default")
-                .await
-                .map_err(|e| GqlError::Session(e.to_string()))?;
+        self.list_schemas_in(&CatalogContext::default()).await
+    }
 
-        if schemas.is_empty() {
-            // No schemas defined: report the implicit default schema.
-            let databases = self.state.databases().list();
-            return Ok(vec![SchemaInfo {
-                name: DEFAULT_SCHEMA.to_owned(),
-                graph_count: databases.len() as u32,
-                graph_type_count: 0,
-            }]);
-        }
-
-        Ok(schemas
-            .into_iter()
-            .map(|name| SchemaInfo {
+    async fn list_schemas_in(&self, ctx: &CatalogContext) -> Result<Vec<SchemaInfo>, GqlError> {
+        let target = self.catalog_target(ctx)?;
+        let named = AdminService::list_schemas(
+            self.state.databases(),
+            self.state.metrics(),
+            &target.database,
+        )
+        .await
+        .map_err(|e| GqlError::Session(e.to_string()))?;
+        let mut schemas = Vec::with_capacity(named.len() + 1);
+        for name in std::iter::once(DEFAULT_SCHEMA.to_owned()).chain(named) {
+            let graphs = self
+                .catalog_execute(&target, &name, "SHOW GRAPHS".to_owned())
+                .await?;
+            schemas.push(SchemaInfo {
                 name,
-                graph_count: 0,
+                graph_count: graphs.rows().len() as u32,
                 graph_type_count: 0,
-            })
-            .collect())
+            });
+        }
+        Ok(schemas)
     }
 
     async fn create_schema(&self, name: &str, if_not_exists: bool) -> Result<(), GqlError> {
-        let result = AdminService::create_schema(
+        self.create_schema_in(&CatalogContext::default(), name, if_not_exists)
+            .await
+    }
+
+    async fn create_schema_in(
+        &self,
+        ctx: &CatalogContext,
+        name: &str,
+        if_not_exists: bool,
+    ) -> Result<(), GqlError> {
+        let target = self.catalog_target(ctx)?;
+        let created = AdminService::create_schema(
             self.state.databases(),
             self.state.metrics(),
-            "default",
+            &target.database,
             name,
         )
         .await;
-
-        match result {
+        match created {
             Ok(true) => Ok(()),
             Ok(false) if if_not_exists => Ok(()),
             Ok(false) => Err(GqlError::Session(format!("schema '{name}' already exists"))),
@@ -521,48 +607,64 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn drop_schema(&self, name: &str, if_exists: bool) -> Result<bool, GqlError> {
-        let result = AdminService::drop_schema(
+        self.drop_schema_in(&CatalogContext::default(), name, if_exists)
+            .await
+    }
+
+    async fn drop_schema_in(
+        &self,
+        ctx: &CatalogContext,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<bool, GqlError> {
+        let target = self.catalog_target(ctx)?;
+        let dropped = AdminService::drop_schema(
             self.state.databases(),
             self.state.metrics(),
-            "default",
+            &target.database,
             name,
         )
         .await
         .map_err(|e| GqlError::Session(e.to_string()))?;
-
-        match (result, if_exists) {
+        match (dropped, if_exists) {
             (true, _) => Ok(true),
             (false, true) => Ok(false),
             (false, false) => Err(GqlError::Session(format!("schema '{name}' not found"))),
         }
     }
 
-    // -----------------------------------------------------------------
-    // Catalog: Graph operations (maps to Grafeo databases)
-    // -----------------------------------------------------------------
+    async fn list_graphs(&self, schema: &str) -> Result<Vec<GraphInfo>, GqlError> {
+        self.list_graphs_in(&CatalogContext::default(), schema)
+            .await
+    }
 
-    async fn list_graphs(&self, _schema: &str) -> Result<Vec<GraphInfo>, GqlError> {
-        let list = self.state.databases().list();
-        Ok(list
-            .into_iter()
-            .map(|s| GraphInfo {
-                schema: DEFAULT_SCHEMA.to_owned(),
-                name: s.name,
-                node_count: s.node_count as u64,
-                edge_count: s.edge_count as u64,
-                graph_type: s.database_type,
-                storage_mode: String::new(),
-                memory_limit_bytes: None,
-                backward_edges: None,
-                threads: None,
-            })
-            .collect())
+    async fn list_graphs_in(
+        &self,
+        ctx: &CatalogContext,
+        schema: &str,
+    ) -> Result<Vec<GraphInfo>, GqlError> {
+        let target = self.catalog_target(ctx)?;
+        let names = self
+            .catalog_execute(&target, schema, "SHOW GRAPHS".to_owned())
+            .await?;
+        names
+            .rows()
+            .iter()
+            .filter_map(|row| row.first().and_then(|v| v.as_str()).map(str::to_owned))
+            .map(|name| self.graph_info(&target, schema, &name))
+            .collect()
     }
 
     async fn create_graph(&self, config: CreateGraphConfig) -> Result<GraphInfo, GqlError> {
-        use grafeo_service::types::{
-            CreateDatabaseRequest, DatabaseOptions, DatabaseType, StorageMode,
-        };
+        self.create_graph_in(&CatalogContext::default(), config)
+            .await
+    }
+
+    async fn create_graph_in(
+        &self,
+        ctx: &CatalogContext,
+        config: CreateGraphConfig,
+    ) -> Result<GraphInfo, GqlError> {
         use gwp::server::GraphTypeSpec;
 
         // ISO/IEC 39075 12.4: a statement takes OR REPLACE or IF NOT EXISTS,
@@ -572,87 +674,113 @@ impl GqlBackend for GrafeoBackend {
                 "OR REPLACE and IF NOT EXISTS cannot both be set".to_owned(),
             ));
         }
-        let exists = || self.state.databases().get(&config.name).is_some();
-        if config.if_not_exists && exists() {
-            return self.build_graph_info(&config.name);
-        }
-
-        let database_type = match &config.type_spec {
-            Some(GraphTypeSpec::Named(name)) => match name.to_lowercase().as_str() {
-                "lpg" => DatabaseType::Lpg,
-                "rdf" => DatabaseType::Rdf,
-                other => {
-                    return Err(GqlError::Session(format!(
-                        "unsupported graph type: {other}"
-                    )));
-                }
-            },
-            Some(GraphTypeSpec::Open) | None => DatabaseType::Lpg,
-        };
-
-        let storage_mode = match config.storage_mode.to_lowercase().as_str() {
-            "inmemory" | "in-memory" | "in_memory" | "" => StorageMode::InMemory,
-            "persistent" => StorageMode::Persistent,
-            other => {
+        refuse_database_options(&config)?;
+        let target = self.catalog_target(ctx)?;
+        if let Some(GraphTypeSpec::Named(type_name)) = &config.type_spec {
+            let database_model = self
+                .state
+                .databases()
+                .get(&target.database)
+                .map(|e| e.metadata.database_type.clone())
+                .unwrap_or_default();
+            let model = if database_model.contains("rdf") || database_model.contains("owl") {
+                "rdf"
+            } else {
+                "lpg"
+            };
+            if !type_name.eq_ignore_ascii_case(model) {
                 return Err(GqlError::Session(format!(
-                    "unsupported storage mode: {other}"
+                    "graph type '{type_name}' is not supported: a graph has its database's model \
+                     ({model})"
                 )));
             }
-        };
-
-        let req = CreateDatabaseRequest {
-            name: config.name.clone(),
-            database_type,
-            storage_mode,
-            options: DatabaseOptions {
-                memory_limit_bytes: config.memory_limit_bytes.map(|v| v as usize),
-                backward_edges: config.backward_edges,
-                threads: config.threads.map(|v| v as usize),
-                wal_enabled: config.wal_enabled,
-                wal_durability: config.wal_durability,
-                spill_path: None,
-                section_tiers: None,
-            },
-            schema_file: None,
-            schema_filename: None,
-        };
-
-        if config.or_replace && exists() {
-            self.delete_graph(&config.name)?;
         }
-        match self.state.databases().create(&req) {
-            Ok(()) => {}
-            // Created by a concurrent request since the check above.
-            Err(ServiceError::Conflict(_)) if config.if_not_exists && exists() => {}
-            Err(e) => return Err(GqlError::Session(e.to_string())),
+        let exists = self.graph_exists(&target, &config.schema, &config.name)?;
+        if exists && !config.or_replace && !config.if_not_exists {
+            return Err(GqlError::Session(format!(
+                "graph '{}' already exists",
+                config.name
+            )));
         }
-
-        self.build_graph_info(&config.name)
+        if config.or_replace && config.copy_of.as_deref() == Some(config.name.as_str()) {
+            return Err(GqlError::Session(format!(
+                "graph '{}' cannot replace itself with a copy of itself",
+                config.name
+            )));
+        }
+        if !(exists && config.if_not_exists) {
+            // Engine 0.6 parses `CREATE OR REPLACE GRAPH` only for graph types,
+            // so OR REPLACE drops the old graph first (two steps, not atomic).
+            if config.or_replace && exists {
+                self.catalog_execute(
+                    &target,
+                    &config.schema,
+                    format!("DROP GRAPH IF EXISTS {}", quote(&config.name)),
+                )
+                .await?;
+            }
+            let mut statement = String::from("CREATE GRAPH ");
+            if config.if_not_exists {
+                statement.push_str("IF NOT EXISTS ");
+            }
+            statement.push_str(&quote(&config.name));
+            if let Some(source) = &config.copy_of {
+                statement.push_str(" AS COPY OF ");
+                statement.push_str(&quote(source));
+            }
+            self.catalog_execute(&target, &config.schema, statement)
+                .await?;
+        }
+        self.graph_info(&target, &config.schema, &config.name)
     }
 
     async fn drop_graph(
         &self,
-        _schema: &str,
+        schema: &str,
         name: &str,
         if_exists: bool,
     ) -> Result<bool, GqlError> {
-        if self.state.databases().get(name).is_none() {
+        self.drop_graph_in(&CatalogContext::default(), schema, name, if_exists)
+            .await
+    }
+
+    async fn drop_graph_in(
+        &self,
+        ctx: &CatalogContext,
+        schema: &str,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<bool, GqlError> {
+        let target = self.catalog_target(ctx)?;
+        if !self.graph_exists(&target, schema, name)? {
             return if if_exists {
                 Ok(false)
             } else {
-                Err(GqlError::Session(format!("database '{name}' not found")))
+                Err(GqlError::Session(format!("graph '{name}' not found")))
             };
         }
-        match self.delete_graph(name) {
-            Ok(()) => Ok(true),
-            // Dropped by a concurrent request since the check above.
-            Err(_) if if_exists && self.state.databases().get(name).is_none() => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.catalog_execute(
+            &target,
+            schema,
+            format!("DROP GRAPH IF EXISTS {}", quote(name)),
+        )
+        .await?;
+        Ok(true)
     }
 
-    async fn get_graph_info(&self, _schema: &str, name: &str) -> Result<GraphInfo, GqlError> {
-        self.build_graph_info(name)
+    async fn get_graph_info(&self, schema: &str, name: &str) -> Result<GraphInfo, GqlError> {
+        self.get_graph_info_in(&CatalogContext::default(), schema, name)
+            .await
+    }
+
+    async fn get_graph_info_in(
+        &self,
+        ctx: &CatalogContext,
+        schema: &str,
+        name: &str,
+    ) -> Result<GraphInfo, GqlError> {
+        let target = self.catalog_target(ctx)?;
+        self.graph_info(&target, schema, name)
     }
 
     // -----------------------------------------------------------------
@@ -1052,6 +1180,50 @@ const SERIALIZATION_FAILURE: &str = "40001";
 /// transaction is GQLSTATUS 40001 (serialization failure), which clients
 /// retry; anything else gets `other`, with the message (42001 for a statement,
 /// a transaction error for a commit, as before).
+/// Where a catalog call works: a database and the identity to act as.
+struct CatalogTarget {
+    database: String,
+    #[cfg(feature = "auth")]
+    identity: Option<grafeo_engine::auth::Identity>,
+}
+
+/// The engine schema a catalog schema name means: `None` for the implicit
+/// default schema (`""` or `"default"`).
+fn schema_name(schema: &str) -> Option<&str> {
+    (!schema.is_empty() && schema != DEFAULT_SCHEMA).then_some(schema)
+}
+
+/// A GQL delimited identifier: backticks, with a backtick doubled.
+fn quote(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
+/// Refuses the settings of a database in a catalog `CreateGraph`: the
+/// catalog makes graphs inside the session's database, and databases are
+/// created over HTTP (`POST /db`).
+#[allow(clippy::result_large_err)]
+fn refuse_database_options(config: &CreateGraphConfig) -> Result<(), GqlError> {
+    let in_memory = matches!(
+        config.storage_mode.to_lowercase().as_str(),
+        "" | "inmemory" | "in-memory" | "in_memory"
+    );
+    if !in_memory
+        || config.memory_limit_bytes.is_some()
+        || config.backward_edges.is_some()
+        || config.threads.is_some()
+        || config.wal_enabled.is_some()
+        || config.wal_durability.is_some()
+    {
+        return Err(GqlError::Session(
+            "storage mode, memory limit, backward edges, threads and WAL settings belong to a \
+             database: create databases over HTTP (POST /db) and pick one with the `_database` \
+             session parameter"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn gql_error(error: ServiceError, other: impl FnOnce(String) -> GqlError) -> GqlError {
     match error {
         ServiceError::TransactionConflict(message) => {
