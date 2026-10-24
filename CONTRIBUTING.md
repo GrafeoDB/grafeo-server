@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Grafeo Server. This guide covers 
 
 ### Prerequisites
 
-- **Rust** 1.91.1+ (edition 2024)
+- **Rust** 1.99.0+ (edition 2024)
 - **Node.js** 18+ and npm (for web UI development)
 - **Docker** (optional, for container builds)
 
