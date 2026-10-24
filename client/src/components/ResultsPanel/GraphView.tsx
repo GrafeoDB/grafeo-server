@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import Sigma from "sigma";
+import Sigma, { DEFAULT_STYLES } from "sigma";
+import { extremityArrow } from "sigma/rendering";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import { useGraphData } from "../../hooks/useGraphData";
 import type { QueryResponse } from "../../types/api";
@@ -34,12 +35,19 @@ export default function GraphView({ result, onNodeSelect, selectedNodeId }: Grap
       },
     });
 
+    // Sigma 4: rendering is declared with primitives and styles. A styles
+    // entry replaces the default rules for its kind, so they come first.
     const renderer = new Sigma(graph, containerRef.current, {
-      renderEdgeLabels: true,
-      defaultEdgeType: "arrow",
-      labelColor: { color: "#e2e8f0" },
-      labelSize: 12,
-      labelFont: "Inter, sans-serif",
+      primitives: { edges: { extremities: [extremityArrow()] } },
+      styles: {
+        nodes: [
+          DEFAULT_STYLES.nodes,
+          { labelColor: "#e2e8f0", labelSize: 12, labelFont: "Inter, sans-serif" },
+        ],
+        edges: [DEFAULT_STYLES.edges, { head: "arrow" }],
+      },
+      // Node and edge sizes in pixels, as in sigma 3.
+      settings: { renderEdgeLabels: true, itemSizesReference: "screen" },
     });
 
     renderer.on("clickNode", ({ node }) => {
