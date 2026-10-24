@@ -357,6 +357,8 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
 | `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
+| `GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE` | `--bolt-max-unauthenticated-message-size` | `0` | Largest Bolt message before LOGON, in bytes (0 = the default, 64 KiB) |
+| `GRAFEO_BOLT_HANDSHAKE_TIMEOUT` | `--bolt-handshake-timeout` | `30` | Seconds a Bolt connection has to finish its handshake, HELLO and LOGON (0 = no limit) |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |

@@ -14,6 +14,7 @@ Engine 0.6.0 alignment: a new single-file database format that 0.5.x data direct
 ### Added
 
 - **`--bolt-max-message-size`** (`GRAFEO_BOLT_MAX_MESSAGE_SIZE`): the largest Bolt message accepted, in bytes (0 keeps the default, 16 MiB).
+- **`--bolt-max-unauthenticated-message-size`** (`GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE`): the largest Bolt message before LOGON, in bytes (0 keeps boltr's default, 64 KiB), and **`--bolt-handshake-timeout`** (`GRAFEO_BOLT_HANDSHAKE_TIMEOUT`): the seconds a connection has to finish its handshake, HELLO and LOGON (default 30, 0 turns it off).
 - **`POST /admin/{db}/compact` returns the engine's report**: `checkpointed`, `versions_collected` and `duration_ms` next to `compacted`.
 - **Migration tests on a real 0.5.44 data directory** (`tests/fixtures/server-0.5.44`, written by engine 0.5.44): a clean database, one with `options.json`, one whose last commits are only in its WAL, the legacy `grafeo.db` layout and a 0.5 backup.
 
@@ -35,12 +36,16 @@ Engine 0.6.0 alignment: a new single-file database format that 0.5.x data direct
 
 ### Fixed
 
-- **Security: Bolt ran statements for a connection that had not logged on**: with boltr 0.2.0, a client could send HELLO, a LOGON with wrong credentials, then RESET, and RUN statements with full rights, because the server built an unrestricted database session before LOGON. A Bolt session now gets its database session only once LOGON succeeds (and an unknown principal is refused), so a RUN, BEGIN or database switch before it fails whatever the protocol layer lets through. boltr 0.3.0 also closes the connection after a failed LOGON, times out connections that do not log on and caps messages before LOGON at 64 KiB; the server moves to it once it is published. Affects every earlier release with the `bolt` feature and auth on (the `-bolt` and `-full` images).
+- **Security: Bolt ran statements for a connection that had not logged on**: with boltr 0.2.0, a client could send HELLO, a LOGON with wrong credentials, then RESET, and RUN statements with full rights, because the server built an unrestricted database session before LOGON. A Bolt session now gets its database session only once LOGON succeeds (and an unknown principal is refused), so a RUN, BEGIN or database switch before it fails whatever the protocol layer lets through. With boltr 0.3.0 (from 0.2.0) the connection also closes after a failed LOGON, a connection that does not log on times out (`--bolt-handshake-timeout`) and messages before LOGON are capped at 64 KiB (`--bolt-max-unauthenticated-message-size`). Affects every earlier release with the `bolt` feature and auth on (the `-bolt` and `-full` images).
 - **Query writes after a compaction were not in the WAL** ([grafeo#558](https://github.com/GrafeoDB/grafeo/issues/558)): on a persistent database, a crash after `POST /admin/{db}/compact` and before the next checkpoint lost every HTTP, GWP and Bolt write since the compaction. Engine 0.6 logs them; a test crashes a process after a compaction and a write and finds the write.
 - **The change feed could miss RDF changes in an epoch it reported complete** ([grafeo#414](https://github.com/GrafeoDB/grafeo/issues/414)): engine 0.6 records a SPARQL or GraphQL update's triple changes at the epoch of its own commit, and only for updates that commit, so the caveat of 0.5.44 is gone.
 - **Restoring from a backup file changed the file**: it was opened read-write, which on engine 0.6 migrates a 0.5.x backup in place (with `.pre-0.6` copies in the backup directory) and leaves a WAL next to it. Restores open it read-only, and the recovery from the safety backup removes a leftover WAL before it writes the database back.
 - **Creating a database could adopt the 0.5.x copy a migration keeps**: a directory with `data.grafeo.pre-0.6` (or its WAL) and no `data.grafeo` is now refused (409), as other leftover database files are.
 - **A commit that failed on a write conflict returned 500 with no detail** and kept the session registered until its TTL (see Changed).
+
+### Security
+
+- **tokio 1.54.1** (from the yanked 1.54.0): fixes a race between `tokio::time::Interval` and the runtime's time driver that could use memory after it was freed ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384)). Released builds were not affected: 0.5.44 shipped before tokio 1.54.0.
 
 ## [0.5.44] - 2026-10-04
 
