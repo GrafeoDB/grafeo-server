@@ -47,7 +47,7 @@ pub use state::AppState;
     info(
         title = "Grafeo Server API",
         description = "HTTP API for the Grafeo graph database engine.\n\nSupports GQL, Cypher, GraphQL, Gremlin, SPARQL, and SQL/PGQ query languages with both auto-commit and explicit transaction modes.\n\nAll query languages support CALL procedures for 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.).\n\nMulti-database support: create, delete, and query named databases.",
-        version = "0.5.44",
+        version = "0.6.0",
         license(name = "Apache-2.0"),
     ),
     paths(
@@ -121,7 +121,8 @@ pub use state::AppState;
             grafeo_service::types::DatabaseStats, grafeo_service::types::WalStatusInfo,
             grafeo_service::types::ValidationInfo, grafeo_service::types::ValidationErrorItem,
             grafeo_service::types::ValidationWarningItem, grafeo_service::types::IndexDef,
-            grafeo_service::types::CacheStatsInfo, grafeo_service::types::WriteCountersInfo,
+            grafeo_service::types::CacheStatsInfo, grafeo_service::types::CompactInfo,
+            grafeo_service::types::WriteCountersInfo,
             grafeo_service::types::StorageTiersResponse,
             grafeo_service::types::SectionTierInfo,
             grafeo_service::types::ReloadEligibleRequest,
