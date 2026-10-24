@@ -5,7 +5,7 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-24-10
+## [0.6.0] - 2026-10-24
 
 Engine 0.6.0 alignment: a new single-file database format that 0.5.x data directories migrate to on first start, writes after a compaction that survive a crash, exact decimals, and clearer errors. A write conflict is now a retryable 409 (a transient error over Bolt, GQLSTATUS 40001 over GWP), an unknown query language is a 400 instead of running as GQL, and Bolt runs nothing for a connection that has not logged on. Lockstep with grafeo 0.6.0.
 
@@ -34,7 +34,7 @@ Engine 0.6.0 alignment: a new single-file database format that 0.5.x data direct
 - **Database info, stats, schema and validation report a failed read** ([grafeo#416](https://github.com/GrafeoDB/grafeo/issues/416)): `GET /db/{name}`, `/db/{name}/stats`, `/db/{name}/schema`, `/admin/{db}/stats`, `/admin/{db}/validate`, the GWP graph info and the sync schema check fail with the engine's error (503 for a database that is closing) instead of reporting what an incomplete read saw. `GET /db` still lists every database: one whose counts cannot be read shows 0 and logs a warning.
 - **gwp 0.3.0** (from 0.2.1): a failed GWP commit ends the transaction, where every later begin on the session failed with `25G01`; a second begin on a session with a transaction gets `25G01`; a commit, rollback and statement on one transaction no longer race; the idle session reaper rolls back the open transaction before it closes the session, and `--session-ttl 0` no longer panics it; a GQLSTATUS error from the session, catalog, admin or search service carries a gRPC code from its class (`42` is `INVALID_ARGUMENT`, `40` `ABORTED`) and a `gql-status` metadata entry, where it was always `INTERNAL`.
 - **utoipa 6 and utoipa-swagger-ui 10** (from 5 and 9): `/api/openapi.json` stays OpenAPI 3.1.0 with the same paths and schemas; a nullable reference (`QueryResponse.counters`, the `/tx/begin` body) lists its schema before `null` in `oneOf`.
-- **Major dependency updates**: `parking_lot` 0.13 (from 0.12).
+- **Major dependency updates**: `parking_lot` 0.13 (from 0.12), `rand` 0.10 and `sha2` 0.11 (from 0.9 and 0.10; API tokens are still 32 bytes from the thread-local CSPRNG, hashed with SHA-256).
 - **Dependencies**: `cargo update` within the current requirements, Studio npm dependencies within their ranges, and GitHub Actions on their current major versions (`actions/checkout@v7`, `actions/cache@v6`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `codecov/codecov-action@v7`, `docker/*` v4 and `docker/build-push-action@v7`). The CI MSRV job checks Rust 1.99.0.
 
 ### Fixed
