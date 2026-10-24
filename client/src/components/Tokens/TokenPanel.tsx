@@ -16,8 +16,9 @@ export default function TokenPanel() {
   const [tokens, setTokens] = useState<TokenResponse[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const refresh = useCallback(() => {
-    setLoading(true);
+  // Loads the list, setting state only when the answer arrives (the first
+  // load starts with `loading` already true).
+  const load = useCallback(() => {
     api.tokens
       .list()
       .then(setTokens)
@@ -25,9 +26,14 @@ export default function TokenPanel() {
       .finally(() => setLoading(false));
   }, []);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    load();
+  }, [load]);
+
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    load();
+  }, [load]);
 
   const handleDelete = useCallback(
     async (id: string, name: string) => {

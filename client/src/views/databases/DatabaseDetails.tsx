@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, GrafeoApiError } from "../../api/client";
 import type {
@@ -28,20 +28,22 @@ export default function DatabaseDetails() {
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const loadedName = useRef<string | null>(null);
+  const [shownName, setShownName] = useState(name);
+
+  // Switching databases clears what the previous one showed, during render
+  // (https://react.dev/learn/you-might-not-need-an-effect). A refresh of the
+  // same database keeps it, so mounted sections (and their toasts) survive.
+  if (shownName !== name) {
+    setShownName(name);
+    setNotFound(false);
+    setLoadError(null);
+    setSummary(null);
+    setStats(null);
+    setWal(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
-    setNotFound(false);
-    setLoadError(null);
-    // Clear details only when switching databases; on a refresh of the same
-    // database keep them so mounted sections (and their toasts) survive.
-    if (loadedName.current !== name) {
-      loadedName.current = name;
-      setSummary(null);
-      setStats(null);
-      setWal(null);
-    }
 
     // Only the db list decides not-found. Stats + WAL are best-effort
     // details that swallow their own errors so a missing stats endpoint
@@ -80,7 +82,11 @@ export default function DatabaseDetails() {
     };
   }, [name, refreshKey]);
 
-  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refresh = useCallback(() => {
+    setNotFound(false);
+    setLoadError(null);
+    setRefreshKey((k) => k + 1);
+  }, []);
 
   if (notFound) {
     return (

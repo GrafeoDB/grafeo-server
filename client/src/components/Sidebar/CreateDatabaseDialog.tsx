@@ -84,9 +84,12 @@ export default function CreateDatabaseDialog({
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
+  // Opening the dialog starts a fresh form, set during render
+  // (https://react.dev/learn/you-might-not-need-an-effect).
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) {
-      fetchResources();
       setName("");
       setShowTiers(false);
       setSectionTiers({});
@@ -98,14 +101,11 @@ export default function CreateDatabaseDialog({
       setSchemaFile(null);
       setError(null);
     }
-  }, [open, fetchResources]);
+  }
 
-  // Auto-enable WAL when switching to persistent
   useEffect(() => {
-    if (storageMode === "Persistent") {
-      setWalEnabled(true);
-    }
-  }, [storageMode]);
+    if (open) fetchResources();
+  }, [open, fetchResources]);
 
   if (!open) return null;
 
@@ -271,6 +271,8 @@ export default function CreateDatabaseDialog({
                   resources?.persistent_available
                 ) {
                   setStorageMode("Persistent");
+                  // A persistent database starts with its WAL on.
+                  setWalEnabled(true);
                 } else {
                   setStorageMode("InMemory");
                 }

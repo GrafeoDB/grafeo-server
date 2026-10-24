@@ -13,7 +13,6 @@ export default function TokensView() {
   const [dbLoadError, setDbLoadError] = useState<string | null>(null);
 
   const loadDatabases = useCallback(() => {
-    setDbLoadError(null);
     api.db
       .list()
       .then((r) => setDatabases(r.databases))
@@ -31,6 +30,11 @@ export default function TokensView() {
   }, []);
 
   useEffect(() => {
+    loadDatabases();
+  }, [loadDatabases]);
+
+  const retryDatabases = useCallback(() => {
+    setDbLoadError(null);
     loadDatabases();
   }, [loadDatabases]);
 
@@ -65,7 +69,7 @@ export default function TokensView() {
           <button
             type="button"
             className={styles.retry}
-            onClick={loadDatabases}
+            onClick={retryDatabases}
           >
             Retry
           </button>
