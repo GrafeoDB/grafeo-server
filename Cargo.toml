@@ -31,7 +31,9 @@ grafeo-boltr = { path = "crates/grafeo-boltr" }
 grafeo-sync = { path = "crates/grafeo-sync" }
 
 # External protocol crates
-boltr = "0.2.0"
+# 0.3: the RESET authentication bypass fix, handshake timeout and the
+# message cap before LOGON.
+boltr = "0.3"
 gwp = "0.2.1"
 
 # Async
