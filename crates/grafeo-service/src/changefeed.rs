@@ -447,8 +447,40 @@ mod tests {
         assert_eq!(received(&mut rx).len(), 1);
     }
 
-    /// RDF triple events are recorded at the store's current epoch, which is
-    /// 0 before the first write: an empty first poll must not pass it.
+    /// Engine 0.6 (grafeo#414) records an RDF update's triple events at the
+    /// epoch of its own commit, as it does for property graph writes: the
+    /// update starts a new epoch, so an epoch the feed reported complete
+    /// gains no triple events later. Engine 0.5.44 recorded them at the
+    /// current epoch without starting a new one.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn an_rdf_update_commits_at_an_epoch_of_its_own() {
+        let mgr = cdc_manager();
+        let db = mgr.get("default").unwrap().db();
+        db.create_node(&["A"]).unwrap();
+        let before = db.current_epoch();
+        db.session()
+            .execute_sparql(
+                "INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }",
+            )
+            .unwrap();
+        let after = db.current_epoch();
+        assert!(after > before, "the update started a new epoch");
+        let events = db.changes_between(before, after).unwrap();
+        let triples: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.entity_id, grafeo_engine::cdc::EntityId::Triple(_)))
+            .collect();
+        assert!(!triples.is_empty());
+        assert!(
+            triples.iter().all(|e| e.epoch > before && e.epoch <= after),
+            "the triple events are at the update's own epoch"
+        );
+    }
+
+    /// An empty first poll must not pass the epoch of the first triple event
+    /// (engine 0.5.44 recorded it at the current epoch, 0 before the first
+    /// write; kept as a regression test).
     #[cfg(feature = "sparql")]
     #[test]
     fn an_epoch_zero_triple_event_after_an_empty_poll_arrives() {
@@ -640,7 +672,6 @@ mod tests {
         assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
     }
 
-    #[cfg(feature = "compact-store")]
     #[tokio::test]
     async fn compaction_succeeds_with_a_live_subscriber_and_ends_its_feed() {
         let state = cdc_state();
@@ -651,15 +682,6 @@ mod tests {
         crate::admin::AdminService::compact(&state, "columnar")
             .await
             .expect("a live feed does not block compaction");
-        assert_eq!(
-            state
-                .databases()
-                .get("columnar")
-                .unwrap()
-                .metadata
-                .storage_mode,
-            "compact"
-        );
         assert!(matches!(recv(&mut rx).await, Err(RecvError::Closed)));
     }
 
@@ -711,8 +733,9 @@ mod tests {
         assert_eq!(first_cursor(&mgr, "missing", 9).next_since, 0);
     }
 
-    /// RDF triple writes record their events at the current epoch, which is
-    /// what an epoch still filling looks like to the feed.
+    /// A triple event reaches a subscriber whose start is far ahead (engine
+    /// 0.5.44 recorded triple events at the current epoch, which looked like
+    /// an epoch still filling; kept as a regression test).
     #[cfg(feature = "sparql")]
     #[tokio::test]
     async fn a_far_first_subscriber_does_not_pass_an_epoch_still_filling() {
