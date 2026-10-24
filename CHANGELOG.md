@@ -5,7 +5,7 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - Unreleased
+## [0.6.0] - 2026-24-10
 
 Engine 0.6.0 alignment: a new single-file database format that 0.5.x data directories migrate to on first start, writes after a compaction that survive a crash, exact decimals, and clearer errors. A write conflict is now a retryable 409 (a transient error over Bolt, GQLSTATUS 40001 over GWP), an unknown query language is a 400 instead of running as GQL, and Bolt runs nothing for a connection that has not logged on. Lockstep with grafeo 0.6.0.
 
