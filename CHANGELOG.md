@@ -32,6 +32,7 @@ Engine 0.6.0 alignment: a new single-file database format that 0.5.x data direct
 - **`options.json` stays, and the engine now keeps the settings it stores**: engine 0.6 records a database's memory limit, WAL settings, backward edges, schema checks, spill path and tier overrides in the file, but not the thread count nor the server's database type (`owl-schema`, `rdfs-schema`, `json-schema`), so the server still writes `options.json` and applies it on every reopen; a database whose `options.json` is missing or unreadable keeps the settings its file stores instead of falling back to engine defaults.
 - **Index, graph and projection calls report engine errors**: creating or dropping an index, a graph or a projection on a database that is closing fails with 503 instead of doing nothing (engine 0.6 returns `Result` from these calls).
 - **Database info, stats, schema and validation report a failed read** ([grafeo#416](https://github.com/GrafeoDB/grafeo/issues/416)): `GET /db/{name}`, `/db/{name}/stats`, `/db/{name}/schema`, `/admin/{db}/stats`, `/admin/{db}/validate`, the GWP graph info and the sync schema check fail with the engine's error (503 for a database that is closing) instead of reporting what an incomplete read saw. `GET /db` still lists every database: one whose counts cannot be read shows 0 and logs a warning.
+- **utoipa 6 and utoipa-swagger-ui 10** (from 5 and 9): `/api/openapi.json` stays OpenAPI 3.1.0 with the same paths and schemas; a nullable reference (`QueryResponse.counters`, the `/tx/begin` body) lists its schema before `null` in `oneOf`.
 - **Dependencies**: `cargo update` within the current requirements, Studio npm dependencies within their ranges, and GitHub Actions on their current major versions (`actions/checkout@v7`, `actions/cache@v6`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `codecov/codecov-action@v7`, `docker/*` v4 and `docker/build-push-action@v7`). The CI MSRV job checks Rust 1.99.0.
 
 ### Fixed
@@ -45,6 +46,7 @@ Engine 0.6.0 alignment: a new single-file database format that 0.5.x data direct
 
 ### Security
 
+- **zip 9.1.0 at build time** (from 3.0.0, through utoipa-swagger-ui 10): `cargo audit` and `cargo deny` flagged zip 3 for extraction flaws ([RUSTSEC-2026-0367](https://rustsec.org/advisories/RUSTSEC-2026-0367), [RUSTSEC-2026-0368](https://rustsec.org/advisories/RUSTSEC-2026-0368), [RUSTSEC-2026-0369](https://rustsec.org/advisories/RUSTSEC-2026-0369)). It only unpacked the bundled Swagger UI archive while compiling; the server binary never used it.
 - **tokio 1.54.1** (from the yanked 1.54.0): fixes a race between `tokio::time::Interval` and the runtime's time driver that could use memory after it was freed ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384)). Released builds were not affected: 0.5.44 shipped before tokio 1.54.0.
 
 ## [0.5.44] - 2026-10-04
