@@ -2260,7 +2260,7 @@ async fn gwp_create_database_then_query() {
 
     // Create session, configure to the new database, execute query
     let mut session = conn.create_session().await.unwrap();
-    session.set_graph("query-db").await.unwrap();
+    session.set_parameter("_database", "query-db").await.unwrap();
 
     let mut cursor = session
         .execute(
@@ -2317,7 +2317,7 @@ async fn gwp_delete_then_recreate_database() {
 
     // Should be queryable
     let mut session = conn.create_session().await.unwrap();
-    session.set_graph("ephemeral").await.unwrap();
+    session.set_parameter("_database", "ephemeral").await.unwrap();
 
     let mut cursor = session
         .execute(
@@ -2413,7 +2413,7 @@ async fn gwp_configure_deleted_database_fails() {
 
     // Configuring a session to the deleted database should fail
     let mut session = conn.create_session().await.unwrap();
-    let result = session.set_graph("doomed").await;
+    let result = session.set_parameter("_database", "doomed").await;
     assert!(
         result.is_err(),
         "configuring session to deleted database should fail"
@@ -9636,4 +9636,198 @@ async fn gwp_drop_graph_if_exists_on_a_missing_graph() {
         .await
         .unwrap();
     assert!(catalog.drop_graph("default", "g80", true).await.unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// GWP sessions follow ISO/IEC 39075: graph and schema are session state inside
+// one database (`_database`), and session commands keep an open transaction
+// ---------------------------------------------------------------------------
+
+/// Counts the nodes with `label` in database `db` over HTTP.
+#[cfg(feature = "gwp")]
+async fn http_count(http: &str, db: &str, label: &str) -> i64 {
+    let resp = Client::new()
+        .post(format!("{http}/query"))
+        .json(&json!({"query": format!("MATCH (n:{label}) RETURN count(n)"), "database": db}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["rows"][0][0].as_i64().unwrap()
+}
+
+/// Creates database `name` over HTTP.
+#[cfg(feature = "gwp")]
+async fn http_create_db(http: &str, name: &str) {
+    let resp = Client::new()
+        .post(format!("{http}/db"))
+        .json(&json!({"name": name}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+/// The GQLSTATUS of a GWP error.
+#[cfg(feature = "gwp")]
+fn gql_status(err: &gwp::error::GqlError) -> String {
+    match err {
+        gwp::error::GqlError::Status { status } => status.code.clone(),
+        other => panic!("expected a GQLSTATUS error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_set_graph_selects_a_graph_of_the_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    session.execute_simple("CREATE GRAPH sales").await.unwrap();
+
+    session.set_graph("sales").await.expect("an engine graph");
+    session.execute_simple("INSERT (:InSales)").await.unwrap();
+    assert_eq!(
+        http_count(&http, "default", "InSales").await,
+        0,
+        "not in the default graph"
+    );
+    let mut cursor = session
+        .execute_simple("MATCH (n:InSales) RETURN count(n)")
+        .await
+        .unwrap();
+    let rows = cursor.collect_rows().await.unwrap();
+    assert!(
+        matches!(rows[0][0], gwp::types::Value::Integer(1)),
+        "{rows:?}"
+    );
+
+    let err = session.set_graph("nope").await.unwrap_err();
+    assert_eq!(
+        gql_status(&err),
+        "42002",
+        "an unknown graph is an invalid reference"
+    );
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_session_commands_keep_the_open_transaction() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+    session.execute_simple("CREATE GRAPH side").await.unwrap();
+
+    let mut tx = session.begin_transaction().await.unwrap();
+    tx.execute_simple("INSERT (:Kept)").await.unwrap();
+    session
+        .set_graph("side")
+        .await
+        .expect("SESSION SET GRAPH inside a transaction");
+    session.set_schema("default").await.unwrap();
+    session
+        .reset()
+        .await
+        .expect("SESSION RESET inside a transaction");
+    tx.commit()
+        .await
+        .expect("the transaction survived the session commands");
+
+    assert_eq!(http_count(&http, "default", "Kept").await, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_database_parameter_selects_the_database() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    session.set_parameter("_database", "other").await.unwrap();
+    session.execute_simple("INSERT (:InOther)").await.unwrap();
+    assert_eq!(http_count(&http, "other", "InOther").await, 1);
+    assert_eq!(http_count(&http, "default", "InOther").await, 0);
+
+    session.reset().await.unwrap();
+    session
+        .execute_simple("INSERT (:StillOther)")
+        .await
+        .unwrap();
+    assert_eq!(
+        http_count(&http, "other", "StillOther").await,
+        1,
+        "a reset keeps the database"
+    );
+
+    assert!(session.set_parameter("_database", "nope").await.is_err());
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_database_switch_with_open_transaction_is_25g01() {
+    let (http, gwp_endpoint) = spawn_server_with_gwp().await;
+    http_create_db(&http, "other").await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut session = conn.create_session().await.unwrap();
+
+    let mut tx = session.begin_transaction().await.unwrap();
+    tx.execute_simple("INSERT (:BeforeSwitch)").await.unwrap();
+    let err = session
+        .set_parameter("_database", "other")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        gql_status(&err),
+        "25G01",
+        "a transaction cannot span two databases"
+    );
+    tx.commit().await.expect("the transaction is still open");
+    assert_eq!(http_count(&http, "default", "BeforeSwitch").await, 1);
+    session.close().await.unwrap();
+}
+
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_handshake_reports_grafeodb() {
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let backend = grafeo_gwp::GrafeoBackend::new(grafeo_service::ServiceState::new_in_memory(300));
+    tokio::spawn(async move {
+        grafeo_gwp::serve(backend, addr, grafeo_gwp::GwpOptions::default())
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut client =
+        gwp::proto::session_service_client::SessionServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+    let resp = client
+        .handshake(gwp::proto::HandshakeRequest {
+            protocol_version: 1,
+            credentials: None,
+            client_info: std::collections::HashMap::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let info = resp.server_info.expect("server info");
+    assert_eq!(info.name, "GrafeoDB");
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
 }

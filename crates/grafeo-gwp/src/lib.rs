@@ -102,7 +102,8 @@ pub async fn serve(
     #[cfg(feature = "auth")]
     let pending = backend.pending.clone();
 
-    let mut builder = gwp::server::GqlServer::builder(backend);
+    let mut builder =
+        gwp::server::GqlServer::builder(backend).server_info("GrafeoDB", env!("CARGO_PKG_VERSION"));
 
     if let Some(timeout) = options.idle_timeout {
         builder = builder.idle_timeout(timeout);

@@ -31,6 +31,13 @@ use crate::encode::{convert_params, grafeo_to_gwp};
 /// graphs live in a single implicit schema.
 const DEFAULT_SCHEMA: &str = "default";
 
+/// The database a new GWP session works in.
+const DEFAULT_DATABASE: &str = "default";
+
+/// The session parameter that picks a session's database. ISO/IEC 39075
+/// names implementation-defined session parameters with a leading `_`.
+const DATABASE_PARAMETER: &str = "_database";
+
 /// A GWP session backed by a grafeo-engine `Session`.
 struct GrafeoSession {
     engine_session: grafeo_engine::Session,
@@ -99,6 +106,80 @@ impl GrafeoBackend {
             .ok_or_else(|| GqlError::Session(format!("session '{}' not found", handle.0)))
     }
 
+    /// Opens an engine session on database `name` for a GWP session acting as
+    /// `identity` (capped to read-only when the server's queries are).
+    async fn open_engine_session(
+        &self,
+        name: &str,
+        #[cfg(feature = "auth")] identity: Option<grafeo_engine::auth::Identity>,
+    ) -> Result<grafeo_engine::Session, GqlError> {
+        let entry = self
+            .state
+            .databases()
+            .get_available(name)
+            .map_err(|e| GqlError::Session(e.to_string()))?;
+        let ro = self.query_read_only();
+        tokio::task::spawn_blocking(move || {
+            let db = entry.db();
+            #[cfg(feature = "auth")]
+            if let Some(id) = identity {
+                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
+                return db.session_with_identity(effective);
+            }
+            if ro {
+                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
+            } else {
+                db.session()
+            }
+        })
+        .await
+        .map_err(GqlError::backend)
+    }
+
+    /// Moves a GWP session to database `name` (the `_database` parameter):
+    /// a new engine session there, refused while a transaction is open,
+    /// since a transaction cannot span two databases (two GQL-catalogs).
+    async fn switch_database(
+        &self,
+        session_arc: &Arc<Mutex<GrafeoSession>>,
+        name: String,
+    ) -> Result<(), GqlError> {
+        #[cfg(feature = "auth")]
+        let identity = {
+            let s = session_arc.lock();
+            if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == &name) {
+                return Err(GqlError::Session(format!(
+                    "not authorized for database '{name}'"
+                )));
+            }
+            s.identity.clone()
+        };
+        let open_transaction = || {
+            GqlError::status(
+                status::ACTIVE_TRANSACTION,
+                format!("cannot switch to database '{name}' while a transaction is open"),
+            )
+        };
+        if session_arc.lock().engine_session.in_transaction() {
+            return Err(open_transaction());
+        }
+        let engine_session = self
+            .open_engine_session(
+                &name,
+                #[cfg(feature = "auth")]
+                identity,
+            )
+            .await?;
+        let mut s = session_arc.lock();
+        // Checked again: a transaction may have begun while the session opened.
+        if s.engine_session.in_transaction() {
+            return Err(open_transaction());
+        }
+        s.engine_session = engine_session;
+        s.database = name;
+        Ok(())
+    }
+
     /// Builds a `GraphInfo` from a database entry.
     #[allow(clippy::result_large_err)]
     fn build_graph_info(&self, name: &str) -> Result<GraphInfo, GqlError> {
@@ -159,12 +240,6 @@ impl GrafeoBackend {
 #[tonic::async_trait]
 impl GqlBackend for GrafeoBackend {
     async fn create_session(&self, config: &SessionConfig) -> Result<SessionHandle, GqlError> {
-        let entry = self
-            .state
-            .databases()
-            .get("default")
-            .ok_or_else(|| GqlError::Session("default database not found".to_owned()))?;
-
         // Resolve identity from auth_info principal (nonce -> TokenInfo -> Identity).
         // When auth_info is None, no auth provider was configured: allow unauthenticated.
         // When auth_info is Some but the nonce lookup fails, reject (stale or replayed).
@@ -187,33 +262,20 @@ impl GqlBackend for GrafeoBackend {
         #[cfg(not(feature = "auth"))]
         let _ = config;
 
-        let ro = self.query_read_only();
-
-        #[cfg(feature = "auth")]
-        let identity_clone = identity.clone();
-
-        let engine_session = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            #[cfg(feature = "auth")]
-            if let Some(id) = identity_clone {
-                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                return db.session_with_identity(effective);
-            }
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
-        })
-        .await
-        .map_err(GqlError::backend)?;
+        let engine_session = self
+            .open_engine_session(
+                DEFAULT_DATABASE,
+                #[cfg(feature = "auth")]
+                identity.clone(),
+            )
+            .await?;
 
         let id = Uuid::new_v4().to_string();
         self.sessions.insert(
             id.clone(),
             Arc::new(Mutex::new(GrafeoSession {
                 engine_session,
-                database: "default".to_owned(),
+                database: DEFAULT_DATABASE.to_owned(),
                 language: None,
                 #[cfg(feature = "auth")]
                 identity,
@@ -237,72 +299,51 @@ impl GqlBackend for GrafeoBackend {
         session: &SessionHandle,
         property: SessionProperty,
     ) -> Result<(), GqlError> {
+        let session_arc = self.get_session(session)?;
         match property {
-            SessionProperty::Graph(db_name) => {
-                // Check database scope before allowing the switch.
-                #[cfg(feature = "auth")]
-                {
-                    let session_arc = self.get_session(session)?;
-                    let s = session_arc.lock();
-                    if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == &db_name) {
-                        return Err(GqlError::Session(format!(
-                            "not authorized for database '{db_name}'"
-                        )));
-                    }
-                }
-
+            // ISO/IEC 39075 7.1: the session graph, a graph of the session's
+            // database (and schema). An open transaction stays open.
+            SessionProperty::Graph(name) => {
+                let database = session_arc.lock().database.clone();
                 let entry = self
                     .state
                     .databases()
-                    .get_available(&db_name)
+                    .get_available(&database)
                     .map_err(|e| GqlError::Session(e.to_string()))?;
-
-                let ro = self.query_read_only();
-
-                // Reuse the stored identity when switching databases.
-                #[cfg(feature = "auth")]
-                let identity = {
-                    let session_arc = self.get_session(session)?;
+                tokio::task::spawn_blocking(move || {
                     let s = session_arc.lock();
-                    s.identity.clone()
-                };
-
-                let engine_session = tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    #[cfg(feature = "auth")]
-                    if let Some(id) = identity {
-                        let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                        return db.session_with_identity(effective);
-                    }
-                    if ro {
-                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-                    } else {
-                        db.session()
+                    let schema = s.engine_session.current_schema();
+                    match entry.db().graph_in(schema.as_deref(), &name) {
+                        Ok(_) => {
+                            s.engine_session.use_graph(&name);
+                            Ok(())
+                        }
+                        Err(e) => Err(GqlError::status(status::INVALID_REFERENCE, e.to_string())),
                     }
                 })
                 .await
-                .map_err(GqlError::backend)?;
-
-                let session_arc = self.get_session(session)?;
-                let mut s = session_arc.lock();
-                s.engine_session = engine_session;
-                s.database = db_name;
+                .map_err(GqlError::backend)??;
+            }
+            SessionProperty::Schema(schema_name) => {
+                let s = session_arc.lock();
+                s.engine_session.set_schema(&schema_name);
+                tracing::debug!(schema = %schema_name, "GWP session schema set");
+            }
+            SessionProperty::Parameter { name, value } if name == DATABASE_PARAMETER => {
+                let GwpValue::String(db_name) = value else {
+                    return Err(GqlError::Session(format!(
+                        "{DATABASE_PARAMETER} must be a database name"
+                    )));
+                };
+                self.switch_database(&session_arc, db_name).await?;
             }
             SessionProperty::Parameter { name, value } if name == "language" => {
                 if let GwpValue::String(ref lang) = value {
                     tracing::info!(language = %lang, "GWP session language set");
-                    let session_arc = self.get_session(session)?;
-                    let mut s = session_arc.lock();
-                    s.language = Some(lang.clone());
+                    session_arc.lock().language = Some(lang.clone());
                 } else {
                     tracing::warn!(?value, "language parameter is not a string");
                 }
-            }
-            SessionProperty::Schema(schema_name) => {
-                let session_arc = self.get_session(session)?;
-                let s = session_arc.lock();
-                s.engine_session.set_schema(&schema_name);
-                tracing::debug!(schema = %schema_name, "GWP session schema set");
             }
             SessionProperty::TimeZone(_) | SessionProperty::Parameter { .. } => {}
         }
@@ -314,51 +355,20 @@ impl GqlBackend for GrafeoBackend {
         session: &SessionHandle,
         target: ResetTarget,
     ) -> Result<(), GqlError> {
+        // ISO/IEC 39075 7.2: a reset changes session state only; an open
+        // transaction stays open, and the session keeps its database.
         let session_arc = self.get_session(session)?;
-
-        if target == ResetTarget::Schema {
-            // Reset only schema context, keep the session alive.
-            let s = session_arc.lock();
-            s.engine_session.reset_schema();
-            return Ok(());
-        }
-
-        // Full reset: create a fresh session on the default database.
-        let entry = self
-            .state
-            .databases()
-            .get("default")
-            .ok_or_else(|| GqlError::Session("default database not found".to_owned()))?;
-
-        let ro = self.query_read_only();
-
-        // Preserve identity across reset.
-        #[cfg(feature = "auth")]
-        let identity = {
-            let s = session_arc.lock();
-            s.identity.clone()
-        };
-
-        let engine_session = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            #[cfg(feature = "auth")]
-            if let Some(id) = identity {
-                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                return db.session_with_identity(effective);
-            }
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
-        })
-        .await
-        .map_err(GqlError::backend)?;
-
         let mut s = session_arc.lock();
-        s.engine_session = engine_session;
-        "default".clone_into(&mut s.database);
-        s.language = None;
+        match target {
+            ResetTarget::Schema => s.engine_session.reset_schema(),
+            ResetTarget::Graph => s.engine_session.reset_graph(),
+            ResetTarget::TimeZone => s.engine_session.reset_time_zone(),
+            ResetTarget::Parameters => s.language = None,
+            ResetTarget::All => {
+                s.engine_session.reset_session();
+                s.language = None;
+            }
+        }
         Ok(())
     }
 
