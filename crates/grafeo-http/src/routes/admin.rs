@@ -245,16 +245,22 @@ pub async fn admin_drop_index(
     Ok(Json(serde_json::json!({ "dropped": dropped })))
 }
 
-/// Compact a database into a columnar read-only store.
+/// Compact a database.
+///
+/// Writes a checkpoint of a persistent database and drops the old versions no
+/// open transaction can see any more, in every graph. The database keeps
+/// taking writes, and writes after a compaction are logged and recovered like
+/// any other (engine 0.6; 0.5.x compacted into a separate store whose later
+/// query writes skipped the WAL). Needs the database to itself: 409 while a
+/// session or another request holds it.
 #[utoipa::path(
     post, path = "/admin/{db}/compact",
     params(("db" = String, Path, description = "Database name")),
     responses(
-        (status = 200, description = "Database compacted"),
-        (status = 400, description = "Feature not enabled", body = crate::error::ErrorBody),
-        (status = 403, description = "Server is read-only", body = crate::error::ErrorBody),
+        (status = 200, description = "Database compacted", body = grafeo_service::types::CompactInfo),
         (status = 404, description = "Database not found", body = crate::error::ErrorBody),
         (status = 409, description = "Database in use", body = crate::error::ErrorBody),
+        (status = 503, description = "Server is read-only", body = crate::error::ErrorBody),
     ),
     tag = "Admin"
 )]
@@ -264,8 +270,8 @@ pub async fn admin_compact(
     Path(db): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     auth.check_admin()?;
-    AdminService::compact(state.service(), &db).await?;
-    Ok(Json(serde_json::json!({ "compacted": true })))
+    let info = AdminService::compact(state.service(), &db).await?;
+    Ok(Json(info))
 }
 
 /// Write a point-in-time snapshot.
