@@ -11,16 +11,16 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.44"
+version = "0.6.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.99.0"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "0.5.44", default-features = false }
-grafeo-common = { version = "0.5.44" }
+grafeo-engine = { version = "=0.6.0", default-features = false }
+grafeo-common = { version = "=0.6.0" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -76,8 +76,6 @@ single_match_else = "allow"
 unnecessary_wraps = "allow"
 unused_self = "allow"
 manual_let_else = "allow"
-# `Duration::from_mins` requires Rust 1.94+; MSRV is 1.91.1.
-duration_suboptimal_units = "allow"
 
 # --- Binary crate ---
 
@@ -141,7 +139,8 @@ replication = ["grafeo-http?/replication"]
 embed = ["grafeo-service/embed"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 
-# Engine: compact columnar store (forwarded)
+# Deprecated since 0.6.0: enables nothing, compaction works in every build.
+# Kept so existing `--features compact-store` builds still work; removed in 0.7.0.
 compact-store = ["grafeo-service/compact-store"]
 
 # Engine: data import formats (forwarded)
@@ -179,7 +178,7 @@ full = [
     "lpg", "http", "studio", "all-languages", "algos", "ai", "triple-store", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
     "temporal", "import", "metrics", "tracing", "sync", "push-changefeed", "replication",
-    "async-storage", "compact-store", "shacl", "ring-index", "arrow-export",
+    "async-storage", "shacl", "ring-index", "arrow-export",
 ]
 
 [dependencies]
@@ -207,6 +206,7 @@ grafeo-http = { workspace = true }
 grafeo-gwp = { workspace = true }
 grafeo-boltr = { workspace = true }
 grafeo-studio = { workspace = true }
+grafeo-common = { workspace = true }
 boltr = { workspace = true, features = ["client"] }
 reqwest = { version = "0.13.2", features = ["gzip", "json"] }
 tokio-tungstenite = "0.29"
