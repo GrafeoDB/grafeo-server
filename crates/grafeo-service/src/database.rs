@@ -25,9 +25,11 @@ const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 /// File in a persistent database's directory that records the options it
 /// was created with, so every reopen applies them again (grafeo-server#67).
 ///
-/// Temporary: the engine does not store creation config in the `.grafeo`
-/// file yet (grafeo#551, planned for grafeo 0.6.0). Once it does, stop writing this
-/// file and only read it for databases created before that.
+/// Engine 0.6.0 stores most creation settings in the database file itself
+/// (grafeo#551; not yet in 0.6.0-beta.1), but not the thread count nor the
+/// server's database type (`owl-schema`, `rdfs-schema` and `json-schema` are
+/// server types over the engine's two graph models), so the server keeps
+/// writing this file. The settings both hold are the same values.
 pub const OPTIONS_FILE: &str = "options.json";
 
 /// What [`OPTIONS_FILE`] holds: the database type and its creation options
@@ -72,7 +74,7 @@ fn configure(
         config = config.without_backward_edges();
     }
     if options.wal_enabled == Some(false) {
-        config.wal_enabled = false;
+        config = config.without_wal();
     }
     if let Some(ref durability) = options.wal_durability {
         config = config.with_wal_durability(parse_durability(durability)?);
@@ -199,8 +201,10 @@ fn rollback_create(dir: &Path, created_dir: bool) {
 
 /// The entries in `dir` that belong to a database and that a create must
 /// never adopt or overwrite: `data.grafeo` and its WAL, the legacy
-/// `grafeo.db` and its WAL that startup migrates, and the pre-restore copy
-/// of an interrupted epoch restore with its WAL. An entry of any kind counts,
+/// `grafeo.db` and its WAL that startup migrates, the pre-restore copy
+/// of an interrupted epoch restore with its WAL, and the 0.5.x files engine
+/// 0.6 keeps when it migrates a database (`data.grafeo.pre-0.6` and its WAL),
+/// which may be the only copy of that database. An entry of any kind counts,
 /// a dangling symbolic link included (the engine would create the file it
 /// points to), and so does an entry that cannot be checked for any reason
 /// but its absence.
@@ -212,6 +216,8 @@ fn database_files_present(dir: &Path) -> Vec<PathBuf> {
         "grafeo.db.wal",
         "data.grafeo.pre-restore",
         "data.grafeo.pre-restore.wal",
+        "data.grafeo.pre-0.6",
+        "data.grafeo.pre-0.6.wal",
     ]
     .iter()
     .map(|file| dir.join(file))
@@ -242,9 +248,9 @@ fn parse_durability(s: &str) -> Result<DurabilityMode, ServiceError> {
     match s.to_lowercase().as_str() {
         "sync" => Ok(DurabilityMode::Sync),
         "batch" => Ok(DurabilityMode::default()), // Batch with default params
-        "adaptive" => Ok(DurabilityMode::Adaptive {
-            target_interval_ms: 100,
-        }),
+        "adaptive" => Ok(DurabilityMode::adaptive(std::time::Duration::from_millis(
+            100,
+        ))),
         "nosync" => Ok(DurabilityMode::NoSync),
         other => Err(ServiceError::BadRequest(format!(
             "invalid wal_durability '{other}': expected \"sync\", \"batch\", \"adaptive\", or \"nosync\""
@@ -729,7 +735,6 @@ impl DatabaseManager {
             Err(
                 e @ (ConfigError::ZeroMemoryLimit
                 | ConfigError::ZeroThreads
-                | ConfigError::ZeroWalFlushInterval
                 | ConfigError::ZeroAdaptiveFlushInterval),
             ) => Self::type_only_config(base, stored.database_type, &options_path, &e.to_string()),
             Err(e) => Err(Self::keep_closed(&options_path, &e)),
@@ -1038,10 +1043,18 @@ impl DatabaseManager {
                 let name = entry.key().clone();
                 let e = entry.value();
                 let db = e.db();
+                // One database that cannot be read (closing for a restore)
+                // must not fail the whole listing.
+                let count = |what: &str, result: grafeo_common::Result<usize>| {
+                    result.unwrap_or_else(|err| {
+                        tracing::warn!(name = %name, error = %err, "Failed to read the {what} count");
+                        0
+                    })
+                };
                 crate::types::DatabaseSummary {
+                    node_count: count("node", db.node_count()),
+                    edge_count: count("edge", db.edge_count()),
                     name,
-                    node_count: db.node_count(),
-                    edge_count: db.edge_count(),
                     persistent: db.path().is_some(),
                     database_type: e.metadata.database_type.clone(),
                 }
@@ -1057,7 +1070,6 @@ impl DatabaseManager {
     /// of both the outer and inner Arcs. The entry is removed from the
     /// registry, so the caller **must** re-insert it via [`reinsert`](Self::reinsert) when
     /// done, even on failure.
-    #[cfg(feature = "compact-store")]
     pub fn take_exclusive(&self, name: &str) -> Result<DatabaseEntry, ServiceError> {
         let (_, entry) = self
             .databases
@@ -1091,7 +1103,6 @@ impl DatabaseManager {
 
     /// Re-inserts a database entry previously removed via
     /// [`take_exclusive`](Self::take_exclusive).
-    #[cfg(feature = "compact-store")]
     pub fn reinsert(&self, name: String, entry: DatabaseEntry) {
         self.databases.insert(name, Arc::new(entry));
     }
@@ -1183,6 +1194,31 @@ impl DatabaseManager {
 mod tests {
     use super::*;
     use crate::types::DatabaseOptions;
+
+    /// Why [`OPTIONS_FILE`] stays in 0.6: the engine does not store the
+    /// thread count (nor the server's database type, such as `owl-schema`),
+    /// so a reopen without the file loses it. Engine 0.6.0 stores the other
+    /// creation settings itself (grafeo#551); the server still applies them
+    /// from the file, which gives the same values.
+    #[test]
+    fn the_engine_does_not_keep_the_thread_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.grafeo");
+        let default_threads = Config::persistent(&path).threads();
+        let threads = default_threads + 3;
+        let db = GrafeoDB::with_config(Config::persistent(&path).with_threads(threads)).unwrap();
+        assert_eq!(db.config().threads(), threads);
+        db.close().unwrap();
+        drop(db);
+
+        let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+        assert_eq!(
+            db.config().threads(),
+            default_threads,
+            "the engine kept the thread count: options.json may no longer need it"
+        );
+        db.close().unwrap();
+    }
 
     #[test]
     fn test_name_validation() {
@@ -1305,11 +1341,11 @@ mod tests {
     fn entry_swap_db() {
         let db1 = Arc::new(GrafeoDB::new_in_memory());
         let entry = DatabaseEntry::new(db1, DatabaseMetadata::default());
-        let count_before = entry.db().node_count();
+        let count_before = entry.db().node_count().unwrap();
 
         let db2 = Arc::new(GrafeoDB::new_in_memory());
         entry.swap_db(db2);
-        let count_after = entry.db().node_count();
+        let count_after = entry.db().node_count().unwrap();
 
         // Both empty, but the handle was swapped (no panic, correct behavior)
         assert_eq!(count_before, 0);
@@ -1321,7 +1357,7 @@ mod tests {
         let db = Arc::new(GrafeoDB::new_in_memory());
         let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
         let (arc, meta) = entry.into_parts();
-        assert_eq!(arc.node_count(), 0);
+        assert_eq!(arc.node_count().unwrap(), 0);
         assert_eq!(meta.database_type, "lpg");
     }
 
@@ -1331,7 +1367,7 @@ mod tests {
         let entry = DatabaseEntry::new(db, DatabaseMetadata::default());
         // load_full returns a usable Arc
         let handle = entry.db();
-        assert_eq!(handle.node_count(), 0);
+        assert_eq!(handle.node_count().unwrap(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1389,7 +1425,7 @@ mod tests {
 
         // Data should still be accessible
         let entry = mgr.get("mydb").unwrap();
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     #[test]
@@ -1436,7 +1472,7 @@ mod tests {
         assert!(dir.path().join("default").join("data.grafeo").exists());
 
         let entry = mgr.get("default").unwrap();
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     #[test]
@@ -1493,12 +1529,12 @@ mod tests {
                 .session()
                 .execute("INSERT (:RoTest {v: 99})")
                 .unwrap();
-            assert_eq!(entry.db().node_count(), 1);
+            assert_eq!(entry.db().node_count().unwrap(), 1);
         }
         // Reopen read-only and verify data is preserved
         let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), true);
         let entry = mgr.get("default").unwrap();
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -1726,7 +1762,9 @@ mod tests {
         let entry = mgr
             .get("legacy")
             .expect("a store without options.json must still open");
-        assert_eq!(entry.db().memory_limit(), None);
+        // The database file keeps the limit it was created with (engine 0.6,
+        // grafeo#551): options.json is no longer what keeps it.
+        assert_eq!(entry.db().memory_limit(), Some(DEFAULT_MEMORY_LIMIT));
         assert!(entry.metadata.backward_edges);
     }
 
@@ -1745,7 +1783,8 @@ mod tests {
         let entry = mgr
             .get("garbled")
             .expect("a bad options.json must not keep the database closed");
-        assert_eq!(entry.db().memory_limit(), None);
+        // The engine defaults, with what the database file keeps (grafeo#551).
+        assert_eq!(entry.db().memory_limit(), Some(DEFAULT_MEMORY_LIMIT));
     }
 
     #[test]
@@ -2047,7 +2086,7 @@ mod tests {
 
         let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
         let entry = mgr.get("orphan").expect("the original must come back");
-        assert_eq!(entry.db().node_count(), 1);
+        assert_eq!(entry.db().node_count().unwrap(), 1);
         assert!(!db_dir.join("data.grafeo.pre-restore").exists());
     }
 
@@ -2059,7 +2098,7 @@ mod tests {
         let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
         let entry = mgr.get("default").unwrap();
         assert_eq!(
-            entry.db().node_count(),
+            entry.db().node_count().unwrap(),
             1,
             "default must not be recreated empty"
         );
@@ -2083,7 +2122,7 @@ mod tests {
         }
 
         let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
-        assert_eq!(mgr.get("both").unwrap().db().node_count(), 0);
+        assert_eq!(mgr.get("both").unwrap().db().node_count().unwrap(), 0);
         assert!(db_dir.join("data.grafeo.pre-restore").exists());
     }
 
@@ -2109,7 +2148,8 @@ mod tests {
         let entry = mgr
             .get("zero")
             .expect("a stored file that fails validation must not keep the database closed");
-        assert_eq!(entry.db().memory_limit(), None);
+        // The engine defaults, with what the database file keeps (grafeo#551).
+        assert_eq!(entry.db().memory_limit(), Some(DEFAULT_MEMORY_LIMIT));
     }
 
     #[test]
@@ -2135,8 +2175,8 @@ mod tests {
             .reopen_config(&dir.path().join("checked").join("data.grafeo"))
             .unwrap();
         assert!(metadata.is_none(), "the options fell back");
-        assert!(config.schema_constraints, "the schema checks stay on");
-        assert_eq!(config.graph_model, grafeo_engine::GraphModel::Lpg);
+        assert!(config.schema_constraints(), "the schema checks stay on");
+        assert_eq!(config.graph_model(), grafeo_engine::GraphModel::Lpg);
     }
 
     #[test]
@@ -2159,8 +2199,9 @@ mod tests {
         let entry = mgr
             .get("tiers")
             .expect("valid JSON that fails configure must not keep the database closed");
-        // The whole file is ignored, not applied in part.
-        assert_eq!(entry.db().memory_limit(), None);
+        // The whole file is ignored, not applied in part: the limit is the
+        // one the database file keeps (grafeo#551).
+        assert_eq!(entry.db().memory_limit(), Some(DEFAULT_MEMORY_LIMIT));
     }
 
     #[cfg(feature = "json-schema")]
@@ -2212,9 +2253,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
         let db_file = dir.path().join("default").join("data.grafeo");
-        assert!(!mgr.reopen_config(&db_file).unwrap().0.cdc_enabled);
+        assert!(!mgr.reopen_config(&db_file).unwrap().0.cdc_enabled());
         mgr.set_cdc_enabled(true);
-        assert!(mgr.reopen_config(&db_file).unwrap().0.cdc_enabled);
+        assert!(mgr.reopen_config(&db_file).unwrap().0.cdc_enabled());
     }
 
     #[test]
@@ -2237,7 +2278,7 @@ mod tests {
         let db_file = dir.path().join("spilled").join("data.grafeo");
         let (config, _) = mgr.reopen_config(&db_file).unwrap();
         let tier = config
-            .section_configs
+            .section_configs()
             .get(&SectionType::VectorStore)
             .map(|c| c.tier);
         assert_eq!(tier, Some(TierOverride::ForceDisk));
