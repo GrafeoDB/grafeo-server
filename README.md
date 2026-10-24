@@ -115,6 +115,10 @@ curl -X POST http://localhost:7474/sparql \
   -d '{"query": "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?name WHERE { ?p a foaf:Person . ?p foaf:name ?name }"}'
 ```
 
+`/query`, `/batch` and the WebSocket take a `language` field: `gql` (the default), `cypher`, `graphql`, `gremlin`, `sparql` or `sql-pgq` (also `sql`), in any case. Any other name is a 400 that lists these; before 0.6 it ran as GQL. Bolt (the `language` key of RUN's extra) and GWP (the `language` session parameter) refuse it the same way.
+
+A write that conflicts with a concurrent transaction is a 409 `conflict` with the reason, on the statement or on `/tx/commit`; nothing of the transaction took effect, so run it again. A failed commit ends the transaction.
+
 A statement that writes also returns a `counters` object saying what it changed (`nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed`). Reads leave it out. GWP puts the same numbers in `ResultSummary.counters`.
 
 ```bash
@@ -180,7 +184,13 @@ curl http://localhost:7474/admin/default/cache
 
 # Clear the query plan cache
 curl -X POST http://localhost:7474/admin/default/cache/clear
+
+# Compact: checkpoint a persistent database and drop old versions
+curl -X POST http://localhost:7474/admin/default/compact
+# {"compacted": true, "checkpointed": true, "versions_collected": 12, "duration_ms": 3}
 ```
+
+Compaction needs the database to itself (409 while a transaction or another request holds it). Since 0.6 it keeps the database as it is (one store that takes writes, with every write logged), and it works in every build.
 
 `POST /admin/{db}/reload-eligible` (bring spilled sections back into RAM) takes an optional body, `{"target_fraction": 0.7}`; without one the fraction defaults to 0.7.
 
@@ -312,11 +322,13 @@ Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 
 ### Bolt v5.x (BoltR)
 
-The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.1.2) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.2) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
 
 Write statements return Neo4j's `stats` in the PULL summary, which drivers expose as `summary.counters`.
 
 Configure the port with `--bolt-port` or `GRAFEO_BOLT_PORT` (default: 7687).
+
+With authentication on, a Bolt connection gets no database session until LOGON succeeds: nothing runs before it, also after a RESET. A write conflict with a concurrent transaction fails with the transient `Neo.TransientError.Transaction.Outdated`, which drivers retry in managed transactions. Bolt has no decimal type: an exact decimal comes back as its text (`"1.50"`).
 
 ### Health Check
 
@@ -344,6 +356,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `0` | Max concurrent GWP sessions (0 = unlimited) |
 | `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
 | `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
+| `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
@@ -525,6 +538,23 @@ The `/health` endpoint reports which features are compiled into the running serv
   }
 }
 ```
+
+## Upgrading to 0.6
+
+grafeo-server 0.6 runs grafeo 0.6, which stores every database as a single file in a new format. Read this before you point a 0.6 server at a data directory written by 0.5.x.
+
+1. **Back up first.** Stop the 0.5.x server and copy the whole data directory (and the backup directory) somewhere safe. Taking a backup through the API (`POST /admin/{db}/backup`) before the upgrade also works; 0.6 restores 0.5.x backups.
+2. **Start 0.6 on the data directory.** The first read-write open of each database migrates it: `{name}/data.grafeo` becomes a 0.6 file, the commits a 0.5.x WAL still held are replayed into it, and the old files are kept next to it, unchanged, as `data.grafeo.pre-0.6` (and `data.grafeo.pre-0.6.wal`, `data.grafeo.pre-0.6/` for a WAL-directory database such as the old `grafeo.db` layout, which the server renames to `data.grafeo` first). Nothing else needs to be done; `options.json` is read as before.
+3. **There is no way back for the migrated file.** grafeo-server 0.5.x cannot open a migrated database. To go back, stop the 0.6 server and move each `data.grafeo.pre-0.6` (and its `.wal`) back to `data.grafeo`; writes made under 0.6 are lost. Keep the `.pre-0.6` copies until you are sure, then delete them: they take as much space as the old database, and `GET /admin/{db}/stats` counts them in `disk_bytes`.
+4. **Do not run 0.5.x and 0.6 on the same directory**, and stop every 0.5.x process before 0.6 opens it.
+
+What else to know:
+
+- A `--read-only` server reads a 0.5.x directory without migrating it; the first read-write start migrates it.
+- A database directory that holds only a `data.grafeo.pre-0.6` copy is skipped at startup, and creating a database of that name is refused (409): the copy may be the only one. Move it back to `data.grafeo` or delete it.
+- After the upgrade, take a full backup before the next incremental one; 0.6 still restores the full and incremental backups of 0.5.x, and restoring from a backup file leaves the file as it was.
+- Engine 0.6 changes some query results: exact decimals (`1.50` is a decimal, sent as `{"$decimal": "1.50"}` in JSON), nulls sort last in GQL `ORDER BY`, integer overflow and division by zero fail the statement, and a lone GQL `INSERT` returns no rows. See the engine's [0.6.0 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) and [Upgrading to 0.6](https://grafeo.dev/upgrading/0.6/).
+- Building from source needs Rust 1.99.0 or newer.
 
 ## Development
 
