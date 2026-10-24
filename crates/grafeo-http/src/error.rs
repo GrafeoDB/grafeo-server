@@ -95,7 +95,9 @@ impl IntoResponse for ApiError {
             }
             ServiceError::SessionNotFound => (StatusCode::NOT_FOUND, "session_not_found", None),
             ServiceError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", Some(msg.clone())),
-            ServiceError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", Some(msg.clone())),
+            ServiceError::Conflict(msg) | ServiceError::TransactionConflict(msg) => {
+                (StatusCode::CONFLICT, "conflict", Some(msg.clone()))
+            }
             ServiceError::Timeout => (StatusCode::REQUEST_TIMEOUT, "timeout", None),
             ServiceError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),
             ServiceError::TooManyRequests => {
