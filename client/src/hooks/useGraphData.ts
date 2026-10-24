@@ -51,6 +51,21 @@ function isNode(cell: unknown): cell is GrafeoNode {
   return "id" in obj && ("labels" in obj || "label" in obj);
 }
 
+/** An edge as Grafeo returns it: `{_id, _type, _source, _target, ...props}`. */
+interface GrafeoEdge {
+  _id: number | string;
+  _type?: string;
+  _source: number | string;
+  _target: number | string;
+  [key: string]: unknown;
+}
+
+function isEdge(cell: unknown): cell is GrafeoEdge {
+  if (typeof cell !== "object" || cell === null) return false;
+  const obj = cell as Record<string, unknown>;
+  return "_source" in obj && "_target" in obj;
+}
+
 function nodeId(node: GrafeoNode): string {
   const raw = node._id ?? node.id;
   return String(raw);
@@ -224,9 +239,31 @@ function buildGraphData(result: QueryResponse | null): GraphData | null {
       nodeData.set(id, node as Record<string, unknown>);
     }
 
+    // Strategy 1a: edge objects (engine 0.6 returns a relationship as
+    // `{_id, _type, _source, _target}`), drawn between their endpoints
+    // when both are in the result.
+    let sawEdgeObject = false;
+    for (const row of result.rows) {
+      for (const cell of row) {
+        if (!isEdge(cell)) continue;
+        sawEdgeObject = true;
+        const src = String(cell._source);
+        const tgt = String(cell._target);
+        const key = `e${cell._id}`;
+        if (graph.hasNode(src) && graph.hasNode(tgt) && !graph.hasEdge(key)) {
+          graph.addEdgeWithKey(key, src, tgt, {
+            label: cell._type ?? String(cell._id),
+            size: 2,
+            color: "#64748b",
+          });
+        }
+      }
+    }
+    if (sawEdgeObject) return { graph, nodeData };
+
     // Strategy 1b: infer edges from the column layout.
     //
-    // Grafeo's Cypher/GQL adapter returns relationships as bare
+    // Older engines return relationships as bare
     // integer ids (e.g. `[nodeA, 0, nodeB]` for a
     // `MATCH (a)-[r]->(b) RETURN a, r, b` query). There's no object
     // to inspect for source/target — we have to reconstruct the
