@@ -33,8 +33,8 @@ grafeo-boltr = { path = "crates/grafeo-boltr" }
 # 0.3: the RESET authentication bypass fix, handshake timeout and the
 # message cap before LOGON.
 boltr = "0.3"
-# 0.3: `GqlError::Status` boxed, a failed commit no longer wedges the session.
-gwp = "0.3"
+# 0.3.2: the catalog service carries the calling session (`CatalogContext`).
+gwp = "0.3.2"
 
 # Async
 tokio = { version = "1.54.1", features = ["full"] }
