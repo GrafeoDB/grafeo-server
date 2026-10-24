@@ -435,6 +435,8 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         } else {
             None
         },
+        max_message_size: (config.bolt_max_message_size > 0)
+            .then_some(config.bolt_max_message_size),
         #[cfg(feature = "tls")]
         tls_cert: config.tls_cert.clone(),
         #[cfg(feature = "tls")]
