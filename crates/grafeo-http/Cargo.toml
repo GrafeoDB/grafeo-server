@@ -22,7 +22,7 @@ utoipa = { version = "6", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # System info
-sysinfo = "0.38.1"
+sysinfo = "0.39"
 
 # Serialization
 serde = { workspace = true }

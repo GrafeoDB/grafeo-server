@@ -1616,7 +1616,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sysinfo 0.38.4",
+ "sysinfo",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -4111,20 +4111,6 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.38.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
-dependencies = [
- "libc",
- "memchr",
- "ntapi",
- "objc2-core-foundation",
- "objc2-io-kit",
- "windows",
-]
-
-[[package]]
-name = "sysinfo"
 version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
@@ -5391,7 +5377,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellexpand",
- "sysinfo 0.39.6",
+ "sysinfo",
  "thiserror",
  "tokio",
  "tokio-util",
