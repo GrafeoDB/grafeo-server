@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use grafeo_service::ServiceState;
 use grafeo_service::admin::AdminService;
+use grafeo_service::error::ServiceError;
 use grafeo_service::query::QueryService;
 use grafeo_service::search::SearchService;
 
@@ -108,11 +109,16 @@ impl GrafeoBackend {
             .ok_or_else(|| GqlError::Session(format!("graph '{name}' not found")))?;
 
         let db = entry.db();
+        let count = |result: grafeo_common::Result<usize>| {
+            result
+                .map(|n| n as u64)
+                .map_err(|e| GqlError::backend(ServiceError::from_engine(e)))
+        };
         Ok(GraphInfo {
             schema: DEFAULT_SCHEMA.to_owned(),
             name: name.to_owned(),
-            node_count: db.node_count() as u64,
-            edge_count: db.edge_count() as u64,
+            node_count: count(db.node_count())?,
+            edge_count: count(db.edge_count())?,
             graph_type: entry.metadata.database_type.clone(),
             storage_mode: entry.metadata.storage_mode.clone(),
             memory_limit_bytes: db.memory_limit().map(|v| v as u64),
@@ -358,17 +364,21 @@ impl GqlBackend for GrafeoBackend {
                 session
                     .engine_session
                     .execute(&statement)
-                    .map_err(|e| grafeo_service::error::ServiceError::BadRequest(e.to_string()))
+                    .map_err(ServiceError::from_engine)
             } else {
                 session
                     .engine_session
                     .execute_with_params(&statement, params)
-                    .map_err(|e| grafeo_service::error::ServiceError::BadRequest(e.to_string()))
+                    .map_err(ServiceError::from_engine)
             }
         })
         .await
         .map_err(GqlError::backend)?
-        .map_err(|e| GqlError::status(status::INVALID_SYNTAX, e.to_string()))?;
+        .map_err(|e| {
+            gql_error(e, |message| {
+                GqlError::status(status::INVALID_SYNTAX, message)
+            })
+        })?;
 
         Ok(Box::pin(GrafeoResultStream::from_query_result(result)))
     }
@@ -405,7 +415,7 @@ impl GqlBackend for GrafeoBackend {
         })
         .await
         .map_err(GqlError::backend)?
-        .map_err(|e| GqlError::Transaction(e.to_string()))
+        .map_err(|e| gql_error(ServiceError::from_engine(e), GqlError::Transaction))
     }
 
     async fn rollback(
@@ -988,6 +998,23 @@ impl ResultStream for GrafeoResultStream {
 
             StreamPhase::Done => Poll::Ready(None),
         }
+    }
+}
+
+/// GQLSTATUS 40001, serialization failure: the transaction conflicted with a
+/// concurrent one and was rolled back; the client can run it again.
+const SERIALIZATION_FAILURE: &str = "40001";
+
+/// Maps a service error to a GWP error: a conflict with a concurrent
+/// transaction is GQLSTATUS 40001 (serialization failure), which clients
+/// retry; anything else gets `other`, with the message (42001 for a statement,
+/// a transaction error for a commit, as before).
+fn gql_error(error: ServiceError, other: impl FnOnce(String) -> GqlError) -> GqlError {
+    match error {
+        ServiceError::TransactionConflict(message) => {
+            GqlError::status(SERIALIZATION_FAILURE, message)
+        }
+        error => other(error.to_string()),
     }
 }
 
