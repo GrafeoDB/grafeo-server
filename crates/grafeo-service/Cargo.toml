@@ -39,7 +39,7 @@ hex = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 
 # OpenAPI (optional — activated by HTTP transport crate)
-utoipa = { version = "5", optional = true }
+utoipa = { version = "6", optional = true }
 
 [features]
 default = ["lpg", "gql", "storage", "algos"]
