@@ -23,6 +23,15 @@ pub struct BoltrOptions {
     /// Largest Bolt message accepted, in bytes (boltr's default, 16 MiB,
     /// when `None`).
     pub max_message_size: Option<usize>,
+    /// Largest message accepted before LOGON (and after LOGOFF), in bytes
+    /// (boltr's default, 64 KiB, when `None`): decoding multiplies a message's
+    /// size in memory, so this bounds what an unauthenticated client can make
+    /// the server allocate.
+    pub max_unauthenticated_message_size: Option<usize>,
+    /// How long a new connection has to finish the TLS and Bolt handshakes,
+    /// HELLO and LOGON (boltr's default, 30 s, when `None`; `Duration::ZERO`
+    /// turns it off).
+    pub handshake_timeout: Option<Duration>,
     #[cfg(feature = "tls")]
     pub tls_cert: Option<String>,
     #[cfg(feature = "tls")]
@@ -60,6 +69,12 @@ pub async fn serve(
     }
     if let Some(bytes) = options.max_message_size {
         builder = builder.max_message_size(bytes);
+    }
+    if let Some(bytes) = options.max_unauthenticated_message_size {
+        builder = builder.max_unauthenticated_message_size(bytes);
+    }
+    if let Some(timeout) = options.handshake_timeout {
+        builder = builder.handshake_timeout(timeout);
     }
 
     // Keep the reaper handle alive until serve() returns so it can be

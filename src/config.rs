@@ -82,6 +82,22 @@ pub struct Config {
     #[arg(long, default_value_t = 0, env = "GRAFEO_BOLT_MAX_MESSAGE_SIZE")]
     pub bolt_max_message_size: usize,
 
+    /// Largest Bolt message accepted before LOGON, in bytes. 0 = the default
+    /// (64 KiB). Bounds the memory an unauthenticated client can cost.
+    #[cfg(feature = "bolt")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        env = "GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE"
+    )]
+    pub bolt_max_unauthenticated_message_size: usize,
+
+    /// Seconds a new Bolt connection has to finish its handshake, HELLO and
+    /// LOGON before it is closed. 0 turns the limit off.
+    #[cfg(feature = "bolt")]
+    #[arg(long, default_value_t = 30, env = "GRAFEO_BOLT_HANDSHAKE_TIMEOUT")]
+    pub bolt_handshake_timeout: u64,
+
     /// Directory for storing database backups.
     #[arg(long, env = "GRAFEO_BACKUP_DIR")]
     pub backup_dir: Option<String>,

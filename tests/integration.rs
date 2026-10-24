@@ -7354,7 +7354,7 @@ async fn bolt_auth_invalid_token_rejected() {
 }
 
 /// Regression for the RESET authentication bypass (boltr 0.2.0): a failed
-/// LOGON, then RESET, then RUN must not run the statement. boltr 0.2.1 closes
+/// LOGON, then RESET, then RUN must not run the statement. boltr 0.3.0 closes
 /// the connection after the failed LOGON; with 0.2.0 the server's own guard
 /// (no engine session before LOGON) refuses the RUN. Either way nothing runs.
 #[cfg(all(feature = "bolt", feature = "auth"))]
@@ -7419,6 +7419,39 @@ async fn bolt_failed_logon_then_reset_then_run_is_refused() {
     assert!(!ran, "RUN after a failed LOGON and RESET succeeded");
     let db = service.databases().get("default").unwrap().db();
     assert_eq!(db.node_count().unwrap(), 0, "the unauthenticated write ran");
+}
+
+/// The message cap before LOGON (boltr 0.3): a HELLO larger than
+/// `max_unauthenticated_message_size` is refused, a normal one is not.
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_caps_messages_before_logon() {
+    let service = grafeo_service::ServiceState::new_in_memory(300);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    drop(listener);
+    let options = grafeo_boltr::BoltrOptions {
+        max_unauthenticated_message_size: Some(1024),
+        handshake_timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    };
+    tokio::spawn(async move {
+        grafeo_boltr::serve(grafeo_boltr::GrafeoBackend::new(service), addr, options)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let hello = |agent: String| async move {
+        let mut conn = boltr::client::BoltConnection::connect(addr).await.unwrap();
+        conn.hello(boltr::types::BoltDict::from([(
+            "user_agent".to_string(),
+            boltr::types::BoltValue::String(agent),
+        )]))
+        .await
+    };
+    assert!(hello("small".to_string()).await.is_ok());
+    assert!(hello("x".repeat(4096)).await.is_err());
 }
 
 #[cfg(all(feature = "bolt", feature = "auth"))]
