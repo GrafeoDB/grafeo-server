@@ -98,6 +98,11 @@ fn sparql_term_json(value: &grafeo_common::Value) -> serde_json::Value {
             "value": i.to_string(),
             "datatype": "http://www.w3.org/2001/XMLSchema#integer"
         }),
+        Value::Decimal(d) => serde_json::json!({
+            "type": "literal",
+            "value": d.to_xsd_string(),
+            "datatype": "http://www.w3.org/2001/XMLSchema#decimal"
+        }),
         Value::Float64(f) => serde_json::json!({
             "type": "literal",
             "value": f.to_string(),
@@ -108,11 +113,38 @@ fn sparql_term_json(value: &grafeo_common::Value) -> serde_json::Value {
             "value": b.to_string(),
             "datatype": "http://www.w3.org/2001/XMLSchema#boolean"
         }),
+        Value::RdfTerm(term) => rdf_term_json(term),
         _ => {
             // Fallback: use the generic JSON conversion.
             let json_val = value_to_json(value);
             serde_json::json!({ "type": "literal", "value": json_val.to_string() })
         }
+    }
+}
+
+/// An RDF term as SPARQL Results JSON gives it: a plain `xsd:string`
+/// literal has no `datatype`, a tagged one has `xml:lang`.
+fn rdf_term_json(term: &grafeo_common::types::rdf::Term) -> serde_json::Value {
+    use grafeo_common::types::rdf::{Literal, Term};
+    match term {
+        Term::Iri(iri) => serde_json::json!({ "type": "uri", "value": iri.as_str() }),
+        Term::BlankNode(node) => serde_json::json!({ "type": "bnode", "value": node.id() }),
+        Term::Literal(literal) => match literal.language() {
+            Some(lang) => serde_json::json!({
+                "type": "literal",
+                "value": literal.value(),
+                "xml:lang": lang,
+            }),
+            None if literal.datatype() == Literal::XSD_STRING => {
+                serde_json::json!({ "type": "literal", "value": literal.value() })
+            }
+            None => serde_json::json!({
+                "type": "literal",
+                "value": literal.value(),
+                "datatype": literal.datatype(),
+            }),
+        },
+        other => serde_json::json!({ "type": "literal", "value": other.lexical_text() }),
     }
 }
 

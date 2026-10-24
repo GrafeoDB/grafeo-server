@@ -560,6 +560,7 @@ pub(crate) fn value_to_nt_term(value: &grafeo_common::Value) -> String {
         Value::Bool(b) => {
             format!("\"{b}\"^^<http://www.w3.org/2001/XMLSchema#boolean>")
         }
+        Value::RdfTerm(term) => term.to_ntriples(),
         _ => {
             let s = format!("{value:?}");
             let escaped = s.replace('"', "\\\"");
