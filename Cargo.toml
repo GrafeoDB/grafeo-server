@@ -34,7 +34,8 @@ grafeo-sync = { path = "crates/grafeo-sync" }
 # 0.3: the RESET authentication bypass fix, handshake timeout and the
 # message cap before LOGON.
 boltr = "0.3"
-gwp = "0.2.1"
+# 0.3: `GqlError::Status` boxed, a failed commit no longer wedges the session.
+gwp = "0.3"
 
 # Async
 tokio = { version = "1.51", features = ["full"] }
