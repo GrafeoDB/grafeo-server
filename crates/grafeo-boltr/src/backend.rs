@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use grafeo_service::ServiceState;
+use grafeo_service::error::ServiceError;
 use grafeo_service::query::QueryService;
 
 use crate::encode::{convert_params, grafeo_to_bolt};
@@ -24,7 +25,12 @@ use crate::encode::{convert_params, grafeo_to_bolt};
 use crate::auth::PendingAuth;
 
 struct GrafeoSession {
-    engine_session: grafeo_engine::Session,
+    /// The engine session queries run in. `None` until LOGON succeeds when
+    /// the server requires authentication: no engine session exists for a
+    /// connection that has not authenticated, so nothing can run in one even
+    /// if the protocol layer let a message through (the boltr 0.2.0 RESET
+    /// bypass).
+    engine_session: Option<grafeo_engine::Session>,
     database: String,
     /// Identity from authentication, used when creating new sessions on database switch.
     #[cfg(feature = "auth")]
@@ -32,6 +38,25 @@ struct GrafeoSession {
     /// Databases this token is authorized to access (empty = all).
     #[cfg(feature = "auth")]
     db_scope: Vec<String>,
+}
+
+impl GrafeoSession {
+    /// The engine session, or the error for a connection that has not
+    /// authenticated.
+    fn engine(&self) -> Result<&grafeo_engine::Session, BoltError> {
+        self.engine_session.as_ref().ok_or_else(unauthenticated)
+    }
+
+    /// The engine session, mutably, or the error for a connection that has
+    /// not authenticated.
+    fn engine_mut(&mut self) -> Result<&mut grafeo_engine::Session, BoltError> {
+        self.engine_session.as_mut().ok_or_else(unauthenticated)
+    }
+}
+
+/// The error for a message that needs an authenticated session.
+fn unauthenticated() -> BoltError {
+    BoltError::Authentication("authentication required".into())
 }
 
 /// Bolt backend implementation for Grafeo.
@@ -43,6 +68,10 @@ pub struct GrafeoBackend {
     bookmark_counter: AtomicU64,
     #[cfg(feature = "auth")]
     pub(crate) pending: PendingAuth,
+    /// When `true` (the server has an auth provider), a session gets its
+    /// engine session only once LOGON succeeds.
+    #[cfg(feature = "auth")]
+    auth_required: bool,
 }
 
 impl GrafeoBackend {
@@ -54,6 +83,8 @@ impl GrafeoBackend {
             bookmark_counter: AtomicU64::new(1),
             #[cfg(feature = "auth")]
             pending: std::sync::Arc::new(DashMap::new()),
+            #[cfg(feature = "auth")]
+            auth_required: false,
         }
     }
 
@@ -69,7 +100,27 @@ impl GrafeoBackend {
             advertise_addr: None,
             bookmark_counter: AtomicU64::new(1),
             pending,
+            auth_required: false,
         }
+    }
+
+    /// Requires authentication: sessions get no engine session until LOGON
+    /// succeeds, and every query, transaction and database switch before it
+    /// is refused. [`serve`](crate::serve) sets this when it is given an
+    /// auth provider.
+    #[cfg(feature = "auth")]
+    #[must_use]
+    pub fn with_auth_required(mut self) -> Self {
+        self.auth_required = true;
+        self
+    }
+
+    /// Whether sessions wait for LOGON before they get an engine session.
+    fn requires_auth(&self) -> bool {
+        #[cfg(feature = "auth")]
+        return self.auth_required;
+        #[cfg(not(feature = "auth"))]
+        return false;
     }
 
     /// Sets the address to advertise in ROUTE responses.
@@ -96,17 +147,25 @@ impl BoltBackend for GrafeoBackend {
             .get("default")
             .ok_or_else(|| BoltError::Session("default database not found".into()))?;
 
-        let ro = self.state.is_query_read_only();
-        let engine_session = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
-        })
-        .await
-        .map_err(BoltError::backend)?;
+        // With authentication on, the connection has not logged on yet: it
+        // gets its engine session in `set_session_auth`.
+        let engine_session = if self.requires_auth() {
+            None
+        } else {
+            let ro = self.state.is_query_read_only();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    let db = entry.db();
+                    if ro {
+                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
+                    } else {
+                        db.session()
+                    }
+                })
+                .await
+                .map_err(BoltError::backend)?,
+            )
+        };
 
         let id = Uuid::new_v4().to_string();
         self.sessions.insert(
@@ -170,9 +229,16 @@ impl BoltBackend for GrafeoBackend {
                 .map_err(BoltError::backend)?;
 
                 let mut s = session_arc.lock();
-                s.engine_session = engine_session;
+                s.engine_session = Some(engine_session);
                 s.identity = Some(identity);
                 s.db_scope = db_scope;
+            } else if self.auth_required {
+                // A principal the validator did not issue (or one reaped
+                // before the session took it): the session stays without an
+                // engine session, so nothing runs in it.
+                return Err(BoltError::Authentication(
+                    "authentication expired or unknown".into(),
+                ));
             }
         }
 
@@ -200,6 +266,9 @@ impl BoltBackend for GrafeoBackend {
                 {
                     let session_arc = self.get_session(session)?;
                     let s = session_arc.lock();
+                    if s.engine_session.is_none() {
+                        return Err(unauthenticated());
+                    }
                     if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == &db_name) {
                         return Err(BoltError::Session(format!(
                             "not authorized for database '{db_name}'"
@@ -241,7 +310,7 @@ impl BoltBackend for GrafeoBackend {
 
                 let session_arc = self.get_session(session)?;
                 let mut s = session_arc.lock();
-                s.engine_session = engine_session;
+                s.engine_session = Some(engine_session);
                 s.database = db_name;
             }
         }
@@ -256,14 +325,21 @@ impl BoltBackend for GrafeoBackend {
             .ok_or_else(|| BoltError::Session("default database not found".into()))?;
 
         let ro = self.state.is_query_read_only();
+        let session_arc = self.get_session(session)?;
+
+        // A session that has not authenticated stays without an engine
+        // session: RESET never grants what LOGON did not.
+        {
+            let mut s = session_arc.lock();
+            if s.engine_session.is_none() {
+                "default".clone_into(&mut s.database);
+                return Ok(());
+            }
+        }
 
         // Preserve identity across reset.
         #[cfg(feature = "auth")]
-        let identity = {
-            let session_arc = self.get_session(session)?;
-            let s = session_arc.lock();
-            s.identity.clone()
-        };
+        let identity = session_arc.lock().identity.clone();
 
         let engine_session = tokio::task::spawn_blocking(move || {
             let db = entry.db();
@@ -281,9 +357,8 @@ impl BoltBackend for GrafeoBackend {
         .await
         .map_err(BoltError::backend)?;
 
-        let session_arc = self.get_session(session)?;
         let mut s = session_arc.lock();
-        s.engine_session = engine_session;
+        s.engine_session = Some(engine_session);
         "default".clone_into(&mut s.database);
         Ok(())
     }
@@ -309,27 +384,23 @@ impl BoltBackend for GrafeoBackend {
 
         let result = tokio::task::spawn_blocking(move || {
             let session = session_arc.lock();
+            let engine = session.engine()?;
             let params_opt = if params.is_empty() {
                 None
             } else {
                 Some(&params)
             };
-            QueryService::dispatch(
-                &session.engine_session,
-                &statement,
-                language.as_deref(),
-                params_opt,
+            QueryService::dispatch(engine, &statement, language.as_deref(), params_opt).map_err(
+                |e| {
+                    bolt_error(e, |message| BoltError::Query {
+                        code: "Neo.ClientError.Statement.SyntaxError".to_string(),
+                        message,
+                    })
+                },
             )
         })
         .await
-        .map_err(BoltError::backend)?
-        .map_err(|e| match e {
-            grafeo_service::error::ServiceError::Forbidden(msg) => BoltError::Forbidden(msg),
-            other => BoltError::Query {
-                code: "Neo.ClientError.Statement.SyntaxError".to_string(),
-                message: other.to_string(),
-            },
-        })?;
+        .map_err(BoltError::backend)??;
 
         let columns = result.columns.clone();
         let records: Vec<BoltRecord> = result
@@ -378,11 +449,12 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         tokio::task::spawn_blocking(move || {
             let mut s = session_arc.lock();
-            s.engine_session.begin_transaction()
+            s.engine_mut()?
+                .begin_transaction()
+                .map_err(|e| bolt_error(ServiceError::from_engine(e), BoltError::Transaction))
         })
         .await
-        .map_err(BoltError::backend)?
-        .map_err(|e| BoltError::Transaction(e.to_string()))?;
+        .map_err(BoltError::backend)??;
 
         Ok(TransactionHandle(Uuid::new_v4().to_string()))
     }
@@ -395,11 +467,12 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         tokio::task::spawn_blocking(move || {
             let mut s = session_arc.lock();
-            s.engine_session.commit()
+            s.engine_mut()?
+                .commit()
+                .map_err(|e| bolt_error(ServiceError::from_engine(e), BoltError::Transaction))
         })
         .await
-        .map_err(BoltError::backend)?
-        .map_err(|e| BoltError::Transaction(e.to_string()))?;
+        .map_err(BoltError::backend)??;
 
         // Return a monotonic bookmark for causal consistency.
         let seq = self.bookmark_counter.fetch_add(1, Ordering::Relaxed);
@@ -419,11 +492,12 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         tokio::task::spawn_blocking(move || {
             let mut s = session_arc.lock();
-            s.engine_session.rollback()
+            s.engine_mut()?
+                .rollback()
+                .map_err(|e| bolt_error(ServiceError::from_engine(e), BoltError::Transaction))
         })
         .await
         .map_err(BoltError::backend)?
-        .map_err(|e| BoltError::Transaction(e.to_string()))
     }
 
     async fn get_server_info(&self) -> Result<BoltDict, BoltError> {
@@ -471,6 +545,26 @@ impl BoltBackend for GrafeoBackend {
     }
 }
 
+/// Maps a service error to the Bolt failure drivers act on: a conflict with a
+/// concurrent transaction is a transient error (Neo4j drivers retry managed
+/// transactions only on those), an unavailable database the transient
+/// `DatabaseUnavailable`, a permission error `Forbidden`; anything else gets
+/// `other`, with the message.
+fn bolt_error(error: ServiceError, other: impl FnOnce(String) -> BoltError) -> BoltError {
+    match error {
+        ServiceError::Forbidden(msg) => BoltError::Forbidden(msg),
+        ServiceError::TransactionConflict(message) => BoltError::Query {
+            code: "Neo.TransientError.Transaction.Outdated".to_string(),
+            message,
+        },
+        ServiceError::Unavailable(message) => BoltError::Query {
+            code: "Neo.TransientError.General.DatabaseUnavailable".to_string(),
+            message,
+        },
+        error => other(error.to_string()),
+    }
+}
+
 /// Heuristic to detect mutation queries from the statement text.
 ///
 /// Used to set the `type` field in RUN response metadata ("r" for read,
@@ -483,4 +577,115 @@ fn is_mutation_query(statement: &str) -> bool {
     ]
     .iter()
     .any(|kw| upper.contains(kw))
+}
+
+#[cfg(all(test, feature = "auth"))]
+mod tests {
+    use super::*;
+
+    fn config() -> SessionConfig {
+        SessionConfig {
+            user_agent: "test".to_string(),
+            database: None,
+        }
+    }
+
+    fn backend() -> (GrafeoBackend, ServiceState) {
+        let state = ServiceState::new_in_memory_with_auth(300, "secret".to_string());
+        (
+            GrafeoBackend::new(state.clone()).with_auth_required(),
+            state,
+        )
+    }
+
+    fn is_unauthenticated(error: &BoltError) -> bool {
+        matches!(error, BoltError::Authentication(_))
+    }
+
+    /// The second guard of the RESET bypass: whatever the protocol layer lets
+    /// through, a session that never logged on has no engine session, so a
+    /// RUN, a BEGIN or a database switch is refused, also after RESET.
+    #[tokio::test]
+    async fn a_session_without_logon_runs_nothing_even_after_reset() {
+        let (backend, state) = backend();
+        let session = backend.create_session(&config()).await.unwrap();
+
+        let run = backend
+            .execute(
+                &session,
+                "INSERT (:Bypass)",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await;
+        assert!(is_unauthenticated(&run.unwrap_err()));
+
+        backend.reset_session(&session).await.unwrap();
+        let run = backend
+            .execute(
+                &session,
+                "INSERT (:Bypass)",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await;
+        assert!(is_unauthenticated(&run.unwrap_err()));
+        let begin = backend.begin_transaction(&session, &BoltDict::new()).await;
+        assert!(is_unauthenticated(&begin.unwrap_err()));
+        let switch = backend
+            .configure_session(&session, SessionProperty::Database("default".into()))
+            .await;
+        assert!(is_unauthenticated(&switch.unwrap_err()));
+
+        let db = state.databases().get("default").unwrap().db();
+        assert_eq!(db.node_count().unwrap(), 0, "nothing was written");
+    }
+
+    /// A principal the validator never issued gives no engine session.
+    #[tokio::test]
+    async fn an_unknown_principal_is_refused() {
+        let (backend, _state) = backend();
+        let session = backend.create_session(&config()).await.unwrap();
+        let auth = backend
+            .set_session_auth(
+                &session,
+                AuthInfo {
+                    principal: "forged".to_string(),
+                    credentials_expired: false,
+                },
+            )
+            .await;
+        assert!(is_unauthenticated(&auth.unwrap_err()));
+        let run = backend
+            .execute(
+                &session,
+                "RETURN 1",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await;
+        assert!(is_unauthenticated(&run.unwrap_err()));
+    }
+
+    /// Without an auth provider a session runs at once, as before.
+    #[tokio::test]
+    async fn without_auth_a_session_runs_at_once() {
+        let state = ServiceState::new_in_memory(300);
+        let backend = GrafeoBackend::new(state);
+        let session = backend.create_session(&config()).await.unwrap();
+        let result = backend
+            .execute(
+                &session,
+                "RETURN 1 AS x",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.records.len(), 1);
+    }
 }

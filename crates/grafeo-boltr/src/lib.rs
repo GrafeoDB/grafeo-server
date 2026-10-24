@@ -20,6 +20,9 @@ use std::time::Duration;
 pub struct BoltrOptions {
     pub idle_timeout: Option<Duration>,
     pub max_sessions: Option<usize>,
+    /// Largest Bolt message accepted, in bytes (boltr's default, 16 MiB,
+    /// when `None`).
+    pub max_message_size: Option<usize>,
     #[cfg(feature = "tls")]
     pub tls_cert: Option<String>,
     #[cfg(feature = "tls")]
@@ -35,6 +38,14 @@ pub async fn serve(
     addr: SocketAddr,
     options: BoltrOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // With an auth provider, sessions get no engine session before LOGON.
+    #[cfg(feature = "auth")]
+    let backend = if options.auth_provider.is_some() {
+        backend.with_auth_required()
+    } else {
+        backend
+    };
+
     // Extract the pending auth map before the builder consumes the backend.
     #[cfg(feature = "auth")]
     let backend_pending = backend.pending.clone();
@@ -46,6 +57,9 @@ pub async fn serve(
     }
     if let Some(limit) = options.max_sessions {
         builder = builder.max_sessions(limit);
+    }
+    if let Some(bytes) = options.max_message_size {
+        builder = builder.max_message_size(bytes);
     }
 
     // Keep the reaper handle alive until serve() returns so it can be
