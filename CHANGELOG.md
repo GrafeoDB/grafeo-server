@@ -5,6 +5,23 @@ All notable changes to grafeo-server are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-02
+
+Engine 0.6.1 alignment: backups and restores that survive a crash, SPARQL that follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns as ISO GQL defines them, and a query timeout that stops every query. Snapshots no longer need the `async-storage` feature. Lockstep with grafeo 0.6.1.
+
+### Changed
+
+- **grafeo-engine 0.6.1** (from 0.6.0): see the engine's [0.6.1 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) for every fix. A database with a named vector index cannot be opened by a server on engine 0.6.0 afterwards.
+- **Some statements that ran on 0.6.0 now fail, with the engine**: a `CAST` of text that is no number (`22018`) or to a type too small for the value (`22003`), a quantified GQL pattern of several edges without an upper bound or over 16 repetitions, an undeclared SPARQL prefix or a `BIND` to a variable in scope, `CREATE INDEX` with a name another index has, a procedure call with an unknown key or an extra argument (`grafeo.pagerank({iterations: 20})` ignored it; the key is `max_iterations`), and `SERIALIZABLE` (it ran as snapshot isolation).
+- **`POST /admin/{db}/snapshot` needs only the `grafeo-file` feature**: it writes the checkpoint `POST /admin/{db}/wal/checkpoint` writes, on engine 0.6.1's `wal_checkpoint`. A database without a file gets a 400 (it was a 500). After a commit that did not complete, a snapshot or a checkpoint is refused with a 503: a snapshot used to write that commit's stamped part, and a checkpoint gave a 500.
+- **The `threads` database option is deprecated, removed in 0.7.0**: the engine sizes no thread pool from it, and never did, so the server no longer passes it on. `POST /db` still takes it, refuses 0 and logs a warning; `GET /db/{name}`, `GET /system/resources` and GWP still report it, and the OpenAPI document marks it deprecated. Studio no longer offers it.
+- **The `async-storage` feature is deprecated and enables nothing**, and the `full` tier no longer lists it. Kept so existing `--features async-storage` builds still work; removed in 0.7.0.
+- **Backup errors say whose they are**: an epoch restore from a directory without a manifest and an incremental backup without a full backup are a 400, and an incremental backup whose chain is broken is a 409 that asks for a new full backup. They were 500s.
+
+### Security
+
+- **pulldown-cmark 0.13.6** (from 0.13.4), a build dependency through `prost-build`: [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414.html), exponential event growth with `ENABLE_WIKILINKS`. grafeo-server does not parse Markdown at run time.
+
 ## [0.6.0] - 2026-10-24
 
 Engine 0.6.0 alignment: a new single-file database format that 0.5.x data directories migrate to on first start, writes after a compaction that survive a crash, exact decimals, and clearer errors. A write conflict is now a retryable 409 (a transient error over Bolt, GQLSTATUS 40001 over GWP), an unknown query language is a 400 instead of running as GQL, and Bolt runs nothing for a connection that has not logged on. Lockstep with grafeo 0.6.0.

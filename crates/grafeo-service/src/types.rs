@@ -110,8 +110,11 @@ pub struct DatabaseOptions {
     /// Maintain backward edges. Default: true. Disable to save ~50% adjacency memory.
     #[serde(default)]
     pub backward_edges: Option<bool>,
-    /// Worker threads for query execution. Default: CPU count.
+    /// Deprecated since 0.6.1, removed in 0.7.0: recorded and reported with
+    /// the database, without effect, since the engine sizes no thread pool
+    /// from it. Must be above zero. Default: CPU count.
     #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(deprecated))]
     pub threads: Option<usize>,
     /// Optional path for out-of-core spill processing.
     #[serde(default)]
