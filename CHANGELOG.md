@@ -18,10 +18,6 @@ Engine 0.6.1 alignment: backups and restores that survive a crash, SPARQL that f
 - **The `async-storage` feature is deprecated and enables nothing**, and the `full` tier no longer lists it. Kept so existing `--features async-storage` builds still work; removed in 0.7.0.
 - **Backup errors say whose they are**: an epoch restore from a directory without a manifest and an incremental backup without a full backup are a 400, and an incremental backup whose chain is broken is a 409 that asks for a new full backup. They were 500s.
 
-### Fixed
-
-- **An epoch restore that no full backup covers stays a 400**: engine 0.6.1 reports it as an invalid value instead of an internal error, which the server would have turned into a 500.
-
 ### Security
 
 - **pulldown-cmark 0.13.6** (from 0.13.4), a build dependency through `prost-build`: [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414.html), exponential event growth with `ENABLE_WIKILINKS`. grafeo-server does not parse Markdown at run time.
