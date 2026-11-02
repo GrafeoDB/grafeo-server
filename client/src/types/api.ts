@@ -49,7 +49,6 @@ export interface DatabaseOptions {
   wal_enabled?: boolean;
   wal_durability?: "sync" | "batch" | "adaptive" | "nosync";
   backward_edges?: boolean;
-  threads?: number;
   spill_path?: string;
   /** Per-section storage tier overrides; omitted sections stay "auto". */
   section_tiers?: Partial<Record<SectionName, TierOverride>>;
@@ -113,6 +112,7 @@ export interface DatabaseInfoResponse {
   storage_mode: string;
   memory_limit_bytes?: number;
   backward_edges: boolean;
+  /** @deprecated Has no effect; removed in 0.7.0. */
   threads: number;
 }
 
@@ -198,6 +198,7 @@ export interface ResourceDefaults {
   wal_enabled: boolean;
   wal_durability: string;
   backward_edges: boolean;
+  /** @deprecated Has no effect; removed in 0.7.0. */
   threads: number;
 }
 

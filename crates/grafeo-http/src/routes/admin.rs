@@ -280,7 +280,7 @@ pub async fn admin_compact(
     params(("db" = String, Path, description = "Database name")),
     responses(
         (status = 200, description = "Snapshot created"),
-        (status = 400, description = "Feature not enabled", body = crate::error::ErrorBody),
+        (status = 400, description = "Feature not enabled, or the database has no file", body = crate::error::ErrorBody),
         (status = 404, description = "Database not found", body = crate::error::ErrorBody),
     ),
     tag = "Admin"

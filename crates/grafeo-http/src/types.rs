@@ -122,7 +122,9 @@ pub struct ResourceDefaults {
     pub wal_durability: String,
     /// Default backward edges setting.
     pub backward_edges: bool,
-    /// Default thread count.
+    /// Deprecated since 0.6.1, removed in 0.7.0: the CPU count, which a new
+    /// database records without effect.
+    #[schema(deprecated)]
     pub threads: usize,
 }
 
@@ -155,7 +157,9 @@ pub struct DatabaseInfoResponse {
     pub memory_limit_bytes: Option<usize>,
     /// Whether backward edges are enabled.
     pub backward_edges: bool,
-    /// Number of worker threads.
+    /// Deprecated since 0.6.1, removed in 0.7.0: the thread count the
+    /// database was created with, which has no effect.
+    #[schema(deprecated)]
     pub threads: usize,
 }
 

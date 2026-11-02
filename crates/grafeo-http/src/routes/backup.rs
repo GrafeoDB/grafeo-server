@@ -254,7 +254,8 @@ pub async fn download_backup(
     ),
     responses(
         (status = 200, description = "Incremental backup created", body = types::BackupEntry),
-        (status = 400, description = "Not a persistent database", body = crate::error::ErrorBody),
+        (status = 400, description = "Not a persistent database, or no full backup to continue from", body = crate::error::ErrorBody),
+        (status = 409, description = "The backup chain is broken: take a new full backup", body = crate::error::ErrorBody),
         (status = 404, description = "Database not found", body = crate::error::ErrorBody),
     ),
     tag = "Admin"

@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.99.0"
 license = "Apache-2.0"
@@ -19,8 +19,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "=0.6.0", default-features = false }
-grafeo-common = { version = "=0.6.0" }
+grafeo-engine = { version = "=0.6.1", default-features = false }
+grafeo-common = { version = "=0.6.1" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -153,7 +153,8 @@ import = ["jsonl-import", "parquet-import"]
 # Engine: temporal versioning (forwarded)
 temporal = ["grafeo-service/temporal"]
 
-# Engine: async storage (forwarded)
+# Deprecated since 0.6.1: enables nothing, snapshots need only `grafeo-file`.
+# Kept so existing `--features async-storage` builds still work; removed in 0.7.0.
 async-storage = ["grafeo-service/async-storage"]
 
 # Engine: metrics (forwarded)
@@ -180,7 +181,7 @@ full = [
     "lpg", "http", "studio", "all-languages", "algos", "ai", "triple-store", "storage", "embed",
     "owl-schema", "rdfs-schema", "json-schema", "auth", "tls", "gwp", "bolt",
     "temporal", "import", "metrics", "tracing", "sync", "push-changefeed", "replication",
-    "async-storage", "shacl", "ring-index", "arrow-export",
+    "shacl", "ring-index", "arrow-export",
 ]
 
 [dependencies]

@@ -84,8 +84,9 @@ temporal = ["grafeo-engine/temporal"]
 # (engine 0.6 `compact()` keeps one store); removed in 0.7.0.
 compact-store = []
 
-# Engine: async storage (async WAL and storage backend)
-async-storage = ["grafeo-engine/async-storage"]
+# Deprecated since 0.6.1: enables nothing. Checkpoints and snapshots use the
+# engine's sync calls on a blocking task; removed in 0.7.0.
+async-storage = []
 
 # Engine: metrics
 metrics = ["grafeo-engine/metrics"]

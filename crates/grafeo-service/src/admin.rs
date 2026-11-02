@@ -92,21 +92,10 @@ impl AdminService {
 
         let entry = databases.get_available(db_name)?;
 
-        #[cfg(feature = "async-storage")]
-        {
-            entry
-                .db()
-                .async_wal_checkpoint()
-                .await
-                .map_err(|e| ServiceError::Internal(e.to_string()))
-        }
-        #[cfg(not(feature = "async-storage"))]
-        {
-            tokio::task::spawn_blocking(move || entry.db().wal_checkpoint())
-                .await
-                .map_err(|e| ServiceError::Internal(e.to_string()))?
-                .map_err(|e| ServiceError::Internal(e.to_string()))
-        }
+        tokio::task::spawn_blocking(move || entry.db().wal_checkpoint())
+            .await
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(ServiceError::from_engine)
     }
 
     /// Validate database integrity.
@@ -620,9 +609,9 @@ impl AdminService {
 
     /// Write a point-in-time snapshot to the `.grafeo` database file.
     ///
-    /// Requires the `async-storage` and `grafeo-file` features. Returns an
-    /// error explaining the missing features when they are not enabled.
-    #[cfg(all(feature = "async-storage", feature = "grafeo-file"))]
+    /// Requires the `grafeo-file` feature. Returns an error explaining the
+    /// missing feature when it is not enabled.
+    #[cfg(feature = "grafeo-file")]
     pub async fn write_snapshot(
         databases: &DatabaseManager,
         db_name: &str,
@@ -631,15 +620,20 @@ impl AdminService {
             return Err(ServiceError::ReadOnly);
         }
         let entry = databases.get_available(db_name)?;
-        entry
-            .db()
-            .async_write_snapshot()
+        // A checkpoint of a database without a file succeeds and writes nothing.
+        if entry.db().path().is_none() {
+            return Err(ServiceError::BadRequest(
+                "a snapshot write needs a persistent database".to_string(),
+            ));
+        }
+        tokio::task::spawn_blocking(move || entry.db().wal_checkpoint())
             .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))
+            .map_err(|e| ServiceError::Internal(e.to_string()))?
+            .map_err(ServiceError::from_engine)
     }
 
-    /// Snapshot stub without the `async-storage` and `grafeo-file` features.
-    #[cfg(not(all(feature = "async-storage", feature = "grafeo-file")))]
+    /// Snapshot stub without the `grafeo-file` feature.
+    #[cfg(not(feature = "grafeo-file"))]
     pub fn write_snapshot(
         databases: &DatabaseManager,
         db_name: &str,
@@ -649,7 +643,7 @@ impl AdminService {
         } else {
             databases.get_available(db_name).and_then(|_| {
                 Err(ServiceError::BadRequest(
-                    "snapshot requires the 'async-storage' and 'grafeo-file' features".to_string(),
+                    "snapshot requires the 'grafeo-file' feature".to_string(),
                 ))
             })
         })
@@ -1283,9 +1277,22 @@ mod tests {
     #[tokio::test]
     async fn test_write_snapshot_in_memory() {
         let state = ServiceState::new_in_memory(300);
-        // In-memory databases have no file manager, so snapshot should fail.
-        let result = AdminService::write_snapshot(state.databases(), "default").await;
-        assert!(result.is_err());
+        // In-memory databases have no file, so a snapshot is refused.
+        let err = AdminService::write_snapshot(state.databases(), "default")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)));
+    }
+
+    #[cfg(feature = "grafeo-file")]
+    #[tokio::test]
+    async fn test_write_snapshot_persistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let databases = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        AdminService::write_snapshot(&databases, "default")
+            .await
+            .unwrap();
+        assert!(dir.path().join("default").join("data.grafeo").exists());
     }
 
     #[tokio::test]

@@ -392,6 +392,29 @@ async fn sparql_endpoint_works() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn openapi_marks_the_threads_option_deprecated() {
+    let base = spawn_server().await;
+    let body: Value = Client::new()
+        .get(format!("{base}/api/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for schema in [
+        "DatabaseOptions",
+        "ResourceDefaults",
+        "DatabaseInfoResponse",
+    ] {
+        assert_eq!(
+            body["components"]["schemas"][schema]["properties"]["threads"]["deprecated"], true,
+            "{schema}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn openapi_json_returns_valid_spec() {
     let base = spawn_server().await;
     let client = Client::new();
@@ -1785,7 +1808,7 @@ async fn call_pagerank_via_gql() {
     // Run PageRank via CALL (GQL)
     let resp = client
         .post(format!("{base}/query"))
-        .json(&json!({"query": "CALL grafeo.pagerank({damping: 0.85, iterations: 20}) YIELD node_id, score"}))
+        .json(&json!({"query": "CALL grafeo.pagerank({damping: 0.85, max_iterations: 20}) YIELD node_id, score"}))
         .send()
         .await
         .unwrap();

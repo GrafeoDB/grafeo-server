@@ -63,7 +63,6 @@ export default function CreateDatabaseDialog({
   const [walEnabled, setWalEnabled] = useState(false);
   const [walDurability, setWalDurability] = useState("batch");
   const [backwardEdges, setBackwardEdges] = useState(true);
-  const [threads, setThreads] = useState(0); // 0 = auto
   const [showTiers, setShowTiers] = useState(false);
   const [sectionTiers, setSectionTiers] = useState<
     Partial<Record<SectionName, TierOverride>>
@@ -79,7 +78,6 @@ export default function CreateDatabaseDialog({
       .then((res) => {
         setResources(res);
         setMemoryLimit(res.defaults.memory_limit_bytes);
-        setThreads(res.defaults.threads);
       })
       .catch(() => {});
   }, []);
@@ -162,7 +160,6 @@ export default function CreateDatabaseDialog({
           wal_enabled: walEnabled,
           wal_durability: walDurability as "sync" | "batch" | "adaptive" | "nosync",
           backward_edges: backwardEdges,
-          threads: threads === 0 ? undefined : threads,
           section_tiers:
             storageMode === "Persistent" && Object.keys(sectionTiers).length > 0
               ? sectionTiers
@@ -351,24 +348,6 @@ export default function CreateDatabaseDialog({
             Disable to save ~50% adjacency memory. Reverse traversals use full
             scans.
           </div>
-        </div>
-
-        {/* Threads */}
-        <div className={styles.field}>
-          <label className={styles.label}>Threads</label>
-          <select
-            className={styles.select}
-            value={threads}
-            onChange={(e) => setThreads(Number(e.target.value))}
-          >
-            <option value={0}>
-              Auto ({resources?.defaults.threads ?? "?"})
-            </option>
-            <option value={1}>1</option>
-            <option value={2}>2</option>
-            <option value={4}>4</option>
-            <option value={8}>8</option>
-          </select>
         </div>
 
         {/* Storage tiers (advanced, persistent only) */}

@@ -25,6 +25,25 @@ const LABELS_FILENAME: &str = "labels.json";
 /// epoch.
 const UNCOVERED_EPOCH_PREFIX: &str = "no full backup covers epoch";
 
+/// An engine error from an incremental backup: without a full backup to
+/// continue from the caller has a bad request, and a broken chain takes a new
+/// full backup, not a retry.
+fn incremental_backup_error(error: grafeo_common::Error) -> ServiceError {
+    use grafeo_common::utils::error::{Error, StorageError};
+
+    match error {
+        Error::InvalidValue(msg) => {
+            ServiceError::BadRequest(format!("incremental backup failed: {msg}"))
+        }
+        Error::Storage(storage) if matches!(*storage, StorageError::BackupChainBroken(_)) => {
+            ServiceError::Conflict(format!(
+                "incremental backup failed: {storage}; take a new full backup"
+            ))
+        }
+        e => ServiceError::Internal(format!("incremental backup failed: {e}")),
+    }
+}
+
 /// Returns the per-database backup subdirectory.
 fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceError> {
     if db_name.contains('/') || db_name.contains('\\') || db_name.contains("..") {
@@ -413,7 +432,7 @@ impl BackupService {
         let segment = tokio::task::spawn_blocking(move || db.backup_incremental(&dir))
             .await
             .map_err(|e| ServiceError::Internal(e.to_string()))?
-            .map_err(|e| ServiceError::Internal(format!("incremental backup failed: {e}")))?;
+            .map_err(incremental_backup_error)?;
 
         tracing::info!(
             database = %db_name_owned,
@@ -542,14 +561,17 @@ impl BackupService {
         .map_err(|e| ServiceError::Internal(e.to_string()))
         .and_then(|r| {
             r.map_err(|e| match e {
-                // The engine reports an epoch no full backup reaches as an
-                // internal error; to the caller it is a bad request.
-                grafeo_common::Error::Internal(ref msg)
+                grafeo_common::Error::InvalidValue(ref msg)
                     if msg.starts_with(UNCOVERED_EPOCH_PREFIX) =>
                 {
                     ServiceError::BadRequest(format!(
                         "epoch {target_epoch} is not covered by the backup chain: no full backup covers it"
                     ))
+                }
+                // What the backups cannot do, such as a directory without a
+                // manifest, is the caller's to fix.
+                grafeo_common::Error::InvalidValue(msg) => {
+                    ServiceError::BadRequest(format!("restore to epoch failed: {msg}"))
                 }
                 e => ServiceError::Internal(format!("restore to epoch failed: {e}")),
             })
@@ -1840,6 +1862,35 @@ mod tests {
         assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
+    #[test]
+    fn incremental_backup_errors_say_whose_they_are() {
+        use grafeo_common::utils::error::{Error, StorageError};
+
+        let no_full = incremental_backup_error(Error::InvalidValue("no manifest".to_string()));
+        assert!(
+            matches!(no_full, ServiceError::BadRequest(_)),
+            "{no_full:?}"
+        );
+        let broken = incremental_backup_error(Error::from(StorageError::BackupChainBroken(
+            "log removed".to_string(),
+        )));
+        assert!(matches!(broken, ServiceError::Conflict(_)), "{broken:?}");
+        let other = incremental_backup_error(Error::Internal("disk".to_string()));
+        assert!(matches!(other, ServiceError::Internal(_)), "{other:?}");
+    }
+
+    #[tokio::test]
+    async fn incremental_backup_without_a_full_backup_is_a_bad_request() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let mgr =
+            crate::database::DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        let err = BackupService::backup_incremental(&mgr, "default", backup_dir.path())
+            .await
+            .expect_err("nothing to continue from");
+        assert!(matches!(err, ServiceError::BadRequest(_)), "{err:?}");
+    }
+
     #[tokio::test]
     async fn incremental_backup_persistent() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1903,8 +1954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_to_epoch_without_a_manifest_is_still_an_internal_error() {
-        // Only the uncovered-epoch message is a client error.
+    async fn restore_to_epoch_without_a_manifest_is_a_bad_request() {
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let mgr =
@@ -1912,7 +1962,7 @@ mod tests {
         let err = BackupService::restore_to_epoch(&mgr, "default", 1, backup_dir.path())
             .await
             .expect_err("no backups exist");
-        assert!(matches!(err, ServiceError::Internal(_)), "got: {err:?}");
+        assert!(matches!(err, ServiceError::BadRequest(_)), "got: {err:?}");
         assert!(!mgr.get("default").unwrap().is_restoring());
     }
 

@@ -25,11 +25,11 @@ const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 /// File in a persistent database's directory that records the options it
 /// was created with, so every reopen applies them again (grafeo-server#67).
 ///
-/// Engine 0.6.0 stores most creation settings in the database file itself
-/// (grafeo#551; not yet in 0.6.0-beta.1), but not the thread count nor the
-/// server's database type (`owl-schema`, `rdfs-schema` and `json-schema` are
-/// server types over the engine's two graph models), so the server keeps
-/// writing this file. The settings both hold are the same values.
+/// Engine 0.6 stores most creation settings in the database file itself
+/// (grafeo#551), but not the server's database type (`owl-schema`,
+/// `rdfs-schema` and `json-schema` are server types over the engine's two
+/// graph models) nor the thread count, which only the server reports, so the
+/// server keeps writing this file. The settings both hold are the same values.
 pub const OPTIONS_FILE: &str = "options.json";
 
 /// What [`OPTIONS_FILE`] holds: the database type and its creation options
@@ -63,12 +63,15 @@ fn configure(
     database_type: DatabaseType,
     options: &DatabaseOptions,
 ) -> Result<Config, ServiceError> {
-    let mut config = type_config(config, database_type);
+    // The engine has no use for the thread count, so only the server checks it.
+    if options.threads == Some(0) {
+        return Err(ServiceError::BadRequest(
+            "threads must be greater than zero".to_string(),
+        ));
+    }
+    let mut config = config.with_graph_model(database_type.graph_model());
     if let Some(limit) = options.memory_limit_bytes {
         config = config.with_memory_limit(limit);
-    }
-    if let Some(threads) = options.threads {
-        config = config.with_threads(threads);
     }
     if options.backward_edges == Some(false) {
         config = config.without_backward_edges();
@@ -91,18 +94,6 @@ fn configure(
         }
     }
     Ok(config)
-}
-
-/// What `database_type` itself needs of the engine config, whatever the
-/// options: its graph model, and schema constraint checks for a JSON Schema
-/// database.
-fn type_config(config: Config, database_type: DatabaseType) -> Config {
-    let config = config.with_graph_model(database_type.graph_model());
-    if database_type == DatabaseType::JsonSchema {
-        config.with_schema_constraints()
-    } else {
-        config
-    }
 }
 
 /// The metadata a database with these resolved options reports.
@@ -643,7 +634,7 @@ impl DatabaseManager {
     /// metadata they imply. A database without the file (created before
     /// 0.5.44, or the `default` database) opens with engine defaults and
     /// `None` metadata, as before. A file with a value the engine refuses
-    /// (zero threads, zero memory), an unknown name or a value of the wrong
+    /// (zero memory), zero threads, an unknown name or a value of the wrong
     /// type falls back to engine defaults with the stored graph model. A file
     /// that is not JSON, or has no readable `database_type`, is logged and
     /// ignored; its graph model is unknown, so it opens as before.
@@ -706,8 +697,8 @@ impl DatabaseManager {
                 };
             }
         };
-        // `configure` only checks names; the engine checks the values. A file
-        // with a value-range error or an unknown name falls back to the base
+        // `configure` checks names and the thread count; the engine checks the
+        // other values. A file with a value-range error or an unknown name falls back to the base
         // config with the stored graph model. The model is kept because the
         // file's sections depend on it: opening an RDF file as a property
         // graph would rewrite it without its RDF data at the next checkpoint.
@@ -732,18 +723,15 @@ impl DatabaseManager {
                 );
                 Ok((configured, Some(metadata)))
             }
-            Err(
-                e @ (ConfigError::ZeroMemoryLimit
-                | ConfigError::ZeroThreads
-                | ConfigError::ZeroAdaptiveFlushInterval),
-            ) => Self::type_only_config(base, stored.database_type, &options_path, &e.to_string()),
+            Err(e @ (ConfigError::ZeroMemoryLimit | ConfigError::ZeroAdaptiveFlushInterval)) => {
+                Self::type_only_config(base, stored.database_type, &options_path, &e.to_string())
+            }
             Err(e) => Err(Self::keep_closed(&options_path, &e)),
         }
     }
 
-    /// The base config with what the stored database type needs (its graph
-    /// model, and schema constraints for JSON Schema), for a file whose
-    /// options are ignored because of `reason`. That config must pass
+    /// The base config with the stored database type's graph model, for a
+    /// file whose options are ignored because of `reason`. That config must pass
     /// validation, or the database stays closed.
     fn type_only_config(
         base: Config,
@@ -751,7 +739,7 @@ impl DatabaseManager {
         options_path: &Path,
         reason: &str,
     ) -> Result<(Config, Option<DatabaseMetadata>), ServiceError> {
-        let config = type_config(base, database_type);
+        let config = base.with_graph_model(database_type.graph_model());
         match config.validate() {
             Ok(()) => {
                 tracing::warn!(
@@ -874,6 +862,12 @@ impl DatabaseManager {
         };
         validate_spillable_sections(&resolved)?;
         let config = configure(base, req.database_type, &resolved)?;
+        if req.options.threads.is_some() {
+            tracing::warn!(
+                database = %name,
+                "The `threads` option is deprecated and has no effect; it is removed in 0.7.0"
+            );
+        }
 
         // Never adopt or overwrite a database that is on disk but absent from
         // the map (skipped at startup because it is corrupt or its options
@@ -1194,31 +1188,6 @@ impl DatabaseManager {
 mod tests {
     use super::*;
     use crate::types::DatabaseOptions;
-
-    /// Why [`OPTIONS_FILE`] stays in 0.6: the engine does not store the
-    /// thread count (nor the server's database type, such as `owl-schema`),
-    /// so a reopen without the file loses it. Engine 0.6.0 stores the other
-    /// creation settings itself (grafeo#551); the server still applies them
-    /// from the file, which gives the same values.
-    #[test]
-    fn the_engine_does_not_keep_the_thread_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data.grafeo");
-        let default_threads = Config::persistent(&path).threads();
-        let threads = default_threads + 3;
-        let db = GrafeoDB::with_config(Config::persistent(&path).with_threads(threads)).unwrap();
-        assert_eq!(db.config().threads(), threads);
-        db.close().unwrap();
-        drop(db);
-
-        let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(
-            db.config().threads(),
-            default_threads,
-            "the engine kept the thread count: options.json may no longer need it"
-        );
-        db.close().unwrap();
-    }
 
     #[test]
     fn test_name_validation() {
@@ -1702,6 +1671,21 @@ mod tests {
     }
 
     #[test]
+    fn create_refuses_zero_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(dir.path().to_str().unwrap()), false);
+        let options = DatabaseOptions {
+            threads: Some(0),
+            ..Default::default()
+        };
+        let err = mgr
+            .create(&persistent_request("zero", options))
+            .unwrap_err();
+        assert!(matches!(err, ServiceError::BadRequest(_)), "{err:?}");
+        assert!(mgr.get("zero").is_none());
+    }
+
+    #[test]
     fn creation_options_survive_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
@@ -2128,7 +2112,7 @@ mod tests {
 
     #[test]
     fn options_that_fail_engine_validation_open_with_engine_defaults() {
-        // `configure` accepts zero threads; the engine's validation does not.
+        // `configure` accepts zero memory; the engine's validation does not.
         // The database must still open.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
@@ -2140,7 +2124,6 @@ mod tests {
         let file = dir.path().join("zero").join(OPTIONS_FILE);
         let stored = std::fs::read_to_string(&file).unwrap();
         let mut json: serde_json::Value = serde_json::from_str(&stored).unwrap();
-        json["options"]["threads"] = serde_json::json!(0);
         json["options"]["memory_limit_bytes"] = serde_json::json!(0);
         std::fs::write(&file, json.to_string()).unwrap();
 
@@ -2153,7 +2136,7 @@ mod tests {
     }
 
     #[test]
-    fn a_json_schema_database_keeps_its_schema_checks_when_its_options_fall_back() {
+    fn a_json_schema_database_keeps_its_graph_model_when_its_options_fall_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         {
@@ -2175,7 +2158,6 @@ mod tests {
             .reopen_config(&dir.path().join("checked").join("data.grafeo"))
             .unwrap();
         assert!(metadata.is_none(), "the options fell back");
-        assert!(config.schema_constraints(), "the schema checks stay on");
         assert_eq!(config.graph_model(), grafeo_engine::GraphModel::Lpg);
     }
 
