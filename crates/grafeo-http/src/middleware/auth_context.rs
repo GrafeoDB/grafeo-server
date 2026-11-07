@@ -36,6 +36,21 @@ impl AuthContext {
         Ok(())
     }
 
+    /// Check that the token is an admin with no database list: server-wide
+    /// operations (token management, every database's backups, replication
+    /// status). No-op when auth is off.
+    pub fn check_server_admin(&self) -> Result<(), ApiError> {
+        self.check_admin()?;
+        if let Some(ref info) = self.0
+            && !info.scope.databases.is_empty()
+        {
+            return Err(ApiError::forbidden(
+                "admin access to every database required".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Check that the token can write (admin or read-write). No-op when auth is off.
     pub fn check_write(&self) -> Result<(), ApiError> {
         if let Some(ref info) = self.0

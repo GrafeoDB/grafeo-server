@@ -89,7 +89,7 @@ pub async fn list_all_backups(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<types::BackupEntry>>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
     let backup_dir = require_backup_dir(&state)?;
     let entries = BackupService::list_backups(None, &backup_dir)?;
     Ok(Json(entries))
@@ -121,6 +121,9 @@ pub async fn restore_backup(
     Json(req): Json<types::RestoreRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     auth.check_admin()?;
+    // A cross-database restore reads the source database's data.
+    auth.check_db_access(&db)?;
+    auth.check_db_access(req.source_db.as_deref().unwrap_or(db.as_str()))?;
     let backup_dir = require_backup_dir(&state)?;
 
     // Source database defaults to the target for same-db restores. When

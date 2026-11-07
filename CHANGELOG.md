@@ -2,6 +2,27 @@
 
 All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
+## [0.6.2] - Unreleased
+
+Security release: a page on another site can no longer write through the HTTP API or open the WebSocket, and a token reaches only the databases in its scope. A read-write token that created or deleted databases, and a database-scoped admin token that managed tokens, now gets a 403.
+
+### Changed
+
+Requests that ran on 0.6.1 and now fail or answer differently.
+
+- **Creating and deleting a database needs an admin token** (#82): `POST /db` and `DELETE /db/{name}` refuse a read-write token with 403. A database-scoped admin token creates and deletes only the databases in its list.
+- **Server-wide operations need an admin token with no database list**: token management (`/admin/tokens`), `GET /backups` and `GET /admin/replication` refuse an admin token limited to some databases. The bootstrap `--auth-token` and Basic auth have no list.
+
+### Security
+
+- **Pages on other sites can't write or open the WebSocket**: a POST, PUT, PATCH or DELETE, or a WebSocket upgrade, from a browser page of another origin is refused with 403 `cross_site_request` unless `--cors-origins` lists that origin; requests without `Origin` or `Sec-Fetch-Site` (non-browser clients) and same-origin pages such as Studio pass. Without `--cors-origins` the WebSocket checked no origin, so any page could read and write every database (with cached Basic credentials too), and a form POST of a SPARQL `update=` to `POST /db/{name}/sparql` ran.
+- **Tokens reach only the databases in their scope**: the admin and backup routes, `/search/vector`, `/search/text`, `/search/hybrid` and a restore's `source_db` ignored a token's database list. Every route under `/db/{name}/` and `/admin/{db}/` is now authorized by one table before its body is read.
+- **A database-scoped admin token can't create unscoped tokens**: `POST /admin/tokens` let it mint an admin token for every database, and `GET /backups` showed it every database's backups.
+
+### Contributors
+
+- Thanks to [DenisPchelincev](https://github.com/DenisPchelincev) for reporting that read-write tokens could create and delete databases ([#82](https://github.com/GrafeoDB/grafeo-server/issues/82)).
+
 ## [0.6.1] - 2026-11-02
 
 Correctness release on engine 0.6.1: backups and restores survive a crash, SPARQL follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns follow ISO GQL, and the query timeout stops every query. Some statements that ran on 0.6.0 now fail with the engine (listed under Changed). A server on engine 0.6.0 can't open a database that has a named vector index.

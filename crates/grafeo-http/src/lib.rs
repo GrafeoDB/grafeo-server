@@ -407,8 +407,15 @@ pub fn router(state: AppState) -> Router {
         middleware::auth::auth_middleware,
     ));
 
+    // The cross-site check runs before rate limiting and auth, so a foreign
+    // page is refused whatever credentials the browser attaches, and inside
+    // the CORS layer, which answers preflights itself.
     api.layer(axum::middleware::from_fn(
         middleware::request_id::request_id_middleware,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        middleware::cross_site::cross_site_middleware,
     ))
     .layer(cors_layer(&state))
     .with_state(state)

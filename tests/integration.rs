@@ -7672,14 +7672,15 @@ async fn auth_scoped_token_filters_database_list() {
     assert_eq!(dbs[0]["name"], "db1");
 }
 
-/// Database access check: scoped token cannot create a database outside its scope.
+/// Database access check: a scoped admin token cannot create a database
+/// outside its scope. (Creating a database needs the admin role, #82.)
 #[cfg(feature = "auth")]
 #[tokio::test]
 async fn auth_scoped_token_cannot_create_db_outside_scope() {
     use grafeo_service::auth::TokenScope;
 
     let scope = TokenScope {
-        role: grafeo_service::auth::Role::ReadWrite,
+        role: grafeo_service::auth::Role::Admin,
         databases: vec!["allowed-db".to_string()],
     };
     let (base, _admin_token, tokens) = spawn_server_with_token_store(

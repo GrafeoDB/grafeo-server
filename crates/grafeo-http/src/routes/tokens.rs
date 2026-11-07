@@ -28,7 +28,7 @@ pub async fn create_token(
     auth: AuthContext,
     Json(req): Json<types::CreateTokenRequest>,
 ) -> Result<Json<types::TokenResponse>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -74,7 +74,7 @@ pub async fn list_tokens(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<types::TokenResponse>>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -107,7 +107,7 @@ pub async fn get_token(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<Json<types::TokenResponse>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -142,7 +142,7 @@ pub async fn delete_token(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(

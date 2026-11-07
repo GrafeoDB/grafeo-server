@@ -58,7 +58,7 @@ pub async fn create_database(
     auth: AuthContext,
     Json(req): Json<CreateDatabaseRequest>,
 ) -> Result<Json<DatabaseSummary>, ApiError> {
-    auth.check_write()?;
+    auth.check_admin()?;
     auth.check_db_access(&req.name)?;
     let name = req.name.clone();
     let db_type = req.database_type;
@@ -100,7 +100,7 @@ pub async fn delete_database(
     auth: AuthContext,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    auth.check_write()?;
+    auth.check_admin()?;
     auth.check_db_access(&name)?;
     // Clean up any transaction sessions belonging to this database
     state.sessions().remove_by_database(&name);

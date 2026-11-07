@@ -56,37 +56,30 @@ pub async fn auth_middleware(
         .map(String::from);
     let auth_header_ref = auth_header.as_deref();
 
-    // Try Bearer token
-    if let Some(token) = auth_header_ref.and_then(|v| v.strip_prefix("Bearer "))
-        && let Some(info) = auth_provider.check_bearer(token)
-    {
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
-    }
+    let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok());
 
-    // Try API key header (checked against the same token set)
-    if let Some(key) = req.headers().get("x-api-key").and_then(|v| v.to_str().ok())
-        && let Some(info) = auth_provider.check_bearer(key)
-    {
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
-    }
+    let info = auth_header_ref
+        // Bearer token
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|token| auth_provider.check_bearer(token))
+        // API key header (checked against the same token set)
+        .or_else(|| api_key.and_then(|key| auth_provider.check_bearer(key)))
+        // HTTP Basic auth: admin, unrestricted
+        .or_else(|| {
+            let encoded = auth_header_ref?.strip_prefix("Basic ")?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()?;
+            let (user, pass) = std::str::from_utf8(&decoded).ok()?.split_once(':')?;
+            auth_provider.check_basic(user, pass).then(|| TokenInfo {
+                id: "_basic".to_string(),
+                name: "basic-auth".to_string(),
+                scope: grafeo_service::auth::TokenScope::default(),
+            })
+        })
+        .ok_or_else(ApiError::unauthorized)?;
 
-    // Try HTTP Basic auth (always admin scope)
-    if let Some(encoded) = auth_header_ref.and_then(|v| v.strip_prefix("Basic "))
-        && let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
-        && let Ok(decoded_str) = std::str::from_utf8(&decoded_bytes)
-        && let Some((user, pass)) = decoded_str.split_once(':')
-        && auth_provider.check_basic(user, pass)
-    {
-        // Basic auth = admin, unrestricted
-        req.extensions_mut().insert(TokenInfo {
-            id: "_basic".to_string(),
-            name: "basic-auth".to_string(),
-            scope: grafeo_service::auth::TokenScope::default(),
-        });
-        return Ok(next.run(req).await);
-    }
-
-    Err(ApiError::unauthorized())
+    super::authorize::authorize(req.method(), req.uri().path(), &info)?;
+    req.extensions_mut().insert(info);
+    Ok(next.run(req).await)
 }
