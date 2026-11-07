@@ -9,10 +9,10 @@ use dashmap::DashMap;
 use gwp::error::GqlError;
 use gwp::proto;
 use gwp::server::{
-    AdminStats, AdminValidationResult, AdminWalStatus, CatalogContext, CreateGraphConfig,
-    GqlBackend, GraphInfo, GraphTypeInfo, HybridSearchParams, IndexDefinition, ResetTarget,
-    ResultFrame, ResultStream, SchemaInfo, SearchHit, SessionConfig, SessionHandle,
-    SessionProperty, TextSearchParams, TransactionHandle, ValidationDiagnostic, VectorSearchParams,
+    AdminStats, AdminValidationResult, AdminWalStatus, CreateGraphConfig, GqlBackend, GraphInfo,
+    GraphTypeInfo, HybridSearchParams, IndexDefinition, RequestContext, ResetTarget, ResultFrame,
+    ResultStream, SchemaInfo, SearchHit, SessionConfig, SessionHandle, SessionProperty,
+    TextSearchParams, TransactionHandle, ValidationDiagnostic, VectorSearchParams,
 };
 use gwp::status;
 use gwp::types::Value as GwpValue;
@@ -200,7 +200,7 @@ impl GrafeoBackend {
     /// the calling session's, or the default database for a call without
     /// one (refused when the server authenticates sessions).
     #[allow(clippy::result_large_err)]
-    fn catalog_target(&self, ctx: &CatalogContext) -> Result<CatalogTarget, GqlError> {
+    fn catalog_target(&self, ctx: &RequestContext) -> Result<CatalogTarget, GqlError> {
         match &ctx.session {
             Some(handle) => {
                 let session_arc = self.get_session(handle)?;
@@ -226,6 +226,53 @@ impl GrafeoBackend {
                 })
             }
         }
+    }
+
+    /// Whether the session in `ctx` may make an admin (`needs_admin`) or
+    /// search call on database `database`: the database must be in its
+    /// token's scope, and admin calls need the admin role, as the HTTP admin
+    /// routes do. A call without a session is refused when the server
+    /// authenticates sessions (gwp refuses it first), and allowed otherwise.
+    #[allow(clippy::result_large_err)]
+    fn authorize_call(
+        &self,
+        ctx: &RequestContext,
+        database: &str,
+        needs_admin: bool,
+    ) -> Result<(), GqlError> {
+        let Some(handle) = &ctx.session else {
+            #[cfg(feature = "auth")]
+            if self.catalog_needs_session {
+                return Err(GqlError::Grpc(tonic::Status::unauthenticated(
+                    "admin and search calls need an authenticated session (pass its session id)",
+                )));
+            }
+            return Ok(());
+        };
+        let session_arc = self.get_session(handle)?;
+        #[cfg(feature = "auth")]
+        {
+            let s = session_arc.lock();
+            if !s.db_scope.is_empty() && !s.db_scope.iter().any(|d| d == database) {
+                return Err(GqlError::Grpc(tonic::Status::permission_denied(format!(
+                    "not authorized for database '{database}'"
+                ))));
+            }
+            // A session without an identity exists only when the server
+            // does not authenticate sessions.
+            let is_admin = match &s.identity {
+                Some(identity) => identity.can_admin(),
+                None => !self.catalog_needs_session,
+            };
+            if needs_admin && !is_admin {
+                return Err(GqlError::Grpc(tonic::Status::permission_denied(
+                    "admin access required",
+                )));
+            }
+        }
+        #[cfg(not(feature = "auth"))]
+        let _ = (session_arc, database, needs_admin);
+        Ok(())
     }
 
     /// Runs `statement` in `schema` of the catalog target, on an engine
@@ -553,10 +600,10 @@ impl GqlBackend for GrafeoBackend {
     // -----------------------------------------------------------------
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, GqlError> {
-        self.list_schemas_in(&CatalogContext::default()).await
+        self.list_schemas_in(&RequestContext::default()).await
     }
 
-    async fn list_schemas_in(&self, ctx: &CatalogContext) -> Result<Vec<SchemaInfo>, GqlError> {
+    async fn list_schemas_in(&self, ctx: &RequestContext) -> Result<Vec<SchemaInfo>, GqlError> {
         let target = self.catalog_target(ctx)?;
         let named = AdminService::list_schemas(
             self.state.databases(),
@@ -580,13 +627,13 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn create_schema(&self, name: &str, if_not_exists: bool) -> Result<(), GqlError> {
-        self.create_schema_in(&CatalogContext::default(), name, if_not_exists)
+        self.create_schema_in(&RequestContext::default(), name, if_not_exists)
             .await
     }
 
     async fn create_schema_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         name: &str,
         if_not_exists: bool,
     ) -> Result<(), GqlError> {
@@ -607,13 +654,13 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn drop_schema(&self, name: &str, if_exists: bool) -> Result<bool, GqlError> {
-        self.drop_schema_in(&CatalogContext::default(), name, if_exists)
+        self.drop_schema_in(&RequestContext::default(), name, if_exists)
             .await
     }
 
     async fn drop_schema_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         name: &str,
         if_exists: bool,
     ) -> Result<bool, GqlError> {
@@ -634,13 +681,13 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn list_graphs(&self, schema: &str) -> Result<Vec<GraphInfo>, GqlError> {
-        self.list_graphs_in(&CatalogContext::default(), schema)
+        self.list_graphs_in(&RequestContext::default(), schema)
             .await
     }
 
     async fn list_graphs_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         schema: &str,
     ) -> Result<Vec<GraphInfo>, GqlError> {
         let target = self.catalog_target(ctx)?;
@@ -656,13 +703,13 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn create_graph(&self, config: CreateGraphConfig) -> Result<GraphInfo, GqlError> {
-        self.create_graph_in(&CatalogContext::default(), config)
+        self.create_graph_in(&RequestContext::default(), config)
             .await
     }
 
     async fn create_graph_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         config: CreateGraphConfig,
     ) -> Result<GraphInfo, GqlError> {
         use gwp::server::GraphTypeSpec;
@@ -740,13 +787,13 @@ impl GqlBackend for GrafeoBackend {
         name: &str,
         if_exists: bool,
     ) -> Result<bool, GqlError> {
-        self.drop_graph_in(&CatalogContext::default(), schema, name, if_exists)
+        self.drop_graph_in(&RequestContext::default(), schema, name, if_exists)
             .await
     }
 
     async fn drop_graph_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         schema: &str,
         name: &str,
         if_exists: bool,
@@ -769,13 +816,13 @@ impl GqlBackend for GrafeoBackend {
     }
 
     async fn get_graph_info(&self, schema: &str, name: &str) -> Result<GraphInfo, GqlError> {
-        self.get_graph_info_in(&CatalogContext::default(), schema, name)
+        self.get_graph_info_in(&RequestContext::default(), schema, name)
             .await
     }
 
     async fn get_graph_info_in(
         &self,
-        ctx: &CatalogContext,
+        ctx: &RequestContext,
         schema: &str,
         name: &str,
     ) -> Result<GraphInfo, GqlError> {
@@ -812,9 +859,18 @@ impl GqlBackend for GrafeoBackend {
 
     // -----------------------------------------------------------------
     // Admin operations
+    //
+    // Only the `*_in` forms are implemented: they act as the calling
+    // session (`authorize_call`), and the plain forms keep gwp's
+    // "not supported" default, so no path skips the check.
     // -----------------------------------------------------------------
 
-    async fn get_graph_stats(&self, graph: &str) -> Result<AdminStats, GqlError> {
+    async fn get_graph_stats_in(
+        &self,
+        ctx: &RequestContext,
+        graph: &str,
+    ) -> Result<AdminStats, GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         let stats = AdminService::database_stats(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
@@ -831,7 +887,12 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn wal_status(&self, graph: &str) -> Result<AdminWalStatus, GqlError> {
+    async fn wal_status_in(
+        &self,
+        ctx: &RequestContext,
+        graph: &str,
+    ) -> Result<AdminWalStatus, GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         let status = AdminService::wal_status(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
@@ -846,13 +907,19 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn wal_checkpoint(&self, graph: &str) -> Result<(), GqlError> {
+    async fn wal_checkpoint_in(&self, ctx: &RequestContext, graph: &str) -> Result<(), GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         AdminService::wal_checkpoint(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))
     }
 
-    async fn validate(&self, graph: &str) -> Result<AdminValidationResult, GqlError> {
+    async fn validate_in(
+        &self,
+        ctx: &RequestContext,
+        graph: &str,
+    ) -> Result<AdminValidationResult, GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         let result = AdminService::validate(self.state.databases(), graph)
             .await
             .map_err(|e| GqlError::Session(e.to_string()))?;
@@ -880,7 +947,13 @@ impl GqlBackend for GrafeoBackend {
         })
     }
 
-    async fn create_index(&self, graph: &str, index: IndexDefinition) -> Result<(), GqlError> {
+    async fn create_index_in(
+        &self,
+        ctx: &RequestContext,
+        graph: &str,
+        index: IndexDefinition,
+    ) -> Result<(), GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         let service_index = match index {
             IndexDefinition::Property { property } => {
                 grafeo_service::types::IndexDef::Property { property }
@@ -910,7 +983,13 @@ impl GqlBackend for GrafeoBackend {
             .map_err(|e| GqlError::Session(e.to_string()))
     }
 
-    async fn drop_index(&self, graph: &str, index: IndexDefinition) -> Result<bool, GqlError> {
+    async fn drop_index_in(
+        &self,
+        ctx: &RequestContext,
+        graph: &str,
+        index: IndexDefinition,
+    ) -> Result<bool, GqlError> {
+        self.authorize_call(ctx, graph, true)?;
         let service_index = match index {
             IndexDefinition::Property { property } => {
                 grafeo_service::types::IndexDef::Property { property }
@@ -944,7 +1023,12 @@ impl GqlBackend for GrafeoBackend {
     // Search operations
     // -----------------------------------------------------------------
 
-    async fn vector_search(&self, req: VectorSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+    async fn vector_search_in(
+        &self,
+        ctx: &RequestContext,
+        req: VectorSearchParams,
+    ) -> Result<Vec<SearchHit>, GqlError> {
+        self.authorize_call(ctx, &req.graph, false)?;
         let service_req = grafeo_service::types::VectorSearchReq {
             database: req.graph.clone(),
             label: req.label,
@@ -973,7 +1057,12 @@ impl GqlBackend for GrafeoBackend {
             .collect())
     }
 
-    async fn text_search(&self, req: TextSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+    async fn text_search_in(
+        &self,
+        ctx: &RequestContext,
+        req: TextSearchParams,
+    ) -> Result<Vec<SearchHit>, GqlError> {
+        self.authorize_call(ctx, &req.graph, false)?;
         let service_req = grafeo_service::types::TextSearchReq {
             database: req.graph.clone(),
             label: req.label,
@@ -996,7 +1085,12 @@ impl GqlBackend for GrafeoBackend {
             .collect())
     }
 
-    async fn hybrid_search(&self, req: HybridSearchParams) -> Result<Vec<SearchHit>, GqlError> {
+    async fn hybrid_search_in(
+        &self,
+        ctx: &RequestContext,
+        req: HybridSearchParams,
+    ) -> Result<Vec<SearchHit>, GqlError> {
+        self.authorize_call(ctx, &req.graph, false)?;
         let service_req = grafeo_service::types::HybridSearchReq {
             database: req.graph.clone(),
             label: req.label,

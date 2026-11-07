@@ -19,8 +19,13 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 
 - **Pages on other sites can't write or open the WebSocket**: a POST, PUT, PATCH or DELETE, or a WebSocket upgrade, from a browser page of another origin is refused with 403 `cross_site_request` unless `--cors-origins` lists that origin; requests without `Origin` or `Sec-Fetch-Site` (non-browser clients) and same-origin pages such as Studio pass. Without `--cors-origins` the WebSocket checked no origin, so any page could read and write every database (with cached Basic credentials too), and a form POST of a SPARQL `update=` to `POST /db/{name}/sparql` ran.
 - **Tokens reach only the databases in their scope**: the admin and backup routes, `/search/vector`, `/search/text`, `/search/hybrid` and a restore's `source_db` ignored a token's database list. Every route under `/db/{name}/` and `/admin/{db}/` is now authorized by one table before its body is read.
+- **GWP admin and search calls act as their session**: with auth on, `AdminService` and `SearchService` answered any caller without a session, on any database. They now need a session, reach only the databases in its token's scope, and the admin calls need the admin role, as the HTTP admin routes do.
 - **Every build and image can authenticate**: `auth` is a default feature, and the `gwp` and `bolt` images include it. The default binary and the `latest`, `gwp` and `bolt` images had no way to require credentials.
 - **A database-scoped admin token can't create unscoped tokens**: `POST /admin/tokens` let it mint an admin token for every database, and `GET /backups` showed it every database's backups.
+
+### Dependencies
+
+- **gwp 0.4.0** (from 0.3.2): admin and search requests carry the session, and gwp refuses one without a session when the server authenticates sessions.
 
 ### Contributors
 

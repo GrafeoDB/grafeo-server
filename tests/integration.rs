@@ -2713,6 +2713,7 @@ async fn gwp_admin_stats() {
     let resp = admin_client
         .get_graph_stats(gwp::proto::GetGraphStatsRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2737,6 +2738,7 @@ async fn gwp_admin_wal_status() {
     let resp = admin_client
         .wal_status(gwp::proto::WalStatusRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2760,6 +2762,7 @@ async fn gwp_admin_validate() {
     let resp = admin_client
         .validate(gwp::proto::ValidateRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2790,6 +2793,7 @@ async fn gwp_admin_create_index() {
                     property: "name".to_string(),
                 },
             )),
+            session_id: String::new(),
         })
         .await
         .unwrap();
@@ -2803,6 +2807,7 @@ async fn gwp_admin_create_index() {
                     property: "name".to_string(),
                 },
             )),
+            session_id: String::new(),
         })
         .await
         .unwrap()
