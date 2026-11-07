@@ -22,18 +22,16 @@ use grafeo_service::auth::TokenInfo;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Paths exempt from authentication (monitoring/scraping).
-fn is_exempt(path: &str, method: &Method) -> bool {
-    if *method == Method::OPTIONS {
-        return true;
-    }
-    matches!(path, "/health" | "/metrics")
+/// Paths exempt from authentication: CORS preflights, the `/health` probe,
+/// and `/metrics` when the server runs with `--public-metrics`.
+fn is_exempt(path: &str, method: &Method, public_metrics: bool) -> bool {
+    *method == Method::OPTIONS || path == "/health" || (public_metrics && path == "/metrics")
 }
 
 /// Middleware that authenticates requests using any configured method.
 ///
 /// When no authentication is configured, all requests pass through.
-/// `/health` and `/metrics` are always exempt.
+/// `/health` is always exempt, `/metrics` with `--public-metrics`.
 /// On success, `TokenInfo` is inserted into request extensions.
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -45,7 +43,7 @@ pub async fn auth_middleware(
         None => return Ok(next.run(req).await),
     };
 
-    if is_exempt(req.uri().path(), req.method()) {
+    if is_exempt(req.uri().path(), req.method(), state.public_metrics()) {
         return Ok(next.run(req).await);
     }
 

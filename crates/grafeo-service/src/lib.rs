@@ -107,9 +107,24 @@ struct Inner {
 
 impl ServiceState {
     /// Creates a new service state from config.
+    ///
+    /// # Panics
+    ///
+    /// Where [`try_new`](Self::try_new) returns an error.
     pub fn new(config: &ServiceConfig) -> Self {
+        Self::try_new(config).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// As [`new`](Self::new), returning the start-up errors an operator can
+    /// fix (such as `--read-only` on a data directory without a database)
+    /// instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`DatabaseManager::try_new`].
+    pub fn try_new(config: &ServiceConfig) -> Result<Self, error::ServiceError> {
         #[allow(unused_mut)]
-        let mut databases = DatabaseManager::new(config.data_dir.as_deref(), config.read_only);
+        let mut databases = DatabaseManager::try_new(config.data_dir.as_deref(), config.read_only)?;
 
         // Enable CDC on all databases when running as a replication primary,
         // so that mutations produce change events for replicas to consume.
@@ -118,7 +133,7 @@ impl ServiceState {
             databases.set_cdc_enabled(true);
         }
 
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
                 databases,
                 sessions: SessionRegistry::new(),
@@ -182,7 +197,7 @@ impl ServiceState {
                 backup_dir: config.backup_dir.as_ref().map(PathBuf::from),
                 backup_retention: config.backup_retention,
             }),
-        }
+        })
     }
 
     /// Creates an in-memory service state (for tests and ephemeral use).

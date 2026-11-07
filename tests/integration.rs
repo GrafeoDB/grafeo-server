@@ -1362,11 +1362,18 @@ async fn health_exempt_from_auth() {
 
 #[cfg(feature = "auth")]
 #[tokio::test]
-async fn metrics_exempt_from_auth() {
+async fn metrics_need_the_token_when_auth_is_on() {
     let base = spawn_server_with_auth("secret-token").await;
     let client = Client::new();
 
     let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 401, "--public-metrics opens it");
+    let resp = client
+        .get(format!("{base}/metrics"))
+        .bearer_auth("secret-token")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -1493,8 +1500,15 @@ async fn basic_auth_exempt_paths() {
     let resp = client.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Metrics is always exempt
+    // Metrics needs the credentials too (open only with --public-metrics)
     let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = client
+        .get(format!("{base}/metrics"))
+        .basic_auth("admin", Some("s3cret"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 

@@ -57,6 +57,12 @@ pub struct Config {
     #[arg(long, env = "GRAFEO_AUTH_PASSWORD", requires = "auth_user")]
     pub auth_password: Option<String>,
 
+    /// Let `/metrics` answer without credentials when auth is on, for
+    /// scrapers on a trusted network. Without it `/metrics` needs a token.
+    #[cfg(feature = "auth")]
+    #[arg(long, default_value_t = false, env = "GRAFEO_PUBLIC_METRICS")]
+    pub public_metrics: bool,
+
     /// Path to token store JSON file for managed API keys.
     /// Default: {data_dir}/tokens.json when --data-dir is set.
     #[cfg(feature = "auth")]
@@ -68,9 +74,9 @@ pub struct Config {
     #[arg(long, default_value_t = 7688, env = "GRAFEO_GWP_PORT")]
     pub gwp_port: u16,
 
-    /// Maximum concurrent GWP sessions. 0 = unlimited.
+    /// Maximum concurrent GWP sessions. 1,000 by default; 0 = unlimited.
     #[cfg(feature = "gwp")]
-    #[arg(long, default_value_t = 0, env = "GRAFEO_GWP_MAX_SESSIONS")]
+    #[arg(long, default_value_t = 1000, env = "GRAFEO_GWP_MAX_SESSIONS")]
     pub gwp_max_sessions: usize,
 
     /// Bolt v5 protocol port.
@@ -78,9 +84,9 @@ pub struct Config {
     #[arg(long, default_value_t = 7687, env = "GRAFEO_BOLT_PORT")]
     pub bolt_port: u16,
 
-    /// Maximum concurrent Bolt sessions. 0 = unlimited.
+    /// Maximum concurrent Bolt sessions. 1,000 by default; 0 = unlimited.
     #[cfg(feature = "bolt")]
-    #[arg(long, default_value_t = 0, env = "GRAFEO_BOLT_MAX_SESSIONS")]
+    #[arg(long, default_value_t = 1000, env = "GRAFEO_BOLT_MAX_SESSIONS")]
     pub bolt_max_sessions: usize,
 
     /// Largest Bolt message accepted, in bytes. 0 = the default (16 MiB).

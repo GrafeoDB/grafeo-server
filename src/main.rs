@@ -66,7 +66,13 @@ async fn main() {
         backup_retention: config.backup_retention,
     };
 
-    let service = ServiceState::new(&service_config);
+    let service = match ServiceState::try_new(&service_config) {
+        Ok(service) => service,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(2);
+        }
+    };
 
     #[cfg(feature = "auth")]
     let has_credentials = service.auth().is_some_and(|a| a.is_enabled());
@@ -193,6 +199,8 @@ async fn main() {
             config.max_body_size,
             config.max_batch_size,
         );
+        #[cfg(feature = "auth")]
+        let app_state = app_state.with_public_metrics(config.public_metrics);
 
         #[cfg_attr(not(feature = "studio"), allow(unused_mut))]
         let mut app = grafeo_http::router(app_state.clone());

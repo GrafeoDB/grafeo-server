@@ -427,7 +427,24 @@ impl DatabaseManager {
     /// Creates a new manager. In persistent mode, scans `data_dir` for existing
     /// database subdirectories and opens each one. Ensures the `"default"` database
     /// always exists. Performs migration from the old single-file layout if needed.
+    ///
+    /// # Panics
+    ///
+    /// Where [`try_new`](Self::try_new) returns an error, and on the start-up
+    /// failures `try_new` still panics on.
     pub fn new(data_dir: Option<&str>, read_only: bool) -> Self {
+        Self::try_new(data_dir, read_only).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// As [`new`](Self::new), but a read-only manager whose data directory has
+    /// no default database returns an error instead of panicking (a
+    /// read-only start creates no database).
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::Unavailable`] for a read-only data directory without a
+    /// default database.
+    pub fn try_new(data_dir: Option<&str>, read_only: bool) -> Result<Self, ServiceError> {
         let mgr = Self {
             databases: DashMap::new(),
             creating: DashSet::new(),
@@ -546,6 +563,15 @@ impl DatabaseManager {
             // Ensure "default" exists
             if !mgr.databases.contains_key("default") {
                 let default_dir = dir.join("default");
+                if mgr.read_only {
+                    return Err(ServiceError::Unavailable(format!(
+                        "read-only mode needs an existing default database, and {} has none \
+                         (or it did not open: see the log above). Start once without \
+                         --read-only to create it, or point --data-dir at a directory that \
+                         holds one",
+                        dir.display()
+                    )));
+                }
                 // An empty default must never be created next to files of an
                 // earlier one: it would shadow them, or adopt and rewrite
                 // them. Recovery is retried on every start.
@@ -562,12 +588,8 @@ impl DatabaseManager {
                     .expect("failed to create default db directory");
                 let db_path = default_dir.join("data.grafeo");
                 tracing::info!("Creating default persistent database");
-                let db = if mgr.read_only {
-                    GrafeoDB::open_read_only(db_path.to_str().unwrap())
-                        .expect("failed to create default db")
-                } else {
-                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db")
-                };
+                let db =
+                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db");
                 mgr.databases.insert(
                     "default".to_string(),
                     Arc::new(DatabaseEntry::new(
@@ -591,7 +613,7 @@ impl DatabaseManager {
             );
         }
 
-        mgr
+        Ok(mgr)
     }
 
     /// Enables or disables CDC on all current databases and future ones.

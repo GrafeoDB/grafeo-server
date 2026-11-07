@@ -106,6 +106,12 @@ fn token(plaintext: &str, name: &str, role: Role, databases: &[&str]) -> TokenRe
 /// A server with databases `a` and `b`, the bootstrap token `ROOT` and the
 /// managed tokens above.
 async fn spawn() -> String {
+    spawn_with(false).await
+}
+
+/// As [`spawn`], with `/metrics` open to unauthenticated scrapes when
+/// `public_metrics`.
+async fn spawn_with(public_metrics: bool) -> String {
     let dir = tempfile::tempdir().unwrap();
     let store =
         grafeo_service::token_store::TokenStore::load(dir.path().join("tokens.json")).unwrap();
@@ -129,7 +135,8 @@ async fn spawn() -> String {
         service,
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
-    );
+    )
+    .with_public_metrics(public_metrics);
     let app = grafeo_server::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -398,4 +405,43 @@ async fn a_cross_database_restore_needs_both_databases_in_scope() {
     )
     .await;
     assert!(refused(status, &json), "{status} {json}");
+}
+
+#[tokio::test]
+async fn metrics_need_credentials_when_auth_is_on() {
+    let base = spawn().await;
+    let anonymous = Client::new()
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let scraper = Client::new()
+        .get(format!("{base}/metrics"))
+        .bearer_auth(RO)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scraper.status(), StatusCode::OK);
+    let health = Client::new()
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        health.status(),
+        StatusCode::OK,
+        "/health stays open for probes"
+    );
+}
+
+#[tokio::test]
+async fn public_metrics_keep_metrics_open() {
+    let base = spawn_with(true).await;
+    let anonymous = Client::new()
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::OK);
 }

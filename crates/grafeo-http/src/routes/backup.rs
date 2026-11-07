@@ -136,7 +136,7 @@ pub async fn restore_backup(
     // segments and the JSON body arrives as arbitrary strings, so both
     // paths need explicit traversal checks before they're joined.
     for param in [db.as_str(), source_db, req.backup.as_str()] {
-        if param.contains('/') || param.contains('\\') || param.contains("..") {
+        if !grafeo_service::backup::is_plain_name(param) {
             return Err(grafeo_service::error::ServiceError::BadRequest(
                 "invalid path parameter".to_string(),
             )
@@ -204,7 +204,7 @@ pub async fn download_backup(
 
     // Validate both params — axum percent-decodes path segments
     for param in [&db, &filename] {
-        if param.contains('/') || param.contains('\\') || param.contains("..") {
+        if !grafeo_service::backup::is_plain_name(param) {
             return Err(grafeo_service::error::ServiceError::BadRequest(
                 "invalid path parameter".to_string(),
             )

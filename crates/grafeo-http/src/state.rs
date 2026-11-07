@@ -28,6 +28,8 @@ struct AppInner {
     trusted_proxies: Vec<IpAddr>,
     max_body_size: usize,
     max_batch_size: usize,
+    /// `/metrics` answers without credentials (`--public-metrics`).
+    public_metrics: bool,
 }
 
 impl Deref for AppState {
@@ -53,6 +55,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -74,6 +77,7 @@ impl AppState {
                 trusted_proxies,
                 max_body_size,
                 max_batch_size,
+                public_metrics: false,
             }),
         }
     }
@@ -88,6 +92,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -103,6 +108,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -118,6 +124,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -132,6 +139,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -154,6 +162,7 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
             }),
         }
     }
@@ -161,6 +170,22 @@ impl AppState {
     /// Returns the configured CORS allowed origins.
     pub fn cors_origins(&self) -> &[String] {
         &self.inner.cors_origins
+    }
+
+    /// Lets `/metrics` answer without credentials when auth is on
+    /// (`--public-metrics`). Call it while building the state, before it is
+    /// cloned.
+    #[must_use]
+    pub fn with_public_metrics(mut self, public: bool) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_public_metrics is called before the state is shared")
+            .public_metrics = public;
+        self
+    }
+
+    /// Whether `/metrics` answers without credentials.
+    pub fn public_metrics(&self) -> bool {
+        self.inner.public_metrics
     }
 
     /// Returns the compiled feature flags.

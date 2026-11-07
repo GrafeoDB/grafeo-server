@@ -360,9 +360,9 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
 | `GRAFEO_GWP_PORT` | `--gwp-port` | `7688` | GQL Wire Protocol (gRPC) port |
-| `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `0` | Max concurrent GWP sessions (0 = unlimited) |
+| `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `1000` | Max concurrent GWP sessions (0 = unlimited) |
 | `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
-| `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
+| `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `1000` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
 | `GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE` | `--bolt-max-unauthenticated-message-size` | `0` | Largest Bolt message before LOGON, in bytes (0 = the default, 64 KiB) |
 | `GRAFEO_BOLT_HANDSHAKE_TIMEOUT` | `--bolt-handshake-timeout` | `30` | Seconds a Bolt connection has to finish its handshake, HELLO and LOGON (0 = no limit) |
@@ -381,8 +381,9 @@ Included in the default build and every image (feature `auth`). A server on a no
 | `GRAFEO_AUTH_TOKEN` | `--auth-token` | _(none)_ | Bearer token / API key |
 | `GRAFEO_AUTH_USER` | `--auth-user` | _(none)_ | HTTP Basic username (requires password) |
 | `GRAFEO_AUTH_PASSWORD` | `--auth-password` | _(none)_ | HTTP Basic password (requires username) |
+| `GRAFEO_PUBLIC_METRICS` | `--public-metrics` | `false` | Serve `/metrics` without credentials when auth is on |
 
-When an auth token is set, all API endpoints require `Authorization: Bearer <token>` or `X-API-Key: <token>`. `/health`, `/metrics` and `/studio/` are exempt.
+When an auth token is set, all API endpoints require `Authorization: Bearer <token>` or `X-API-Key: <token>`. `/health` and `/studio/` are exempt, and `/metrics` too with `--public-metrics` (`GRAFEO_PUBLIC_METRICS`); otherwise a Prometheus scrape sends the token (`authorization` in its scrape config).
 
 A browser page from another origin can't write (POST, PUT, PATCH, DELETE) or open the WebSocket, with or without credentials, unless `--cors-origins` lists its origin; such a request gets 403 `cross_site_request`. Non-browser clients and Studio are unaffected.
 

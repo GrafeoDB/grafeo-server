@@ -14,6 +14,13 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 - **A non-loopback `--host` without credentials refuses to start**: the error names the ways out (`--auth-token`, or `--auth-user` and `--auth-password`; a loopback address; `--allow-unauthenticated`, `GRAFEO_ALLOW_UNAUTHENTICATED`). The Docker images listen on `0.0.0.0`, so `docker run` needs `GRAFEO_AUTH_TOKEN` or one of the others.
 - **Creating and deleting a database needs an admin token** (#82): `POST /db` and `DELETE /db/{name}` refuse a read-write token with 403. A database-scoped admin token creates and deletes only the databases in its list.
 - **Server-wide operations need an admin token with no database list**: token management (`/admin/tokens`), `GET /backups` and `GET /admin/replication` refuse an admin token limited to some databases. The bootstrap `--auth-token` and Basic auth have no list.
+- **`/metrics` needs credentials when auth is on**: it answered anyone, with database names, node and edge totals and query counts. Send the token in the Prometheus scrape config, or pass `--public-metrics` (`GRAFEO_PUBLIC_METRICS`) to keep it open.
+- **Bolt and GWP accept 1,000 sessions each by default**: `--bolt-max-sessions` and `--gwp-max-sessions` were unlimited (0), which still means unlimited when set.
+
+### Fixed
+
+- **`--read-only` on a data directory without a database exits cleanly** (#83): it panicked with exit code 101. It now says to start once without `--read-only` (or to point `--data-dir` at a directory with a database) and exits with code 2, creating nothing.
+- **`--features owl-schema` builds on its own**: the OWL and RDFS loaders need SPARQL, which the feature now enables.
 
 ### Security
 
@@ -21,6 +28,8 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 - **Tokens reach only the databases in their scope**: the admin and backup routes, `/search/vector`, `/search/text`, `/search/hybrid` and a restore's `source_db` ignored a token's database list. Every route under `/db/{name}/` and `/admin/{db}/` is now authorized by one table before its body is read.
 - **GWP admin and search calls act as their session**: with auth on, `AdminService` and `SearchService` answered any caller without a session, on any database. They now need a session, reach only the databases in its token's scope, and the admin calls need the admin role, as the HTTP admin routes do.
 - **Every build and image can authenticate**: `auth` is a default feature, and the `gwp` and `bolt` images include it. The default binary and the `latest`, `gwp` and `bolt` images had no way to require credentials.
+- **Schema files can't add statements of their own**: an OWL or RDFS literal holding a quote could end its `INSERT DATA` and add other triples to the new database. Literals are escaped, and an IRI, language tag or blank node label that SPARQL can't hold is refused with 400.
+- **Backup names stay inside the backup directory**: a database or backup name such as `C:x` passed the check and, on Windows, made the backup path switch drive (admin routes only). A name must now be one plain file name.
 - **A database-scoped admin token can't create unscoped tokens**: `POST /admin/tokens` let it mint an admin token for every database, and `GET /backups` showed it every database's backups.
 
 ### Dependencies

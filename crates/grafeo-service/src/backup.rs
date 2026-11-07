@@ -44,9 +44,21 @@ fn incremental_backup_error(error: grafeo_common::Error) -> ServiceError {
     }
 }
 
+/// Whether `name` (a database name or a backup file name from a request) is
+/// one plain path component, safe to join to the backup directory: no `/`,
+/// `\` or `..`, no `:` (on Windows `C:x` is a drive-relative path, and
+/// joining it switches drive), no NUL, and not `.` or empty.
+pub fn is_plain_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    !name.contains(['/', '\\', ':', '\0'])
+        && !name.contains("..")
+        && matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 /// Returns the per-database backup subdirectory.
 fn db_backup_dir(backup_dir: &Path, db_name: &str) -> Result<PathBuf, ServiceError> {
-    if db_name.contains('/') || db_name.contains('\\') || db_name.contains("..") {
+    if !is_plain_name(db_name) {
         return Err(ServiceError::BadRequest(
             "invalid database name".to_string(),
         ));
@@ -1180,7 +1192,7 @@ impl BackupService {
     ) -> Result<(), ServiceError> {
         ensure_migrated(backup_dir);
 
-        if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        if !is_plain_name(filename) {
             return Err(ServiceError::BadRequest(
                 "invalid backup filename".to_string(),
             ));
@@ -1422,6 +1434,18 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_names_join_the_backup_directory() {
+        for ok in ["default", "backup_full_0000.grafeo", "my-db_2"] {
+            assert!(is_plain_name(ok), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", "a/b", "a\\b", "../x", "C:x", "C:\\x", "c:", "a..b", "x\0y",
+        ] {
+            assert!(!is_plain_name(bad), "{bad:?}");
+        }
+    }
 
     /// Runs `test` on a runtime with one blocking thread. `hold` occupies it
     /// until the returned sender is used, so work the code under test hands

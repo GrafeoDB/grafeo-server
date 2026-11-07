@@ -66,3 +66,56 @@ fn the_binary_refuses_to_start_exposed_without_credentials() {
     );
     assert!(text.contains("--allow-unauthenticated"), "{text}");
 }
+
+#[cfg(feature = "gwp")]
+#[test]
+fn gwp_sessions_are_limited_by_default() {
+    assert_eq!(config(&[]).gwp_max_sessions, 1000);
+    assert_eq!(config(&["--gwp-max-sessions", "0"]).gwp_max_sessions, 0);
+}
+
+#[cfg(feature = "bolt")]
+#[test]
+fn bolt_sessions_are_limited_by_default() {
+    assert_eq!(config(&[]).bolt_max_sessions, 1000);
+    assert_eq!(config(&["--bolt-max-sessions", "0"]).bolt_max_sessions, 0);
+}
+
+/// #83: `--read-only` on a data directory without a database refuses to start
+/// with a clear error and exit code 2 (it panicked with 101), and creates
+/// nothing there.
+#[test]
+fn read_only_without_a_database_refuses_to_start_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_grafeo-server"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GRAFEO_") {
+            cmd.env_remove(key);
+        }
+    }
+    let out = cmd
+        .args([
+            "--read-only",
+            "--port",
+            "0",
+            "--log-level",
+            "error",
+            "--data-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(text.contains("without --read-only"), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "nothing created"
+    );
+}
