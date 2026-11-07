@@ -21,6 +21,7 @@ pub mod error;
 pub mod metrics;
 pub mod query;
 pub mod rate_limit;
+pub mod remote;
 #[cfg(feature = "replication")]
 pub mod replication;
 pub mod schema;

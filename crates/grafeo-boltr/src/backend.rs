@@ -155,12 +155,7 @@ impl BoltBackend for GrafeoBackend {
             let ro = self.state.is_query_read_only();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    if ro {
-                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-                    } else {
-                        db.session()
-                    }
+                    grafeo_service::remote::remote_session(&entry.db(), None, ro)
                 })
                 .await
                 .map_err(BoltError::backend)?,
@@ -221,9 +216,7 @@ impl BoltBackend for GrafeoBackend {
                 let ro = self.state.is_query_read_only();
                 let id_clone = identity.clone();
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    let effective = grafeo_service::auth::cap_identity_read_only(id_clone, ro);
-                    db.session_with_identity(effective)
+                    grafeo_service::remote::remote_session(&entry.db(), Some(id_clone), ro)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -292,18 +285,10 @@ impl BoltBackend for GrafeoBackend {
                     s.identity.clone()
                 };
 
+                #[cfg(not(feature = "auth"))]
+                let identity = None;
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    #[cfg(feature = "auth")]
-                    if let Some(id) = identity {
-                        let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                        return db.session_with_identity(effective);
-                    }
-                    if ro {
-                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-                    } else {
-                        db.session()
-                    }
+                    grafeo_service::remote::remote_session(&entry.db(), identity, ro)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -341,18 +326,10 @@ impl BoltBackend for GrafeoBackend {
         #[cfg(feature = "auth")]
         let identity = session_arc.lock().identity.clone();
 
+        #[cfg(not(feature = "auth"))]
+        let identity = None;
         let engine_session = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            #[cfg(feature = "auth")]
-            if let Some(id) = identity {
-                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                return db.session_with_identity(effective);
-            }
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
+            grafeo_service::remote::remote_session(&entry.db(), identity, ro)
         })
         .await
         .map_err(BoltError::backend)?;

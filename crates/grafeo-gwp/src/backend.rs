@@ -135,18 +135,10 @@ impl GrafeoBackend {
             .get_available(name)
             .map_err(|e| GqlError::Session(e.to_string()))?;
         let ro = self.query_read_only();
+        #[cfg(not(feature = "auth"))]
+        let identity = None;
         tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            #[cfg(feature = "auth")]
-            if let Some(id) = identity {
-                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                return db.session_with_identity(effective);
-            }
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
+            grafeo_service::remote::remote_session(&entry.db(), identity, ro)
         })
         .await
         .map_err(GqlError::backend)

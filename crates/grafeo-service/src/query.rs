@@ -8,28 +8,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use grafeo_engine::auth::{Identity, Role};
+use grafeo_engine::auth::Identity;
 use grafeo_engine::database::QueryResult;
 
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 use crate::metrics::{Language, Metrics, determine_language};
+use crate::remote::remote_session;
 use crate::session::{ManagedSession, SessionRegistry};
 use crate::types::BatchQuery;
-
-/// Create a session from a database handle, using the provided identity
-/// or falling back to read_only / full-access based on the flag.
-fn create_session(
-    db: &grafeo_engine::GrafeoDB,
-    identity: Option<Identity>,
-    read_only: bool,
-) -> grafeo_engine::Session {
-    match identity {
-        Some(id) => db.session_with_identity(id),
-        None if read_only => db.session_with_role(Role::ReadOnly),
-        None => db.session(),
-    }
-}
 
 /// Centralized query execution service.
 ///
@@ -61,7 +48,7 @@ impl QueryService {
 
         let result = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let session = create_session(&db, identity, read_only);
+            let session = remote_session(&db, identity, read_only);
             dispatch_query(&session, &stmt, lang, params.as_ref())
         })
         .await;
@@ -135,7 +122,7 @@ impl QueryService {
         let db_name = db_name.to_owned();
         let session_id = tokio::task::spawn_blocking(move || {
             let db = entry.db();
-            let mut engine_session = create_session(&db, identity, read_only);
+            let mut engine_session = remote_session(&db, identity, read_only);
             engine_session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -238,7 +225,7 @@ impl QueryService {
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let mut session = create_session(&db, identity, read_only);
+            let mut session = remote_session(&db, identity, read_only);
             session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -955,7 +942,7 @@ mod tests {
     async fn execute_write_with_read_only_identity_returns_forbidden() {
         let s = state();
         // Use a read-only identity to attempt a write operation.
-        let identity = Identity::new("readonly-user", [Role::ReadOnly]);
+        let identity = Identity::new("readonly-user", [grafeo_engine::auth::Role::ReadOnly]);
         let err = QueryService::execute(
             s.databases(),
             s.metrics(),
