@@ -1,84 +1,105 @@
 # Changelog
 
-All notable changes to grafeo-server are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
 ## [0.6.1] - 2026-11-02
 
-Engine 0.6.1 alignment: backups and restores that survive a crash, SPARQL that follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns as ISO GQL defines them, and a query timeout that stops every query. Snapshots no longer need the `async-storage` feature. Lockstep with grafeo 0.6.1.
+Correctness release on engine 0.6.1: backups and restores survive a crash, SPARQL follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns follow ISO GQL, and the query timeout stops every query. Some statements that ran on 0.6.0 now fail with the engine (listed under Changed). A server on engine 0.6.0 can't open a database that has a named vector index.
 
 ### Changed
 
-- **grafeo-engine 0.6.1** (from 0.6.0): see the engine's [0.6.1 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) for every fix. A database with a named vector index cannot be opened by a server on engine 0.6.0 afterwards.
-- **Some statements that ran on 0.6.0 now fail, with the engine**: a `CAST` of text that is no number (`22018`) or to a type too small for the value (`22003`), a quantified GQL pattern of several edges without an upper bound or over 16 repetitions, an undeclared SPARQL prefix or a `BIND` to a variable in scope, `CREATE INDEX` with a name another index has, a procedure call with an unknown key or an extra argument (`grafeo.pagerank({iterations: 20})` ignored it; the key is `max_iterations`), and `SERIALIZABLE` (it ran as snapshot isolation).
-- **`POST /admin/{db}/snapshot` needs only the `grafeo-file` feature**: it writes the checkpoint `POST /admin/{db}/wal/checkpoint` writes, on engine 0.6.1's `wal_checkpoint`. A database without a file gets a 400 (it was a 500). After a commit that did not complete, a snapshot or a checkpoint is refused with a 503: a snapshot used to write that commit's stamped part, and a checkpoint gave a 500.
-- **The `threads` database option is deprecated, removed in 0.7.0**: the engine sizes no thread pool from it, and never did, so the server no longer passes it on. `POST /db` still takes it, refuses 0 and logs a warning; `GET /db/{name}`, `GET /system/resources` and GWP still report it, and the OpenAPI document marks it deprecated. Studio no longer offers it.
-- **The `async-storage` feature is deprecated and enables nothing**, and the `full` tier no longer lists it. Kept so existing `--features async-storage` builds still work; removed in 0.7.0.
-- **Backup errors say whose they are**: an epoch restore from a directory without a manifest and an incremental backup without a full backup are a 400, and an incremental backup whose chain is broken is a 409 that asks for a new full backup. They were 500s.
+Requests that ran on 0.6.0 and now fail or answer differently.
+
+- **The engine refuses more statements**: a `CAST` of text that is no number (`22018`) or to a type too small for the value (`22003`), a quantified GQL pattern of several edges without an upper bound or over 16 repetitions, an undeclared SPARQL prefix, a `BIND` to a variable in scope, `CREATE INDEX` with a name another index has, a procedure call with an unknown key or an extra argument, and `SERIALIZABLE`. `grafeo.pagerank({iterations: 20})` ignored the key (it is `max_iterations`), and `SERIALIZABLE` ran as snapshot isolation.
+- **`POST /admin/{db}/snapshot` needs only `grafeo-file`**: it writes the checkpoint that `POST /admin/{db}/wal/checkpoint` writes, and a database without a file gets a 400 (it was a 500). After a commit that did not complete, a snapshot or a checkpoint is refused with a 503, where a snapshot wrote that commit's stamped part and a checkpoint gave a 500.
+- **Backup errors name their cause**: an epoch restore from a directory without a manifest and an incremental backup without a full backup are a 400, and an incremental backup whose chain is broken is a 409 that asks for a new full backup. They were 500s.
+
+### Deprecated
+
+- **The `threads` database option does nothing**: the engine never sized a thread pool from it, so the server no longer passes it on; `POST /db` still takes it, refuses 0 and logs a warning, and the OpenAPI document marks it deprecated. `GET /db/{name}`, `GET /system/resources` and GWP still report it, and Studio no longer offers it.
+- **The `async-storage` feature enables nothing**: the `full` tier no longer lists it, and `--features async-storage` builds still compile.
+
+All are removed in 0.7.0.
 
 ### Security
 
-- **pulldown-cmark 0.13.6** (from 0.13.4), a build dependency through `prost-build`: [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414.html), exponential event growth with `ENABLE_WIKILINKS`. grafeo-server does not parse Markdown at run time.
+- **pulldown-cmark 0.13.6** (from 0.13.4): fixes [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414.html), exponential event growth with `ENABLE_WIKILINKS`. It's a build dependency through `prost-build`; the server doesn't parse Markdown at run time.
+
+### Dependencies
+
+- **grafeo-engine 0.6.1** (pinned `=0.6.1`, from 0.6.0): every engine fix is in the [grafeo 0.6.1 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md).
 
 ## [0.6.0] - 2026-10-24
 
-Engine 0.6.0 alignment: a new single-file database format that 0.5.x data directories migrate to on first start, writes after a compaction that survive a crash, exact decimals, and clearer errors. A write conflict is now a retryable 409 (a transient error over Bolt, GQLSTATUS 40001 over GWP), an unknown query language is a 400 instead of running as GQL, and Bolt runs nothing for a connection that has not logged on. Lockstep with grafeo 0.6.0.
-
-> **Breaking: new database file format.** The first read-write start of 0.6 migrates every database in the data directory and keeps the 0.5.x files next to it as `data.grafeo.pre-0.6` (and `.pre-0.6.wal`, or a `data.grafeo.pre-0.6/` directory). grafeo-server 0.5.x cannot open a migrated database. Back up the data directory before upgrading, and see [Upgrading to 0.6](README.md#upgrading-to-06) for the way back.
+Storage release on engine 0.6.0: a single-file database format that 0.5.x data directories migrate to on first start, writes after a compaction that survive a crash, exact decimals and clearer errors. Breaking: the first read-write start migrates every database and keeps the 0.5.x files next to it as `data.grafeo.pre-0.6` (and `.pre-0.6.wal`, or a `data.grafeo.pre-0.6/` directory); grafeo-server 0.5.x can't open a migrated database, so back up the data directory first ([Upgrading to 0.6](README.md#upgrading-to-06) has the way back). A write conflict is now a retryable 409, an unknown query language a 400 instead of running as GQL, and Bolt runs nothing for a connection that hasn't logged on.
 
 ### Added
 
-- **`--bolt-max-message-size`** (`GRAFEO_BOLT_MAX_MESSAGE_SIZE`): the largest Bolt message accepted, in bytes (0 keeps the default, 16 MiB).
-- **`--bolt-max-unauthenticated-message-size`** (`GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE`): the largest Bolt message before LOGON, in bytes (0 keeps boltr's default, 64 KiB), and **`--bolt-handshake-timeout`** (`GRAFEO_BOLT_HANDSHAKE_TIMEOUT`): the seconds a connection has to finish its handshake, HELLO and LOGON (default 30, 0 turns it off).
+- **Bolt messages have a configurable size limit**: `--bolt-max-message-size` (`GRAFEO_BOLT_MAX_MESSAGE_SIZE`) sets the largest Bolt message in bytes; 0 keeps the default of 16 MiB.
+- **Bolt limits connections that haven't logged on**: `--bolt-max-unauthenticated-message-size` (`GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE`) caps messages before LOGON (0 keeps boltr's 64 KiB). `--bolt-handshake-timeout` (`GRAFEO_BOLT_HANDSHAKE_TIMEOUT`) gives a connection that many seconds to finish its handshake, HELLO and LOGON (default 30, 0 turns it off).
 - **`POST /admin/{db}/compact` returns the engine's report**: `checkpointed`, `versions_collected` and `duration_ms` next to `compacted`.
-- **Migration tests on a real 0.5.44 data directory** (`tests/fixtures/server-0.5.44`, written by engine 0.5.44): a clean database, one with `options.json`, one whose last commits are only in its WAL, the legacy `grafeo.db` layout and a 0.5 backup.
+- **Migration is tested on a real 0.5.44 data directory**: `tests/fixtures/server-0.5.44`, written by engine 0.5.44, holds a clean database, one with `options.json`, one whose last commits are only in its WAL, the legacy `grafeo.db` layout and a 0.5 backup.
 
 ### Changed
 
-- **grafeo-engine 0.6.0** (from 0.5.44): the single-file format with migration on open, a WAL in `<file>.wal/` while a database is open, writes after `close()` that fail instead of being lost, recovery that stops at damage in the WAL, a database file that keeps its creation settings ([grafeo#551](https://github.com/GrafeoDB/grafeo/issues/551)), and many query fixes; see the engine's [0.6.0 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md). `grafeo-engine` and `grafeo-common` are pinned exactly (`=0.6.0`): they are implementation crates whose APIs may change in any release, and the `grafeo` facade does not yet re-export everything the server uses (`PropertyKey`, `EpochId`, the temporal types, `GqlStatus`, `grafeo_common::storage`, the buffer manager types).
-- **Breaking: some query results change with the engine**: a GQL or SQL/PGQ number with a point is an exact decimal, sent over HTTP as `{"$decimal": "1.50"}` (as the Node.js and WASM bindings do), over GWP as the protocol's decimal and over Bolt, which has no decimal type, as its text (`"1.50"`); GQL sorts nulls last in both directions; integer and decimal overflow and division by zero fail the statement (`22003`, `22012`) where they gave null; a GQL statement of one `INSERT` returns no rows; an unknown function is an error instead of null. The engine changelog lists them all.
-- **SPARQL results keep their RDF terms where the format has them** ([grafeo#464](https://github.com/GrafeoDB/grafeo/issues/464)): engine 0.6 returns each binding as a typed term. SPARQL Results JSON (`/db/{name}/sparql` with `Accept: application/sparql-results+json`) and the graph store's N-Triples give the exact term: `uri`, `bnode`, a literal's `xml:lang` or `datatype` (they guessed IRIs and blank nodes from the text before). Rows from `/sparql`, `/query`, GWP and Bolt keep the plain values of 0.5: a literal of a known XSD type as that value (`30`, `true`), any other term as its text (`"Alix"`, `"http://example.org/alix"`).
-- **Breaking (GWP): the catalog is the GQL-catalog of the session's database** (gwp 0.3.2): the catalog service lists, creates and drops the engine schemas and graphs of the calling session's database (its `_database`), the graphs `CREATE GRAPH` makes, where its graphs used to be databases. A catalog call names its session (`session.catalog()` in the Rust client); one without a session works in `default`, and is refused when the server authenticates sessions, since it has no identity. Databases are created and dropped over HTTP (`POST /db`, `DELETE /db/{name}`); a `CreateGraph` with database settings (storage mode, memory limit, backward edges, threads, WAL) is refused with `INVALID_ARGUMENT`.
-- **Breaking (GWP): sessions follow ISO/IEC 39075**: a session works in one database, picked with the new `_database` session parameter (default `default`), and `Configure(graph)` selects a named graph of that database (`SESSION SET GRAPH`; an unknown one is GQLSTATUS `42002`), where it used to switch databases. Clients that switched databases with `set_graph` set `_database` instead. Setting the graph or schema and resetting the session now keep an open transaction, where the server swapped the engine session and lost it; a reset keeps the database. Switching `_database` with an open transaction is refused with `25G01`. The handshake reports the server as `GrafeoDB` and its version instead of gwp's own name and version.
-- **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1), as grafeo 0.6 requires; the Docker builder image is `rust:1.99-slim`.
-- **Breaking: an unknown query language is a 400**: `language` matches without regard to case (`"Cypher"` and `"SPARQL"` now run as Cypher and SPARQL, where they ran as GQL), accepts `gql`, `cypher`, `graphql`, `gremlin`, `sparql`, `sql-pgq` and `sql`, and anything else (`"aql"`, a typo) is a 400 `bad_request` that names it and the supported languages, on `/query`, `/batch` (before anything runs) and the WebSocket; Bolt and GWP refuse it with their client error. It used to run as GQL.
-- **Breaking: engine errors keep their kind** on every transport, through one mapping: a write conflict with a concurrent transaction (also a serialization failure or deadlock) is a 409 `conflict` with the reason on HTTP, on a statement, `/tx/commit` and `/batch` (it was a 400 on a statement and a 500 without detail on a commit); a database that takes no writes for now (closed by a restore or shutdown, an incomplete commit, a failed WAL) is a 503 `unavailable`; an engine query timeout is a 408. Over Bolt a write conflict is `Neo.TransientError.Transaction.Outdated` and an unavailable database `Neo.TransientError.General.DatabaseUnavailable`, so drivers retry managed transactions; over GWP a write conflict is GQLSTATUS `40001`. Other query errors stay 400 with their message.
-- **A failed commit ends the transaction**: the session leaves the registry, so a later call with it gets 404 `session_not_found` instead of reaching a transaction the engine already ended; a failed rollback ends it too.
-- **Compaction works in every build and keeps the database as it is**: engine 0.6 `compact()` writes a checkpoint and drops old versions instead of building a separate read-only columnar store. The database keeps its storage mode and takes writes as before, `POST /admin/{db}/compact` no longer returns 400 on builds without `compact-store`, and the `compact-store` feature is deprecated (it enables nothing; removed in 0.7.0) and left out of `full`.
-- **Breaking (metrics): the `grafeo_block_stm_*` counters are gone from `/metrics`**: the engine removed them; they always read 0.
-- **`options.json` stays, and the engine now keeps the settings it stores**: engine 0.6 records a database's memory limit, WAL settings, backward edges, schema checks, spill path and tier overrides in the file, but not the thread count nor the server's database type (`owl-schema`, `rdfs-schema`, `json-schema`), so the server still writes `options.json` and applies it on every reopen; a database whose `options.json` is missing or unreadable keeps the settings its file stores instead of falling back to engine defaults.
-- **Index, graph and projection calls report engine errors**: creating or dropping an index, a graph or a projection on a database that is closing fails with 503 instead of doing nothing (engine 0.6 returns `Result` from these calls).
-- **Database info, stats, schema and validation report a failed read** ([grafeo#416](https://github.com/GrafeoDB/grafeo/issues/416)): `GET /db/{name}`, `/db/{name}/stats`, `/db/{name}/schema`, `/admin/{db}/stats`, `/admin/{db}/validate`, the GWP graph info and the sync schema check fail with the engine's error (503 for a database that is closing) instead of reporting what an incomplete read saw. `GET /db` still lists every database: one whose counts cannot be read shows 0 and logs a warning.
-- **gwp 0.3.2** (from 0.2.1; 0.3.2 adds the session to catalog calls): a failed GWP commit ends the transaction, where every later begin on the session failed with `25G01`; a second begin on a session with a transaction gets `25G01`; a commit, rollback and statement on one transaction no longer race; the idle session reaper rolls back the open transaction before it closes the session, and `--session-ttl 0` no longer panics it; a GQLSTATUS error from the session, catalog, admin or search service carries a gRPC code from its class (`42` is `INVALID_ARGUMENT`, `40` `ABORTED`) and a `gql-status` metadata entry, where it was always `INTERNAL`.
-- **utoipa 6 and utoipa-swagger-ui 10** (from 5 and 9): `/api/openapi.json` stays OpenAPI 3.1.0 with the same paths and schemas; a nullable reference (`QueryResponse.counters`, the `/tx/begin` body) lists its schema before `null` in `oneOf`.
-- **Major dependency updates**: `parking_lot` 0.13 (from 0.12), `rand` 0.10 and `sha2` 0.11 (from 0.9 and 0.10; API tokens are still 32 bytes from the thread-local CSPRNG, hashed with SHA-256), `sysinfo` 0.39 (from 0.38), `tower-http` 0.7 (from 0.6; a request whose `Accept-Encoding` rejects every encoding, identity included, such as `*;q=0`, now gets 406 Not Acceptable per RFC 9110 instead of an uncompressed body), `sophia` 0.10 (from 0.9, OWL and RDFS schema loading), `tokio-tungstenite` 0.30 (from 0.29, WebSocket tests), and the minimums `tokio` 1.54.1 and `uuid` 1.29. Studio: `vite` 8 and `@vitejs/plugin-react` 6, `eslint` 10, `eslint-plugin-react-hooks` 7 (with the React Compiler rules), `sigma` 4 and `graphology` 0.26, and TypeScript 7 (`tsc`, installed as `@typescript/native`) next to TypeScript 6 under `typescript` for `typescript-eslint`, which does not support 7 yet.
-- **Unused dependencies removed**: `jsonschema` and `sophia_inmem` (the `json-schema` and `owl-schema` features never called them), `thiserror` from grafeo-http, `serde` from grafeo-maelstrom, `serde_json` and `tracing` from grafeo-sync, the unused `grafeo-sync` workspace entry (grafeo-sync now takes `url` from the workspace), and Studio's `codemirror` and `@codemirror/lang-sql`; `@codemirror/commands`, which the editor imports, is now a direct dependency.
-- **Studio follows the React Compiler rules**: graph nodes start on a fixed spiral instead of random positions before the force layout; a query tab's language falls back to the database's default (SPARQL for RDF, GQL otherwise) without changing the tab, so it comes back on a compatible database; the create-database form resets when it opens and turns the WAL on when you pick persistent storage, without effects; lists load without a synchronous state change in an effect. The graph view moves to sigma 4's styles (same labels, arrows and pixel sizes).
-- **Dependencies**: `cargo update` within the current requirements, Studio npm dependencies within their ranges, and GitHub Actions on their current major versions (`actions/checkout@v7`, `actions/cache@v6`, `actions/setup-node@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `codecov/codecov-action@v7`, `docker/*` v4 and `docker/build-push-action@v7`). The CI MSRV job checks Rust 1.99.0.
+Requests that ran on 0.5.44 and now fail or answer differently.
+
+- **Breaking: some query results change with the engine**: a GQL or SQL/PGQ number with a point is an exact decimal, sent over HTTP as `{"$decimal": "1.50"}`, over GWP as the protocol's decimal and over Bolt, which has no decimal type, as its text (`"1.50"`). GQL sorts nulls last in both directions, integer and decimal overflow and division by zero fail the statement (`22003`, `22012`) where they gave null, a GQL statement of one `INSERT` returns no rows, and an unknown function is an error instead of null.
+- **SPARQL results keep their RDF terms where the format has them** ([grafeo#464](https://github.com/GrafeoDB/grafeo/issues/464)): SPARQL Results JSON (`/db/{name}/sparql` with `Accept: application/sparql-results+json`) and the graph store's N-Triples give the exact term (`uri`, `bnode`, a literal's `xml:lang` or `datatype`), where they guessed IRIs and blank nodes from the text. Rows from `/sparql`, `/query`, GWP and Bolt keep the plain values of 0.5: a literal of a known XSD type as that value (`30`, `true`), any other term as its text.
+- **Breaking: an unknown query language is a 400**: `language` matches without regard to case and accepts `gql`, `cypher`, `graphql`, `gremlin`, `sparql`, `sql-pgq` and `sql`; anything else is a 400 `bad_request` naming it and the supported languages, on `/query`, `/batch` (before anything runs) and the WebSocket, and Bolt and GWP refuse it with their client error. It used to run as GQL, as did `"Cypher"` and `"SPARQL"`.
+- **Breaking: a write conflict is a retryable 409**: a conflict with a concurrent transaction (also a serialization failure or deadlock) is a 409 `conflict` with the reason on a statement, `/tx/commit` and `/batch`, where it was a 400 on a statement and a 500 without detail on a commit. Over Bolt it is `Neo.TransientError.Transaction.Outdated` and over GWP GQLSTATUS `40001`, so drivers retry managed transactions.
+- **A database that takes no writes for now is a 503 `unavailable`**: one closed by a restore or shutdown, or with an incomplete commit or a failed WAL; over Bolt it is `Neo.TransientError.General.DatabaseUnavailable`. An engine query timeout is a 408, and other query errors stay 400 with their message.
+- **A failed commit ends the transaction**: the session leaves the registry, so a later call with it gets 404 `session_not_found` instead of reaching a transaction the engine already ended. A failed rollback ends it too.
+- **Breaking (GWP): the catalog is the GQL catalog of the session's database** (gwp 0.3.2): the catalog service lists, creates and drops the engine schemas and graphs of the calling session's database (its `_database`), where its graphs used to be databases. A catalog call names its session (`session.catalog()` in the Rust client); one without a session works in `default`, and is refused when the server authenticates sessions.
+- **Breaking (GWP): databases are created and dropped over HTTP only**: `POST /db` and `DELETE /db/{name}`; a `CreateGraph` with database settings (storage mode, memory limit, backward edges, threads, WAL) is refused with `INVALID_ARGUMENT`.
+- **Breaking (GWP): sessions follow ISO/IEC 39075**: a session works in one database, picked with the new `_database` session parameter (default `default`), and `Configure(graph)` selects a named graph of that database (`SESSION SET GRAPH`; an unknown one is GQLSTATUS `42002`), where it used to switch databases. Clients that switched databases with `set_graph` set `_database` instead.
+- **GWP session commands keep the open transaction**: setting the graph or schema and resetting the session keep it, where the server swapped the engine session and lost it, and a reset keeps the database. Switching `_database` with an open transaction is refused with `25G01`.
+- **The GWP handshake reports the server**: as `GrafeoDB` and its version, instead of gwp's own name and version.
+- **Compaction keeps the database as it is, in every build**: engine 0.6 `compact()` writes a checkpoint and drops old versions instead of building a separate read-only columnar store. The database keeps its storage mode and takes writes, and `POST /admin/{db}/compact` no longer returns 400 on builds without `compact-store`.
+- **`options.json` stays next to the settings the engine now stores**: engine 0.6 records a database's memory limit, WAL settings, backward edges, schema checks, spill path and tier overrides in the file, but not the thread count nor the server's database type (`owl-schema`, `rdfs-schema`, `json-schema`), so the server still writes `options.json` and applies it on every reopen. A database whose `options.json` is missing or unreadable keeps the settings its file stores instead of falling back to engine defaults.
+- **Index, graph and projection calls report engine errors**: creating or dropping an index, a graph or a projection on a database that is closing fails with 503 instead of doing nothing.
+- **Database info, stats, schema and validation report a failed read** ([grafeo#416](https://github.com/GrafeoDB/grafeo/issues/416)): `GET /db/{name}`, `/db/{name}/stats`, `/db/{name}/schema`, `/admin/{db}/stats`, `/admin/{db}/validate`, the GWP graph info and the sync schema check fail with the engine's error (503 for a database that is closing) instead of reporting what an incomplete read saw. `GET /db` still lists every database: one whose counts can't be read shows 0 and logs a warning.
+- **Studio follows the React Compiler rules**: graph nodes start on a fixed spiral instead of random positions before the force layout, and a query tab's language falls back to the database's default (SPARQL for RDF, GQL otherwise) without changing the tab. The create-database form resets when it opens and turns the WAL on when persistent storage is picked, and the graph view uses sigma 4's styles (same labels, arrows and pixel sizes).
+
+### Deprecated
+
+- **The `compact-store` feature enables nothing**: it's left out of `full`. Removed in 0.7.0.
+
+### Removed
+
+- **Breaking (metrics): `/metrics` has no `grafeo_block_stm_*` counters**: the engine removed them; they always read 0.
 
 ### Fixed
 
-- **Security: Bolt ran statements for a connection that had not logged on**: with boltr 0.2.0, a client could send HELLO, a LOGON with wrong credentials, then RESET, and RUN statements with full rights, because the server built an unrestricted database session before LOGON. A Bolt session now gets its database session only once LOGON succeeds (and an unknown principal is refused), so a RUN, BEGIN or database switch before it fails whatever the protocol layer lets through. With boltr 0.3.0 (from 0.2.0) the connection also closes after a failed LOGON, a connection that does not log on times out (`--bolt-handshake-timeout`) and messages before LOGON are capped at 64 KiB (`--bolt-max-unauthenticated-message-size`). Affects every earlier release with the `bolt` feature and auth on (the `-bolt` and `-full` images).
-- **Query writes after a compaction were not in the WAL** ([grafeo#558](https://github.com/GrafeoDB/grafeo/issues/558)): on a persistent database, a crash after `POST /admin/{db}/compact` and before the next checkpoint lost every HTTP, GWP and Bolt write since the compaction. Engine 0.6 logs them; a test crashes a process after a compaction and a write and finds the write.
-- **The change feed could miss RDF changes in an epoch it reported complete** ([grafeo#414](https://github.com/GrafeoDB/grafeo/issues/414)): engine 0.6 records a SPARQL or GraphQL update's triple changes at the epoch of its own commit, and only for updates that commit, so the caveat of 0.5.44 is gone.
-- **Restoring from a backup file changed the file**: it was opened read-write, which on engine 0.6 migrates a 0.5.x backup in place (with `.pre-0.6` copies in the backup directory) and leaves a WAL next to it. Restores open it read-only, and the recovery from the safety backup removes a leftover WAL before it writes the database back.
-- **Creating a database could adopt the 0.5.x copy a migration keeps**: a directory with `data.grafeo.pre-0.6` (or its WAL) and no `data.grafeo` is now refused (409), as other leftover database files are.
-- **The GWP catalog ignored `IF NOT EXISTS`, `OR REPLACE`, `IF EXISTS` and `AS COPY OF`** ([#80](https://github.com/GrafeoDB/grafeo-server/issues/80)): `CreateGraph` with `if_not_exists` on an existing graph failed with `ALREADY_EXISTS`, `or_replace` did not replace, `copy_of` made an empty graph, and `DropGraph` with `if_exists` on a missing graph failed with `NOT_FOUND` while a drop always reported that the graph existed. Now `IF NOT EXISTS` keeps an existing graph, `OR REPLACE` replaces it (as a drop and a create: engine 0.6 does not parse `CREATE OR REPLACE GRAPH` yet), `AS COPY OF` copies the source's data, `IF EXISTS` reports a missing graph as not existing, and a request with both `OR REPLACE` and `IF NOT EXISTS` is refused.
-- **Studio's graph view drew no edges for engine 0.6 results**: a relationship comes back as an object (`{_id, _type, _source, _target}`) where Studio expected a bare integer id, so `MATCH (a)-[r]->(b) RETURN a, r, b` showed the nodes only. Edge objects are now drawn between their endpoints, labelled with their type; integer ids from older engines still work.
-- **A commit that failed on a write conflict returned 500 with no detail** and kept the session registered until its TTL (see Changed).
+- **Query writes after a compaction are in the WAL** ([grafeo#558](https://github.com/GrafeoDB/grafeo/issues/558)): on a persistent database, a crash after `POST /admin/{db}/compact` and before the next checkpoint lost every HTTP, GWP and Bolt write since the compaction. Engine 0.6 logs them.
+- **The change feed no longer misses RDF changes in an epoch it reported complete** ([grafeo#414](https://github.com/GrafeoDB/grafeo/issues/414)): engine 0.6 records a SPARQL or GraphQL update's triple changes at the epoch of its own commit, and only for updates that commit.
+- **Restoring from a backup file leaves the file as it was**: it was opened read-write, which on engine 0.6 migrates a 0.5.x backup in place (with `.pre-0.6` copies in the backup directory) and leaves a WAL next to it. Restores open it read-only, and recovery from the safety backup removes a leftover WAL before writing the database back.
+- **Creating a database no longer adopts the 0.5.x copy a migration keeps**: a directory with `data.grafeo.pre-0.6` (or its WAL) and no `data.grafeo` is refused with a 409, as other leftover database files are.
+- **The GWP catalog honours `IF NOT EXISTS`, `OR REPLACE`, `IF EXISTS` and `AS COPY OF`** (#80): `if_not_exists` on an existing graph failed with `ALREADY_EXISTS`, `or_replace` did not replace, `copy_of` made an empty graph, and `if_exists` on a missing graph failed with `NOT_FOUND` while a drop always reported that the graph existed. `OR REPLACE` runs as a drop and a create (engine 0.6 does not parse `CREATE OR REPLACE GRAPH` yet), and a request with both `OR REPLACE` and `IF NOT EXISTS` is refused.
+- **Studio's graph view draws edges for engine 0.6 results**: a relationship comes back as an object (`{_id, _type, _source, _target}`) where Studio expected a bare integer id, so `MATCH (a)-[r]->(b) RETURN a, r, b` showed the nodes only. Edges are drawn between their endpoints, labelled with their type, and integer ids from older engines still work.
 
 ### Security
 
+- **Bolt runs nothing before a successful LOGON**: with boltr 0.2.0 a client could send HELLO, a LOGON with wrong credentials, then RESET, and RUN statements with full rights, because the server built an unrestricted database session before LOGON. A Bolt session now gets its database session only once LOGON succeeds, and an unknown principal is refused; every earlier release with the `bolt` feature and auth on was affected (the `-bolt` and `-full` images).
+- **boltr 0.3.0** (from 0.2.0): the connection closes after a failed LOGON, a connection that doesn't log on times out (`--bolt-handshake-timeout`), and messages before LOGON are capped at 64 KiB (`--bolt-max-unauthenticated-message-size`).
 - **zip 9.1.0 at build time** (from 3.0.0, through utoipa-swagger-ui 10): `cargo audit` and `cargo deny` flagged zip 3 for extraction flaws ([RUSTSEC-2026-0367](https://rustsec.org/advisories/RUSTSEC-2026-0367), [RUSTSEC-2026-0368](https://rustsec.org/advisories/RUSTSEC-2026-0368), [RUSTSEC-2026-0369](https://rustsec.org/advisories/RUSTSEC-2026-0369)). It only unpacked the bundled Swagger UI archive while compiling; the server binary never used it.
-- **tokio 1.54.1** (from the yanked 1.54.0): fixes a race between `tokio::time::Interval` and the runtime's time driver that could use memory after it was freed ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384)). Released builds were not affected: 0.5.44 shipped before tokio 1.54.0.
+- **tokio 1.54.1** (from the yanked 1.54.0): fixes a race between `tokio::time::Interval` and the runtime's time driver that could use memory after it was freed ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384)). Released builds weren't affected: 0.5.44 shipped before tokio 1.54.0.
+
+### Dependencies
+
+- **grafeo-engine 0.6.0** (pinned `=0.6.0`, from 0.5.44): the single-file format with migration on open, a WAL in `<file>.wal/` while a database is open, writes after `close()` that fail instead of being lost, recovery that stops at damage in the WAL, creation settings kept in the file ([grafeo#551](https://github.com/GrafeoDB/grafeo/issues/551)) and many query fixes, all in the [grafeo 0.6.0 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md). `grafeo-engine` and `grafeo-common` are pinned exactly because they're implementation crates whose APIs may change in any release, and the `grafeo` facade doesn't yet re-export everything the server uses.
+- **Breaking: Rust 1.99.0** (minimum, was 1.91.1): grafeo 0.6 requires it; the Docker builder image is `rust:1.99-slim` and the CI MSRV job checks it.
+- **gwp 0.3.2** (from 0.2.1): a failed GWP commit ends the transaction, where every later begin on the session failed with `25G01`, a second begin on a session with a transaction gets `25G01`, and a commit, rollback and statement on one transaction no longer race. The idle session reaper rolls back the open transaction before closing the session, `--session-ttl 0` no longer panics it, and a GQLSTATUS error carries a gRPC code from its class (`42` is `INVALID_ARGUMENT`, `40` `ABORTED`) and a `gql-status` metadata entry, where it was always `INTERNAL`.
+- **utoipa 6 and utoipa-swagger-ui 10** (from 5 and 9): `/api/openapi.json` stays OpenAPI 3.1.0 with the same paths and schemas; a nullable reference (`QueryResponse.counters`, the `/tx/begin` body) lists its schema before `null` in `oneOf`.
+- **tower-http 0.7** (from 0.6): a request whose `Accept-Encoding` rejects every encoding, identity included (such as `*;q=0`), gets 406 Not Acceptable per RFC 9110 instead of an uncompressed body.
+- **parking_lot 0.13, rand 0.10, sha2 0.11, sysinfo 0.39, sophia 0.10 and tokio-tungstenite 0.30**: API tokens are still 32 bytes from the thread-local CSPRNG, hashed with SHA-256; `sophia` loads OWL and RDFS schemas, `tokio-tungstenite` runs the WebSocket tests. The minimums are `tokio` 1.54.1 and `uuid` 1.29.
+- **Studio on vite 8 and TypeScript 7**: with `@vitejs/plugin-react` 6, `eslint` 10, `eslint-plugin-react-hooks` 7 (with the React Compiler rules), `sigma` 4 and `graphology` 0.26. TypeScript 7 (`tsc`, installed as `@typescript/native`) sits next to TypeScript 6 under `typescript` for `typescript-eslint`, which doesn't support 7 yet.
+- **Unused dependencies are removed**: `jsonschema` and `sophia_inmem` (the `json-schema` and `owl-schema` features never called them), `thiserror` from grafeo-http, `serde` from grafeo-maelstrom, `serde_json` and `tracing` from grafeo-sync, and Studio's `codemirror` and `@codemirror/lang-sql`. `@codemirror/commands`, which the editor imports, is a direct dependency.
+- **Routine updates**: `cargo update` within the current requirements, Studio npm dependencies within their ranges, and GitHub Actions on their current major versions.
 
 ## [0.5.44] - 2026-10-04
 
-Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation options survive a restart, write counters on every transport, upserts by key, graph-aware sync and replication, and storage tiers in Studio. Replicas no longer lose events, the sync endpoints check authorization, and creating a database never touches an existing one. Lockstep from 0.5.40: also ships the unreleased 0.5.42 changes below.
-
-> **Heads-up: the next engine release, grafeo 0.6.0, changes the on-disk format.** The first server built on it (grafeo-server 0.6.0) migrates a database on first open; after that, 0.5.44 and older can no longer open it, so keep a backup if you may need to go back.
+Replication and data-safety release on engine 0.5.44: creation options survive a restart, write counters on every transport, upserts by key, graph-aware sync and replication and storage tiers in Studio; replicas no longer lose events, the sync endpoints check authorization, and creating a database never touches an existing one. It also ships the unreleased 0.5.42 changes below. The next engine release, grafeo 0.6.0, changes the on-disk format: once grafeo-server 0.6.0 has opened a database, 0.5.44 and older can't open it, so keep a backup to go back.
 
 ### Added
 
@@ -90,7 +111,6 @@ Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation option
 
 ### Changed
 
-- **grafeo-engine 0.5.44** (from 0.5.42, including 0.5.43): crash-safe checkpoints and WAL recovery (edges no longer doubled after a checkpoint and a restart, [grafeo#417](https://github.com/GrafeoDB/grafeo/issues/417)), indexes and constraints that survive a reopen, schema checks on every write path, commit and rollback in O(changes), and fixes to `ORDER BY`, `UNION`, aggregates, subqueries, `OPTIONAL MATCH`, `MERGE`, shortest paths and variable-length edges. See the engine changelog.
 - **Some queries that ran now fail**, as in openCypher: trailing input or `stmt; stmt` in one query string, an unnamed expression in `WITH`, `UNION` mixed with `UNION ALL`, and others listed in the engine's 0.5.44 changelog. Unaliased columns are named after their expression (`count(n)` instead of `count(...)`).
 - **Breaking (sync clients): the change feed cursor**: `GET /db/{name}/changes` never splits an epoch across responses. When a response is cut at `limit`, `server_epoch` is the epoch of its last event; otherwise it is the newest epoch whose events are all recorded, which can be one below the current epoch while a write is in flight, and it never goes below `since - 1`. Resume with `since = server_epoch + 1` and keep the larger cursor. A client that passed `server_epoch` back as an inclusive `since` now sees repeats, and can loop on an epoch larger than `limit`. `grafeo-sync` and the built-in replica follow the new contract. Engine 0.5.44 records RDF triple changes without starting a new epoch, so a reader can still miss one that lands in an epoch it was just told is complete ([grafeo#414](https://github.com/GrafeoDB/grafeo/issues/414), fixed in 0.6.0).
 - **Sync**: a pushed change the engine rejects (missing entity or endpoint, a node that still has edges, a schema violation) is reported in `conflicts` with a `write_failed:` reason instead of counting as applied; `labels` on a node `update` replaces the node's labels; and `POST /db/{name}/sync` on a read-only server returns 403.
@@ -131,11 +151,13 @@ Engine 0.5.44 alignment, plus replication and data-safety fixes. Creation option
 
 - h2 0.4.19 (RUSTSEC-2026-0258), rustls 0.23.45 (RUSTSEC-2026-0285), crossbeam-epoch 0.9.21 (RUSTSEC-2026-0204), quinn-proto 0.11.19 (RUSTSEC-2026-0185), anyhow 1.0.104 (RUSTSEC-2026-0190), memmap2 0.9.11 (RUSTSEC-2026-0186), and the yanked chacha20 0.10.0 replaced by 0.10.2.
 
----
+### Dependencies
+
+- **grafeo-engine 0.5.44** (from 0.5.42, including 0.5.43): crash-safe checkpoints and WAL recovery (edges no longer doubled after a checkpoint and a restart, [grafeo#417](https://github.com/GrafeoDB/grafeo/issues/417)), indexes and constraints that survive a reopen, schema checks on every write path, commit and rollback in O(changes), and fixes to `ORDER BY`, `UNION`, aggregates, subqueries, `OPTIONAL MATCH`, `MERGE`, shortest paths and variable-length edges. See the engine changelog.
 
 ## [0.5.42] - Unreleased (ships in 0.5.44)
 
-Engine 0.5.42 alignment: storage tier introspection and control, end-to-end search procedure coverage. Lockstep version bump from 0.5.40 (0.5.41 was not released as a server version).
+Storage tiers release on engine 0.5.42: storage tier introspection and control, and end-to-end search procedure coverage. Never released on its own: it ships in 0.5.44 (0.5.41 was not released as a server version either).
 
 ### Added
 
@@ -144,19 +166,17 @@ Engine 0.5.42 alignment: storage tier introspection and control, end-to-end sear
 - **`section_tiers` field on `DatabaseOptions`**: per-section tier override applied at db creation. Maps section names (`LpgStore`, `RdfStore`, `CompactStore`, `VectorStore`, `TextIndex`, `RdfRing`, `PropertyIndex`, `Catalog`) to tier strings (`auto` / `force_ram` / `force_disk`). Calls engine `Config::with_section_tier`.
 - **Search procedure smoke coverage**: HTTP, GWP, and Bolt integration tests now exercise `CALL grafeo.search.text` end-to-end; HTTP also covers `CALL grafeo.search.vector`.
 
-### Changed
-
-- **grafeo-engine 0.5.42**: tiered storage (mmap spill, paged HNSW, packed RDF Ring), per-block columnar zone maps for selective range scans, WAL overlay for mutable mmap'd LPG, streaming top-K operator (planner fuses `ORDER BY ... LIMIT k`), `var.prop IN [literals]` property-index fast path, filter pushdown through `LeftJoin`/`Apply`/`Union`/`Unwind`. Also picks up engine 0.5.41's `CALL grafeo.search.*` procedures, `RawI64` columnar codec, disk-backed compact base, RDF/CDC memory breakdown blocks, and the WAL/CDC search-wrapper fix that previously made text/vector search silently no-op on file-backed DBs.
-
 ### Fixed
 
 - **Bolt clients received nodes and relationships as plain dicts** ([grafeo#341](https://github.com/GrafeoDB/grafeo/issues/341)): node- and edge-shaped engine values now encode as Bolt `Node` and `Relationship` structures.
 
----
+### Dependencies
+
+- **grafeo-engine 0.5.42**: tiered storage (mmap spill, paged HNSW, packed RDF Ring), per-block columnar zone maps for selective range scans, WAL overlay for mutable mmap'd LPG, streaming top-K operator (planner fuses `ORDER BY ... LIMIT k`), `var.prop IN [literals]` property-index fast path, filter pushdown through `LeftJoin`/`Apply`/`Union`/`Unwind`. Also picks up engine 0.5.41's `CALL grafeo.search.*` procedures, `RawI64` columnar codec, disk-backed compact base, RDF/CDC memory breakdown blocks, and the WAL/CDC search-wrapper fix that previously made text/vector search silently no-op on file-backed DBs.
 
 ## [0.5.40] - 2026-04-20
 
-Engine 0.5.40 alignment: catalog name validation, stats simplification.
+Catalog release on engine 0.5.40: catalog name validation and simpler stats.
 
 ### Added
 
@@ -164,377 +184,400 @@ Engine 0.5.40 alignment: catalog name validation, stats simplification.
 
 ### Changed
 
-- **grafeo-engine 0.5.40**: unified hybrid queries (`text_score()` / `text_match()` filter pushdown, BM25 top-K operator), native Float64 / Float32Vector codecs in CompactStore, `Session::execute_streaming` (experimental, not yet exposed by server), commit-failure auto-rollback, multi-schema transaction atomicity fix, MERGE index lookup, LayeredStore new-node visibility and post-`compact()` index fixes.
 - **`DatabaseStats.memory_bytes` override removed**: engine 0.5.40 now sets `memory_bytes` to the full heap breakdown itself, so `AdminService::database_stats` no longer recomputes it via `memory_usage().total_bytes`. `disk_bytes` override stays until the engine grows a proper accessor.
+
+### Dependencies
+
+- **grafeo-engine 0.5.40**: unified hybrid queries (`text_score()` / `text_match()` filter pushdown, BM25 top-K operator), native Float64 / Float32Vector codecs in CompactStore, `Session::execute_streaming` (experimental, not yet exposed by server), commit-failure auto-rollback, multi-schema transaction atomicity fix, MERGE index lookup, LayeredStore new-node visibility and post-`compact()` index fixes.
 
 ## [0.5.38] - 2026-04-13
 
-Security hardening, operational maturity, auth improvements, Bolt protocol compliance, and engine 0.5.38 alignment.
-
-**Breaking:** Swagger UI (`/api/docs`) and OpenAPI spec (`/api/openapi.json`) are now inside the auth middleware scope, so authenticated deployments must supply credentials to access API docs. Rate limiting no longer trusts `X-Forwarded-For` from arbitrary clients: deployments behind a reverse proxy must pass `--trusted-proxies` with the proxy CIDR or rate limiting will key on the proxy IP instead of the real client. `ServiceError::ReadOnly` now returns HTTP 503 (was 403): clients or load balancers that match on 403 for replica detection should update to 503. Internal server errors no longer include implementation details in the response body: tooling that parsed the `detail` field for diagnostics should switch to server-side logs.
+Security hardening release on engine 0.5.38: operational maturity, auth improvements and Bolt protocol compliance. Breaking: with auth on, the API docs (`/api/docs`, `/api/openapi.json`) need credentials; behind a reverse proxy, rate limiting needs `--trusted-proxies` with the proxy CIDR or it keys on the proxy's address; a read-only server answers 503 instead of 403, so replica detection that matched on 403 must match 503. Internal errors no longer carry implementation details in `detail`; the server log has them.
 
 ### Added
 
-- **Readiness endpoint**: `GET /ready` returns 200 when the server can serve queries, 503 otherwise (e.g. during restore). `/health` remains as liveness probe. Use `/ready` for Kubernetes readiness probes
-- **Token expiry**: `POST /admin/tokens` accepts optional `expires_in` (seconds) parameter. Expired tokens are automatically rejected. `expires_at` (Unix timestamp) returned in token responses
-- **Pluggable auth**: `AuthProviderTrait` trait enables custom authentication backends (JWT, LDAP, etc.). Built-in `StaticAuthProvider` implements bearer token, basic auth, and token store. `ServiceState::with_auth_provider()` accepts any `Arc<dyn AuthProviderTrait>`
-- **Security response headers**: all HTTP responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`
-- **Graceful shutdown drain**: on SIGTERM, active sessions are drained for up to `--shutdown-timeout` seconds (default: 30) before force-rollback. Prevents data loss during rolling deployments
-- **Bolt bookmark propagation**: `COMMIT` now returns a monotonic `"bookmark": "grafeo:tx:{N}"` in response metadata, enabling causal consistency in Neo4j drivers
-- **Bolt mutation detection**: `RUN` response metadata `"type"` field correctly reports `"w"` for write queries and `"r"` for reads, enabling proper driver routing decisions
-- **Bolt native Path encoding**: `Value::Path` now encodes as `BoltValue::Path` with proper `BoltNode` and `BoltUnboundRelationship` structures instead of a generic dictionary
-- **CLI flags**: `--trusted-proxies` (CIDR list for X-Forwarded-For), `--max-body-size` (request body limit, default 2 MB), `--max-batch-size` (max queries per batch, default 1000), `--shutdown-timeout` (graceful drain period, default 30s)
+- **Readiness endpoint**: `GET /ready` returns 200 when the server can serve queries, 503 otherwise (e.g. during restore). `/health` remains as liveness probe. Use `/ready` for Kubernetes readiness probes.
+- **Token expiry**: `POST /admin/tokens` accepts optional `expires_in` (seconds) parameter. Expired tokens are automatically rejected. `expires_at` (Unix timestamp) returned in token responses.
+- **Pluggable auth**: `AuthProviderTrait` trait enables custom authentication backends (JWT, LDAP, etc.). Built-in `StaticAuthProvider` implements bearer token, basic auth, and token store. `ServiceState::with_auth_provider()` accepts any `Arc<dyn AuthProviderTrait>`.
+- **Security response headers**: all HTTP responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`.
+- **Graceful shutdown drain**: on SIGTERM, active sessions are drained for up to `--shutdown-timeout` seconds (default: 30) before force-rollback. Prevents data loss during rolling deployments.
+- **Bolt bookmark propagation**: `COMMIT` now returns a monotonic `"bookmark": "grafeo:tx:{N}"` in response metadata, enabling causal consistency in Neo4j drivers.
+- **Bolt mutation detection**: `RUN` response metadata `"type"` field correctly reports `"w"` for write queries and `"r"` for reads, enabling proper driver routing decisions.
+- **Bolt native Path encoding**: `Value::Path` now encodes as `BoltValue::Path` with proper `BoltNode` and `BoltUnboundRelationship` structures instead of a generic dictionary.
+- **CLI flags**: `--trusted-proxies` (CIDR list for X-Forwarded-For), `--max-body-size` (request body limit, default 2 MB), `--max-batch-size` (max queries per batch, default 1000), `--shutdown-timeout` (graceful drain period, default 30s).
+- **Studio: admin UI redesign**: top nav renames "Admin" to "Databases". New routes: `/databases` (list page with server stats strip and overview cards), `/databases/:name` (flat details page with stats, backups, danger zone), `/tokens` (standalone, visible when `auth` feature is compiled). Legacy `/admin/*` URLs redirect.
+- **Backup labels**: optional user-supplied label on full backups, stored in a `labels.json` sidecar per database backup directory. Validated as `[A-Za-z0-9_-]{1,32}`. Corrupt sidecars are logged and ignored so listings still work.
+- **Studio: restore to epoch**: UI dialog with epoch number input and clickable backup pills that pre-fill the field. Row-level Restore button disabled on non-full backups with tooltip.
+- **Cross-database restore**: `RestoreRequest` accepts optional `source_db` field to restore from another database's backup directory. Enables prod-to-staging restore flows.
+- **Studio auth gating**: `/studio` routes gated behind HTTP Basic auth when `--auth-user`/`--auth-password` are set. Browsers show a native credential prompt via `WWW-Authenticate: Basic` on 401.
+- **Studio: database sidebar**: sidebar database picker replaced with `<select>` dropdown with inline node/edge counts and "Manage" link to details page.
 
 ### Changed
 
-- **grafeo-engine 0.5.38**: quantized vector indexes (`"scalar"`, `"binary"`, `"product"` quantization for 4x memory reduction), EXPLAIN/PROFILE for all 6 query languages, parser recursion depth limits (DoS prevention), Unicode identifiers, `!=` operator, parser language-prefixed errors
-- **Middleware ordering**: rate limiting now runs before authentication, throttling brute-force attempts before paying auth verification cost
-- **Swagger/OpenAPI behind auth**: `/api/docs` and `/api/openapi.json` are now inside the auth middleware scope. When auth is enabled, API docs require valid credentials
-- **Read-only returns 503**: `ServiceError::ReadOnly` now maps to HTTP 503 (Service Unavailable) instead of 403, clearer for replicas and orchestrators
-- **Internal errors scrubbed**: `ServiceError::Internal` no longer exposes implementation details in HTTP responses. Full error logged server-side at `error!` level, clients receive generic "internal server error"
-- **Token store permissions**: `tokens.json` is written with 0600 permissions on Unix (owner read/write only)
+- **Middleware ordering**: rate limiting now runs before authentication, throttling brute-force attempts before paying auth verification cost.
+- **Swagger/OpenAPI behind auth**: `/api/docs` and `/api/openapi.json` are now inside the auth middleware scope. When auth is enabled, API docs require valid credentials.
+- **Read-only returns 503**: `ServiceError::ReadOnly` now maps to HTTP 503 (Service Unavailable) instead of 403, clearer for replicas and orchestrators.
+- **Internal errors scrubbed**: `ServiceError::Internal` no longer exposes implementation details in HTTP responses. Full error logged server-side at `error!` level, clients receive generic "internal server error".
+- **Token store permissions**: `tokens.json` is written with 0600 permissions on Unix (owner read/write only).
+
+### Fixed
+
+- **Studio: graph view fix**: node detection now recognizes Grafeo's `_id`/`_labels` format. Edge inference classifies columns as node/integer/other and treats K node columns with (K-1) integer columns as a path. Display labels use `name`/`title`/`id` properties.
+- **Restore-to-epoch file lock**: the old database handle was not closed before the engine replaced the file on disk, causing every `restore_to_epoch` call to fail with a file lock error. Fix: close and drop the handle before the engine call, with recovery logic that reopens the on-disk file if the engine fails mid-write.
+- **Database stats showing 0 B**: `detailed_stats()` reported near-zero `memory_bytes` (buffer_manager.allocated() only) and `None` for `disk_bytes` (wrong path type). Service layer now overrides with `memory_usage().total_bytes` and recursive directory walk of the per-db data directory.
+- Incremental backup always failed after full backup: WAL rotation after backup ensures new writes are visible to subsequent incrementals (#267) (engine 0.5.38).
+- Edge variables in multi-hop queries returned as raw IDs instead of full maps with properties (#268) (engine 0.5.38).
+- Weighted hybrid search inverted vector ranking: closer vectors now correctly rank higher with `fusion="weighted"` (engine 0.5.38).
 
 ### Security
 
-- **Fixed Cypher injection in JSON schema loading**: `type_name` from user-provided JSON schemas was interpolated directly into Cypher query strings with insufficient sanitization. Label names are now validated against `^[a-zA-Z_][a-zA-Z0-9_]*$`
-- **Fixed X-Forwarded-For spoofing**: rate limiting unconditionally trusted the `X-Forwarded-For` header from any client. XFF is now only parsed when the TCP peer matches `--trusted-proxies` (default: loopback only)
-- **WebSocket origin validation**: `/ws` upgrade now validates the `Origin` header against configured `--cors-origins`, preventing cross-site WebSocket hijacking
-- **Batch query limit**: `POST /batch` now enforces `--max-batch-size` (default: 1000), preventing unbounded resource consumption
-- **Explicit body size limit**: HTTP request bodies are limited to `--max-body-size` (default: 2 MB) via explicit `DefaultBodyLimit`
+- **Fixed Cypher injection in JSON schema loading**: `type_name` from user-provided JSON schemas was interpolated directly into Cypher query strings with insufficient sanitization. Label names are now validated against `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+- **Fixed X-Forwarded-For spoofing**: rate limiting unconditionally trusted the `X-Forwarded-For` header from any client. XFF is now only parsed when the TCP peer matches `--trusted-proxies` (default: loopback only).
+- **WebSocket origin validation**: `/ws` upgrade now validates the `Origin` header against configured `--cors-origins`, preventing cross-site WebSocket hijacking.
+- **Batch query limit**: `POST /batch` now enforces `--max-batch-size` (default: 1000), preventing unbounded resource consumption.
+- **Explicit body size limit**: HTTP request bodies are limited to `--max-body-size` (default: 2 MB) via explicit `DefaultBodyLimit`.
 
-### Studio
+### Dependencies
 
-- **Admin UI redesign**: top nav renames "Admin" to "Databases". New routes: `/databases` (list page with server stats strip and overview cards), `/databases/:name` (flat details page with stats, backups, danger zone), `/tokens` (standalone, visible when `auth` feature is compiled). Legacy `/admin/*` URLs redirect
-- **Backup labels**: optional user-supplied label on full backups, stored in a `labels.json` sidecar per database backup directory. Validated as `[A-Za-z0-9_-]{1,32}`. Corrupt sidecars are logged and ignored so listings still work
-- **Restore to epoch**: UI dialog with epoch number input and clickable backup pills that pre-fill the field. Row-level Restore button disabled on non-full backups with tooltip
-- **Cross-database restore**: `RestoreRequest` accepts optional `source_db` field to restore from another database's backup directory. Enables prod-to-staging restore flows
-- **Studio auth gating**: `/studio` routes gated behind HTTP Basic auth when `--auth-user`/`--auth-password` are set. Browsers show a native credential prompt via `WWW-Authenticate: Basic` on 401
-- **Database sidebar**: sidebar database picker replaced with `<select>` dropdown with inline node/edge counts and "Manage" link to details page
-- **Graph view fix**: node detection now recognizes Grafeo's `_id`/`_labels` format. Edge inference classifies columns as node/integer/other and treats K node columns with (K-1) integer columns as a path. Display labels use `name`/`title`/`id` properties
-
-### Fixed
-
-- **Restore-to-epoch file lock**: the old database handle was not closed before the engine replaced the file on disk, causing every `restore_to_epoch` call to fail with a file lock error. Fix: close and drop the handle before the engine call, with recovery logic that reopens the on-disk file if the engine fails mid-write
-- **Database stats showing 0 B**: `detailed_stats()` reported near-zero `memory_bytes` (buffer_manager.allocated() only) and `None` for `disk_bytes` (wrong path type). Service layer now overrides with `memory_usage().total_bytes` and recursive directory walk of the per-db data directory
-
-### Fixed (via engine 0.5.38)
-
-- Incremental backup always failed after full backup: WAL rotation after backup ensures new writes are visible to subsequent incrementals (#267)
-- Edge variables in multi-hop queries returned as raw IDs instead of full maps with properties (#268)
-- Weighted hybrid search inverted vector ranking: closer vectors now correctly rank higher with `fusion="weighted"`
+- **grafeo-engine 0.5.38**: quantized vector indexes (`"scalar"`, `"binary"`, `"product"` quantization for 4x memory reduction), EXPLAIN/PROFILE for all 6 query languages, parser recursion depth limits (DoS prevention), Unicode identifiers, `!=` operator, parser language-prefixed errors.
 
 ## [0.5.37] - 2026-04-12
 
-SPARQL compliance, SHACL validation, graph projections, incremental backup, Arrow export, and engine 0.5.37 alignment.
+SPARQL compliance release on engine 0.5.37: SHACL validation, graph projections, incremental backup and Arrow export.
 
 ### Added
 
-- **Graph projection endpoints**: `POST/GET /admin/{db}/projections`, `DELETE /admin/{db}/projections/{name}` for creating filtered virtual subgraphs (node labels + edge types)
-- **SHACL validation** (`shacl` feature): `POST /admin/{db}/validate/shacl` validates default or named graph against SHACL shapes, returns conformance report with violations
-- **Incremental backup**: `POST /admin/{db}/backup/incremental` for WAL-based incremental snapshots, `POST /admin/{db}/restore/epoch` for point-in-time recovery
-- **Arrow IPC export** (`arrow-export` feature): `Accept: application/vnd.apache.arrow.stream` on any query endpoint returns Arrow IPC bytes (DuckDB, Polars, pandas compatible)
-- **Turtle content negotiation**: `text/turtle` accepted in Graph Store Protocol with proper `@prefix`/`@base` extraction to SPARQL prologue
-- **Feature flags**: `shacl`, `ring-index`, `arrow-export` added to feature chain and `full` tier
+- **Graph projection endpoints**: `POST/GET /admin/{db}/projections`, `DELETE /admin/{db}/projections/{name}` for creating filtered virtual subgraphs (node labels + edge types).
+- **SHACL validation** (`shacl` feature): `POST /admin/{db}/validate/shacl` validates default or named graph against SHACL shapes, returns conformance report with violations.
+- **Incremental backup**: `POST /admin/{db}/backup/incremental` for WAL-based incremental snapshots, `POST /admin/{db}/restore/epoch` for point-in-time recovery.
+- **Arrow IPC export** (`arrow-export` feature): `Accept: application/vnd.apache.arrow.stream` on any query endpoint returns Arrow IPC bytes (DuckDB, Polars, pandas compatible).
+- **Turtle content negotiation**: `text/turtle` accepted in Graph Store Protocol with proper `@prefix`/`@base` extraction to SPARQL prologue.
+- **Feature flags**: `shacl`, `ring-index`, `arrow-export` added to feature chain and `full` tier.
 
 ### Changed
 
-- **grafeo-engine 0.5.37**: SPARQL compliance pass (18 spec gaps, 109 W3C tests), Ring Index planner, dictionary encoding, COUNT(*) fast paths, SHACL validation, Arrow bulk export, SPARQL EXPLAIN/PROFILE
-- **Backup workarounds removed**: `backup_full()` now works on Windows and read-only databases (grafeo#258 fixed in engine). Removed platform and access-mode guards from `backup_database()` and `do_restore()`
+- **Backup workarounds removed**: `backup_full()` now works on Windows and read-only databases (grafeo#258 fixed in engine). Removed platform and access-mode guards from `backup_database()` and `do_restore()`.
 
 ### Fixed
 
-- **Turtle `@prefix`/`@base` in INSERT DATA**: Graph Store Protocol now extracts directives into SPARQL prologue instead of embedding them inside data blocks (per SPARQL 1.1 Update spec)
-- **Graph Store error message**: unsupported content type error now lists both accepted types
-- Incremental backup could skip WAL records (grafeo#258)
-- File manager leaked temp files on checkpoint failure (grafeo#258)
+- **Turtle `@prefix`/`@base` in INSERT DATA**: Graph Store Protocol now extracts directives into SPARQL prologue instead of embedding them inside data blocks (per SPARQL 1.1 Update spec).
+- **Graph Store error message**: unsupported content type error now lists both accepted types.
+- Incremental backup could skip WAL records (grafeo#258).
+- File manager leaked temp files on checkpoint failure (grafeo#258).
+
+### Dependencies
+
+- **grafeo-engine 0.5.37**: SPARQL compliance pass (18 spec gaps, 109 W3C tests), Ring Index planner, dictionary encoding, COUNT(*) fast paths, SHACL validation, Arrow bulk export, SPARQL EXPLAIN/PROFILE.
 
 ## [0.5.36] - 2026-04-12
 
-Role-based access control, per-database token scoping, and engine 0.5.36 alignment (Identity, Role, session-level permission enforcement).
+Access control release on engine 0.5.36: role-based access control and per-database token scoping, on the engine's Identity, Role and session-level permission checks.
 
 ### Added
 
-- **Per-database token scoping**: runtime token CRUD with role and database restrictions ([#52](https://github.com/GrafeoDB/grafeo-server/issues/52), implementation by [@Michaelzag](https://github.com/Michaelzag))
-  - `POST /admin/tokens`: create a scoped API token (plaintext returned once)
-  - `GET /admin/tokens`: list all tokens (metadata only)
-  - `GET /admin/tokens/{id}`: get a single token
-  - `DELETE /admin/tokens/{id}`: revoke a token (immediate effect)
-- **Token roles**: `admin` (full access), `read-write` (data mutations), `read-only` (queries only). Mapped to engine `Role::Admin`, `Role::ReadWrite`, `Role::ReadOnly`
-- **Token database scoping**: tokens can be restricted to specific databases. Empty list = all databases. Enforced at the HTTP middleware layer (403 for scope violations)
-- **`TokenStore`**: SHA-256 hashed token storage in `{data_dir}/tokens.json` with atomic writes via temp file + rename
-- **`AuthContext::identity()`**: builds engine `Identity` from token metadata, caps to `ReadOnly` when server is in read-only mode
-- **CLI flags**: `--auth-user` / `--auth-password` for HTTP Basic auth, `--token-store-path` for explicit token store location
-- **HTTP Basic auth**: `Authorization: Basic <base64>` with constant-time comparison (always admin scope)
-- **GWP identity-scoped sessions**: GWP (gRPC) connections now pass authenticated identity through to session creation via `SessionConfig.auth_info`. Sessions are scoped to the token's role, with engine-level permission enforcement
-- **BoltR identity-scoped sessions**: Bolt v5.x connections now pass authenticated identity via `set_session_auth()` after LOGON. Sessions are recreated with the token's role, matching HTTP transport behavior
+- **Per-database token scoping**: runtime token CRUD with role and database restrictions ([#52](https://github.com/GrafeoDB/grafeo-server/issues/52), implementation by [@Michaelzag](https://github.com/Michaelzag)).
+  - `POST /admin/tokens`: create a scoped API token (plaintext returned once).
+  - `GET /admin/tokens`: list all tokens (metadata only).
+  - `GET /admin/tokens/{id}`: get a single token.
+  - `DELETE /admin/tokens/{id}`: revoke a token (immediate effect).
+- **Token roles**: `admin` (full access), `read-write` (data mutations), `read-only` (queries only). Mapped to engine `Role::Admin`, `Role::ReadWrite`, `Role::ReadOnly`.
+- **Token database scoping**: tokens can be restricted to specific databases. Empty list = all databases. Enforced at the HTTP middleware layer (403 for scope violations).
+- **`TokenStore`**: SHA-256 hashed token storage in `{data_dir}/tokens.json` with atomic writes via temp file + rename.
+- **`AuthContext::identity()`**: builds engine `Identity` from token metadata, caps to `ReadOnly` when server is in read-only mode.
+- **CLI flags**: `--auth-user` / `--auth-password` for HTTP Basic auth, `--token-store-path` for explicit token store location.
+- **HTTP Basic auth**: `Authorization: Basic <base64>` with constant-time comparison (always admin scope).
+- **GWP identity-scoped sessions**: GWP (gRPC) connections now pass authenticated identity through to session creation via `SessionConfig.auth_info`. Sessions are scoped to the token's role, with engine-level permission enforcement.
+- **BoltR identity-scoped sessions**: Bolt v5.x connections now pass authenticated identity via `set_session_auth()` after LOGON. Sessions are recreated with the token's role, matching HTTP transport behavior.
 
 ### Changed
 
-- **grafeo-engine 0.5.36**: role-based access control, `Identity`/`Role`/`StatementKind` types, `session_with_identity()`, `session_with_role()`, `PermissionDenied` error with context
-- **Identity-scoped sessions**: all HTTP route handlers (query, batch, transaction, SPARQL protocol, Graph Store protocol, WebSocket) now create sessions via `session_with_identity()` instead of `session()`. The engine enforces statement-level permissions after parsing, before execution
-- **`check_bearer` returns `Option<TokenInfo>`** instead of `bool`, carrying role and database scope through the middleware chain
-- **`TokenScope.role` uses engine `Role` enum** instead of string, with serde bridge for JSON wire format (`"admin"`, `"read-write"`, `"read-only"`)
-- **`session_read_only()` replaced**: all GWP and BoltR backends use `session_with_role(Role::ReadOnly)` instead of the deprecated `session_read_only()`
-- **Permission denied errors**: engine `PermissionDenied` (via `QueryError::Semantic`) now maps to `ServiceError::Forbidden` (HTTP 403) instead of `BadRequest` (400)
-- **`--auth-token` preserved**: legacy single token stays as root/bootstrap credential with implicit `Admin` role and no database restrictions
-- **Token store auto-activation**: only derives `{data_dir}/tokens.json` when at least one credential is configured, preventing spurious auth activation from `--data-dir` alone
-- **gwp dependency updated to 0.2.1**: `AuthValidator` returns `AuthInfo`, `SessionConfig` carries `auth_info`
-- **boltr dependency updated to 0.2.0**: `AuthValidator` returns `AuthInfo`, `BoltBackend.set_session_auth()`
-- **GWP/BoltR validators use PendingAuth mechanism** (DashMap) to pass full `TokenInfo` from validator to backend
-- **GWP/BoltR sessions preserve identity** across database switches and session resets
+- **Identity-scoped sessions**: all HTTP route handlers (query, batch, transaction, SPARQL protocol, Graph Store protocol, WebSocket) now create sessions via `session_with_identity()` instead of `session()`. The engine enforces statement-level permissions after parsing, before execution.
+- **`check_bearer` returns `Option<TokenInfo>`** instead of `bool`, carrying role and database scope through the middleware chain.
+- **`TokenScope.role` uses engine `Role` enum** instead of string, with serde bridge for JSON wire format (`"admin"`, `"read-write"`, `"read-only"`).
+- **`session_read_only()` replaced**: all GWP and BoltR backends use `session_with_role(Role::ReadOnly)` instead of the deprecated `session_read_only()`.
+- **Permission denied errors**: engine `PermissionDenied` (via `QueryError::Semantic`) now maps to `ServiceError::Forbidden` (HTTP 403) instead of `BadRequest` (400).
+- **`--auth-token` preserved**: legacy single token stays as root/bootstrap credential with implicit `Admin` role and no database restrictions.
+- **Token store auto-activation**: only derives `{data_dir}/tokens.json` when at least one credential is configured, preventing spurious auth activation from `--data-dir` alone.
+- **GWP/BoltR validators use PendingAuth mechanism** (DashMap) to pass full `TokenInfo` from validator to backend.
+- **GWP/BoltR sessions preserve identity** across database switches and session resets.
+
+### Dependencies
+
+- **grafeo-engine 0.5.36**: role-based access control, `Identity`/`Role`/`StatementKind` types, `session_with_identity()`, `session_with_role()`, `PermissionDenied` error with context.
+- **gwp dependency updated to 0.2.1**: `AuthValidator` returns `AuthInfo`, `SessionConfig` carries `auth_info`.
+- **boltr dependency updated to 0.2.0**: `AuthValidator` returns `AuthInfo`, `BoltBackend.set_session_auth()`.
 
 ## [0.5.35] - 2026-04-11
 
-Backup/restore, CDC error handling, and engine 0.5.35 alignment (non-exhaustive enums, private QueryResult rows, new feature flags).
+Backup release on engine 0.5.35: backup and restore and CDC error handling, with the engine's non-exhaustive enums, private `QueryResult` rows and new feature flags.
 
 ### Added
 
-- **Backup/restore endpoints**: hot snapshots via MVCC, no write downtime ([#53](https://github.com/GrafeoDB/grafeo-server/pull/53) by [@Michaelzag](https://github.com/Michaelzag))
-  - `POST /admin/{db}/backup`: create a `.grafeo` snapshot
-  - `GET /admin/{db}/backups`: list backups for a database
-  - `GET /backups`: list all backups across databases
-  - `POST /admin/{db}/restore`: restore from a backup file (automatic safety backup before restore)
-  - `DELETE /backups/{filename}`: delete a backup file
-  - `GET /backups/download/{filename}`: download a backup file
-- **CLI flags**: `--backup-dir` (backup storage directory), `--backup-retention` (keep N most recent per database)
-- **ArcSwap database handle**: `DatabaseEntry.db` changed from `Arc<GrafeoDB>` to `ArcSwap<GrafeoDB>` for lock-free hot-swapping during restore. Callers get 503 during restore instead of 404 ([#53](https://github.com/GrafeoDB/grafeo-server/pull/53) by [@Michaelzag](https://github.com/Michaelzag))
-- **Sync pull CDC validation**: `POST /sync/{db}/pull` now returns 400 with an explanatory message when CDC is not enabled on the database, instead of silently returning empty results ([#55](https://github.com/GrafeoDB/grafeo-server/pull/55) by [@Michaelzag](https://github.com/Michaelzag))
-- **`lpg` feature flag**: new explicit LPG data model feature, forwarded through `grafeo-service` to `grafeo-engine/lpg`. Included in `default` and `full` tiers
-- **`triple-store` feature flag**: replaces `rdf` as the canonical name for RDF/triple store support. `rdf` kept as deprecated alias
+- **Backup/restore endpoints**: hot snapshots via MVCC, no write downtime ([#53](https://github.com/GrafeoDB/grafeo-server/pull/53) by [@Michaelzag](https://github.com/Michaelzag)).
+  - `POST /admin/{db}/backup`: create a `.grafeo` snapshot.
+  - `GET /admin/{db}/backups`: list backups for a database.
+  - `GET /backups`: list all backups across databases.
+  - `POST /admin/{db}/restore`: restore from a backup file (automatic safety backup before restore).
+  - `DELETE /backups/{filename}`: delete a backup file.
+  - `GET /backups/download/{filename}`: download a backup file.
+- **CLI flags**: `--backup-dir` (backup storage directory), `--backup-retention` (keep N most recent per database).
+- **ArcSwap database handle**: `DatabaseEntry.db` changed from `Arc<GrafeoDB>` to `ArcSwap<GrafeoDB>` for lock-free hot-swapping during restore. Callers get 503 during restore instead of 404 ([#53](https://github.com/GrafeoDB/grafeo-server/pull/53) by [@Michaelzag](https://github.com/Michaelzag)).
+- **Sync pull CDC validation**: `POST /sync/{db}/pull` now returns 400 with an explanatory message when CDC is not enabled on the database, instead of silently returning empty results ([#55](https://github.com/GrafeoDB/grafeo-server/pull/55) by [@Michaelzag](https://github.com/Michaelzag)).
+- **`lpg` feature flag**: new explicit LPG data model feature, forwarded through `grafeo-service` to `grafeo-engine/lpg`. Included in `default` and `full` tiers.
+- **`triple-store` feature flag**: replaces `rdf` as the canonical name for RDF/triple store support. `rdf` kept as deprecated alias.
 
 ### Changed
 
-- **grafeo-engine 0.5.35**: section-based container format, `grafeo-storage` crate extraction, incremental backup API (`backup_full()`/`backup_incremental()`/`restore_to_epoch()`), CDC retention and eviction, WAL replay fix, block-based LPG/RDF section formats, persona-based feature profiles
-- **`QueryResult.rows` now private**: all access migrated to `.rows()`, `.into_rows()`, and `QueryResult::from_rows()` constructor
-- **`#[non_exhaustive]` on all engine enums**: all `match` on `Value`, `EntityId`, `ChangeKind`, `SchemaInfo` now include wildcard arms
-- **Feature rename**: `rdf` -> `triple-store` in `grafeo-service` and binary crate features. `sparql` feature now depends on `triple-store` directly
-- **`full` tier updated**: includes `lpg` and uses `triple-store` instead of deprecated `rdf` alias
+- **`QueryResult.rows` now private**: all access migrated to `.rows()`, `.into_rows()`, and `QueryResult::from_rows()` constructor.
+- **`#[non_exhaustive]` on all engine enums**: all `match` on `Value`, `EntityId`, `ChangeKind`, `SchemaInfo` now include wildcard arms.
+- **Feature rename**: `rdf` -> `triple-store` in `grafeo-service` and binary crate features. `sparql` feature now depends on `triple-store` directly.
+- **`full` tier updated**: includes `lpg` and uses `triple-store` instead of deprecated `rdf` alias.
 
-### Fixed (via engine 0.5.35)
+### Fixed
 
-- WAL not replayed on reopen: data no longer lost across restarts without explicit checkpoint ([grafeo#252](https://github.com/GrafeoDB/grafeo/issues/252))
-- CDC event log unbounded memory: epoch-based and count-based retention with BufferManager eviction ([grafeo#250](https://github.com/GrafeoDB/grafeo/issues/250))
-- Graph/schema context validation: reject nonexistent targets, `drop_graph()` auto-clears active context ([grafeo#245](https://github.com/GrafeoDB/grafeo/issues/245))
+- WAL not replayed on reopen: data no longer lost across restarts without explicit checkpoint ([grafeo#252](https://github.com/GrafeoDB/grafeo/issues/252)) (engine 0.5.35).
+- CDC event log unbounded memory: epoch-based and count-based retention with BufferManager eviction ([grafeo#250](https://github.com/GrafeoDB/grafeo/issues/250)) (engine 0.5.35).
+- Graph/schema context validation: reject nonexistent targets, `drop_graph()` auto-clears active context ([grafeo#245](https://github.com/GrafeoDB/grafeo/issues/245)) (engine 0.5.35).
+
+### Dependencies
+
+- **grafeo-engine 0.5.35**: section-based container format, `grafeo-storage` crate extraction, incremental backup API (`backup_full()`/`backup_incremental()`/`restore_to_epoch()`), CDC retention and eviction, WAL replay fix, block-based LPG/RDF section formats, persona-based feature profiles.
 
 ## [0.5.34] - 2026-04-07
 
-Schema hierarchy, compact endpoint, bulk import, and two engine releases worth of query correctness fixes.
+Schema release on engines 0.5.33 and 0.5.34: the schema hierarchy, a compact endpoint, bulk import and two engine releases of query fixes.
 
 ### Added
 
-- **GQL schema namespace endpoints**: `GET /db/{name}/schemas`, `POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}` for listing, creating, and dropping ISO/IEC 39075 schema namespaces with full data isolation
-- **Compact endpoint**: `POST /admin/{db}/compact` converts a live database to a memory-efficient columnar read-only store (`compact-store` feature). One-way operation, requires exclusive access
-- **Bulk TSV import**: `POST /db/{name}/import/tsv` for fast edge list ingestion bypassing per-edge transaction overhead (10-100x throughput)
-- **`compact-store` feature flag**: forwarded through `grafeo-service` to `grafeo-engine`, included in `full` tier
-- **GWP session schema context**: `SessionProperty::Schema` now calls `session.set_schema()`, `ResetTarget::Schema` calls `session.reset_schema()`. GWP catalog operations (`list_schemas`, `create_schema`, `drop_schema`) now delegate to the engine instead of returning a hardcoded single schema
+- **GQL schema namespace endpoints**: `GET /db/{name}/schemas`, `POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}` for listing, creating, and dropping ISO/IEC 39075 schema namespaces with full data isolation.
+- **Compact endpoint**: `POST /admin/{db}/compact` converts a live database to a memory-efficient columnar read-only store (`compact-store` feature). One-way operation, requires exclusive access.
+- **Bulk TSV import**: `POST /db/{name}/import/tsv` for fast edge list ingestion bypassing per-edge transaction overhead (10-100x throughput).
+- **`compact-store` feature flag**: forwarded through `grafeo-service` to `grafeo-engine`, included in `full` tier.
+- **GWP session schema context**: `SessionProperty::Schema` now calls `session.set_schema()`, `ResetTarget::Schema` calls `session.reset_schema()`. GWP catalog operations (`list_schemas`, `create_schema`, `drop_schema`) now delegate to the engine instead of returning a hardcoded single schema.
 
 ### Changed
 
-- **grafeo-engine 0.5.33**: GraphChallenge algorithms (k-truss, triangle counting, subgraph isomorphism, stochastic block partition), TSV/MMIO bulk import, `RdfGraphStoreAdapter` bridging RDF to LPG algorithms, Kahan compensated summation, WAL `sync_all()` outside lock
-- **grafeo-engine 0.5.34**: GQL schema hierarchy (`CREATE SCHEMA`/`DROP SCHEMA`, `SESSION SET SCHEMA`), streaming RDF triple sink (`TripleSink`, `BatchInsertSink`, `CountSink`), deterministic snapshot export, `#[non_exhaustive]` on 13 public enums, `LabelRegistry` combined lock
-- **Non-exhaustive enum handling**: all `match` on engine enums (`SchemaInfo`, `ChangeKind`) now include wildcard arms for forward compatibility
+- **Non-exhaustive enum handling**: all `match` on engine enums (`SchemaInfo`, `ChangeKind`) now include wildcard arms for forward compatibility.
 
-### Fixed (via engine 0.5.33, 0.5.34)
+### Fixed
 
-- WAL deadlock on property mutations: store mutation applied before WAL logging
-- Multi-aggregate extraction: `sum(a) + count(b)` correctly extracts all aggregates
-- Mixed `WITH ... WHERE`/HAVING: non-aggregate conjuncts stay as WHERE
-- Null property pattern matching: `MATCH (n {key: null})` matches absent and explicitly null
-- MERGE null key matching: `MERGE (n:T {a: null, b: 'x'})` correctly finds existing nodes
-- `SET += {key: null}` removes property instead of keeping null
-- Negative LIMIT clamped to 0 instead of syntax error
-- `i64::MIN` literal parsing: `-9223372036854775808` folds at parse time
-- NaN/Inf float literals recognized in GQL and Cypher
-- `nodes(path)` returns property maps instead of raw IDs
-- Cyclic VLP pattern matching: `MATCH p=(s)-[:R*]->(s)` filters via `id()` equality
-- VLP default depth raised: unbounded `[*]` expands up to `min_hops + 100`
-- WAL sync counter race: `fetch_sub` preserves concurrent increments
-- `delete_node_edges` self-loop deduplication via HashSet
-- CompactStore multi-table edge types across label pairs
-- `round()`/`floor()`/`ceil()` return Float64 instead of truncating to Int64
-- `CALL ... YIELD` with aggregation now works over procedure results
-- Cypher keyword-as-label: `Order`, `By`, `Skip`, `Limit` usable as node labels
-- `CAST(bool AS INT)`: `true` casts to `1`
-- List `+` concatenation: `[1, 2] + [3, 4]` returns `[1, 2, 3, 4]`
-- Parameter substitution in multi-statement queries
-- ORDER BY + LIMIT/SKIP: SKIP and LIMIT apply after ORDER BY
-- SET self-reference: `SET n.value = n.value + 1` pre-computes before write
-- `size(collect())` nested aggregate no longer panics
-- `SUM()` on empty result set returns null per ISO GQL
-- `cypher` feature now correctly depends on `gql`
+- WAL deadlock on property mutations: store mutation applied before WAL logging (engine 0.5.33 or 0.5.34).
+- Multi-aggregate extraction: `sum(a) + count(b)` correctly extracts all aggregates (engine 0.5.33 or 0.5.34).
+- Mixed `WITH ... WHERE`/HAVING: non-aggregate conjuncts stay as WHERE (engine 0.5.33 or 0.5.34).
+- Null property pattern matching: `MATCH (n {key: null})` matches absent and explicitly null (engine 0.5.33 or 0.5.34).
+- MERGE null key matching: `MERGE (n:T {a: null, b: 'x'})` correctly finds existing nodes (engine 0.5.33 or 0.5.34).
+- `SET += {key: null}` removes property instead of keeping null (engine 0.5.33 or 0.5.34).
+- Negative LIMIT clamped to 0 instead of syntax error (engine 0.5.33 or 0.5.34).
+- `i64::MIN` literal parsing: `-9223372036854775808` folds at parse time (engine 0.5.33 or 0.5.34).
+- NaN/Inf float literals recognized in GQL and Cypher (engine 0.5.33 or 0.5.34).
+- `nodes(path)` returns property maps instead of raw IDs (engine 0.5.33 or 0.5.34).
+- Cyclic VLP pattern matching: `MATCH p=(s)-[:R*]->(s)` filters via `id()` equality (engine 0.5.33 or 0.5.34).
+- VLP default depth raised: unbounded `[*]` expands up to `min_hops + 100` (engine 0.5.33 or 0.5.34).
+- WAL sync counter race: `fetch_sub` preserves concurrent increments (engine 0.5.33 or 0.5.34).
+- `delete_node_edges` self-loop deduplication via HashSet (engine 0.5.33 or 0.5.34).
+- CompactStore multi-table edge types across label pairs (engine 0.5.33 or 0.5.34).
+- `round()`/`floor()`/`ceil()` return Float64 instead of truncating to Int64 (engine 0.5.33 or 0.5.34).
+- `CALL ... YIELD` with aggregation now works over procedure results (engine 0.5.33 or 0.5.34).
+- Cypher keyword-as-label: `Order`, `By`, `Skip`, `Limit` usable as node labels (engine 0.5.33 or 0.5.34).
+- `CAST(bool AS INT)`: `true` casts to `1` (engine 0.5.33 or 0.5.34).
+- List `+` concatenation: `[1, 2] + [3, 4]` returns `[1, 2, 3, 4]` (engine 0.5.33 or 0.5.34).
+- Parameter substitution in multi-statement queries (engine 0.5.33 or 0.5.34).
+- ORDER BY + LIMIT/SKIP: SKIP and LIMIT apply after ORDER BY (engine 0.5.33 or 0.5.34).
+- SET self-reference: `SET n.value = n.value + 1` pre-computes before write (engine 0.5.33 or 0.5.34).
+- `size(collect())` nested aggregate no longer panics (engine 0.5.33 or 0.5.34).
+- `SUM()` on empty result set returns null per ISO GQL (engine 0.5.33 or 0.5.34).
+- `cypher` feature now correctly depends on `gql` (engine 0.5.33 or 0.5.34).
+
+### Dependencies
+
+- **grafeo-engine 0.5.33**: GraphChallenge algorithms (k-truss, triangle counting, subgraph isomorphism, stochastic block partition), TSV/MMIO bulk import, `RdfGraphStoreAdapter` bridging RDF to LPG algorithms, Kahan compensated summation, WAL `sync_all()` outside lock.
+- **grafeo-engine 0.5.34**: GQL schema hierarchy (`CREATE SCHEMA`/`DROP SCHEMA`, `SESSION SET SCHEMA`), streaming RDF triple sink (`TripleSink`, `BatchInsertSink`, `CountSink`), deterministic snapshot export, `#[non_exhaustive]` on 13 public enums, `LabelRegistry` combined lock.
 
 ## [0.5.32] - 2026-04-04
 
-Replication correctness: atomic batch replay, read-only replica enforcement, HLC timestamps, Maelstrom and Jepsen testing.
-
-### Changed
-
-- **Atomic sync apply**: `SyncService::apply()` now wraps all mutations in a session transaction for all-or-nothing visibility. Readers on replicas never see partial batch state. Uses new session CRUD methods (`set_node_property`, `delete_node`, etc.) for transactional property updates and deletions
-- **Persistent replica epoch**: `ReplicationState::with_persistence(data_dir)` saves per-database epoch to `{data_dir}/.replica-epochs` on each advance. Replicas resume from their last position after restart instead of re-fetching from epoch 0
-- **HLC timestamp comparison**: `server_is_newer()` now explicitly converts `u64` client timestamps to `HlcTimestamp` for type-safe comparison, compatible with grafeo-engine 0.5.32's HLC-based CDC timestamps
-- **grafeo-engine 0.5.32**: CDC opt-in per session (`set_cdc_enabled`, `session_with_cdc`), Hybrid Logical Clock for causal consistency, `GrafeoDB::compact()` columnar read-only store, session CRUD methods, Gremlin `valueMap()`/`elementMap()`, sibling CALL block scope fix, push-based aggregator hash collision fix, Cypher ORDER BY zero fix
-- **CDC auto-activation**: server automatically enables CDC on all databases when running as a replication primary, ensuring all mutations (both direct API and session-driven) produce change events
+Replication correctness release on engine 0.5.32: atomic batch replay, read-only replica enforcement, HLC timestamps, and Maelstrom and Jepsen testing.
 
 ### Added
 
-- **Replication integration tests**: end-to-end primary-to-replica data flow tests via `SyncService::pull()` + `apply()`, including session-driven mutations (INSERT/SET/DELETE via GQL), epoch persistence roundtrip
-- **`ReplicationMode::is_primary()` accessor**: complements `is_replica()` for symmetric replication mode checks
-- **Engine-level read-only on replicas**: `QueryService` creates read-only sessions on replicas via `session_read_only()`, preventing mutations through `POST /query` across all transports (HTTP, GWP, BoltR). Previously only PUT/PATCH/DELETE were blocked by middleware
-- **`ServiceState::is_query_read_only()`**: combines global read-only flag with replica detection for all transports
-- **Maelstrom consistency test node** (`crates/grafeo-maelstrom`): standalone Rust binary implementing Maelstrom's `lin-kv` protocol with primary-replica replication model, write/CAS forwarding, LWW conflict resolution, and HLC timestamps. Run with `maelstrom test -w lin-kv --consistency-models read-uncommitted`
-- **Jepsen test harness** (`jepsen/`): Clojure project for Docker-based chaos testing with network partition (docker pause) and crash (docker kill) nemeses, eventual consistency checker
+- **Replication integration tests**: end-to-end primary-to-replica data flow tests via `SyncService::pull()` + `apply()`, including session-driven mutations (INSERT/SET/DELETE via GQL), epoch persistence roundtrip.
+- **`ReplicationMode::is_primary()` accessor**: complements `is_replica()` for symmetric replication mode checks.
+- **Engine-level read-only on replicas**: `QueryService` creates read-only sessions on replicas via `session_read_only()`, preventing mutations through `POST /query` across all transports (HTTP, GWP, BoltR). Previously only PUT/PATCH/DELETE were blocked by middleware.
+- **`ServiceState::is_query_read_only()`**: combines global read-only flag with replica detection for all transports.
+- **Maelstrom consistency test node** (`crates/grafeo-maelstrom`): standalone Rust binary implementing Maelstrom's `lin-kv` protocol with primary-replica replication model, write/CAS forwarding, LWW conflict resolution, and HLC timestamps. Run with `maelstrom test -w lin-kv --consistency-models read-uncommitted`.
+- **Jepsen test harness** (`jepsen/`): Clojure project for Docker-based chaos testing with network partition (docker pause) and crash (docker kill) nemeses, eventual consistency checker.
+
+### Changed
+
+- **Atomic sync apply**: `SyncService::apply()` now wraps all mutations in a session transaction for all-or-nothing visibility. Readers on replicas never see partial batch state. Uses new session CRUD methods (`set_node_property`, `delete_node`, etc.) for transactional property updates and deletions.
+- **Persistent replica epoch**: `ReplicationState::with_persistence(data_dir)` saves per-database epoch to `{data_dir}/.replica-epochs` on each advance. Replicas resume from their last position after restart instead of re-fetching from epoch 0.
+- **HLC timestamp comparison**: `server_is_newer()` now explicitly converts `u64` client timestamps to `HlcTimestamp` for type-safe comparison, compatible with grafeo-engine 0.5.32's HLC-based CDC timestamps.
+- **CDC auto-activation**: server automatically enables CDC on all databases when running as a replication primary, ensuring all mutations (both direct API and session-driven) produce change events.
+
+### Dependencies
+
+- **grafeo-engine 0.5.32**: CDC opt-in per session (`set_cdc_enabled`, `session_with_cdc`), Hybrid Logical Clock for causal consistency, `GrafeoDB::compact()` columnar read-only store, session CRUD methods, Gremlin `valueMap()`/`elementMap()`, sibling CALL block scope fix, push-based aggregator hash collision fix, Cypher ORDER BY zero fix.
 
 ## [0.5.30] - 2026-03-30
 
 ### Added
 
-- **W3C SPARQL 1.1 Protocol**: `GET/POST /db/{name}/sparql` with `application/sparql-query`, `application/sparql-update`, form-encoded, and JSON content types, plus Accept-based response negotiation (SPARQL Results JSON)
-- **W3C Graph Store HTTP Protocol**: `GET/PUT/POST/DELETE/HEAD /db/{name}/graph-store` with `?default` and `?graph=<iri>` for RESTful named graph CRUD
-- **SPARQL Results JSON**: W3C-compliant response format with typed term bindings for SELECT and boolean for ASK
-- **Snapshot endpoint**: `POST /admin/{db}/snapshot` writes a point-in-time `.grafeo` snapshot (requires `async-storage` + `grafeo-file` features)
-- **`async-storage` feature flag**: forwards engine's async WAL and storage operations, included in `full` tier
+- **W3C SPARQL 1.1 Protocol**: `GET/POST /db/{name}/sparql` with `application/sparql-query`, `application/sparql-update`, form-encoded, and JSON content types, plus Accept-based response negotiation (SPARQL Results JSON).
+- **W3C Graph Store HTTP Protocol**: `GET/PUT/POST/DELETE/HEAD /db/{name}/graph-store` with `?default` and `?graph=<iri>` for RESTful named graph CRUD.
+- **SPARQL Results JSON**: W3C-compliant response format with typed term bindings for SELECT and boolean for ASK.
+- **Snapshot endpoint**: `POST /admin/{db}/snapshot` writes a point-in-time `.grafeo` snapshot (requires `async-storage` + `grafeo-file` features).
+- **`async-storage` feature flag**: forwards engine's async WAL and storage operations, included in `full` tier.
 
 ### Changed
 
-- **grafeo-engine 0.5.30**: async storage foundation (`async_wal_checkpoint()`, `async_write_snapshot()`), Turtle/N-Quads parser and serializer, declarative `.gtest` spec test framework (2500+ tests), EXISTS in RETURN, GQL aggregate detection in WITH, adjacency list memory optimization (SmallVec to Vec), Gremlin rewrites (`coalesce`, `optional`, `group().by()`, `addE`, `or()`), SQL/PGQ HAVING inline aggregates and zero-length paths, SPARQL dateTime/LANGMATCHES functions, 86 stale spec test skips removed
-- **`DatabaseEntry.db` is now `Arc<GrafeoDB>`**: internal refactor enabling direct use of engine async methods; all existing access auto-derefs transparently
-- **WAL checkpoint uses native async**: `wal_checkpoint` service method calls `async_wal_checkpoint()` when `async-storage` is enabled, removing manual `spawn_blocking` wrapper
+- **`DatabaseEntry.db` is now `Arc<GrafeoDB>`**: internal refactor enabling direct use of engine async methods; all existing access auto-derefs transparently.
+- **WAL checkpoint uses native async**: `wal_checkpoint` service method calls `async_wal_checkpoint()` when `async-storage` is enabled, removing manual `spawn_blocking` wrapper.
 
-### Fixed (via engine 0.5.28, 0.5.29, 0.5.30)
+### Fixed
 
-- Single-file `.grafeo` storage broken in bindings: `grafeo-file` feature was missing from engine defaults (0.5.28)
-- Integer arithmetic overflow panic: checked arithmetic now returns NULL on overflow (0.5.29)
-- Label intersection across MATCH clauses: `MATCH (n:A) MATCH (n:B)` now filters to both labels (0.5.29)
-- CASE WHEN with NULL aggregate returned NULL when WHEN branch was true (0.5.29)
-- EXISTS with property filters silently dropped WHERE clause (0.5.29)
-- Keywords as property names (`order`, etc.) rejected in property contexts (0.5.29)
-- Gremlin `hasLabel` on edges, `coalesce()` semantics, `group().by()` two-pass, `optional()` per-row semantics, `values()` null filtering, `addE` with `as()` labels, `or()` three-valued logic (0.5.29)
-- SPARQL functions in SELECT projections, IN/NOT IN operators, BOUND() with OPTIONAL (0.5.29)
-- SQL/PGQ unbounded variable-length paths, COUNT(column) NULL skipping, CASE expressions, outer SELECT projection, ORDER BY on aggregate aliases (0.5.29)
-- SPARQL dateTime extraction functions (YEAR, MONTH, DAY, etc.) with timezone offsets (0.5.30)
-- SPARQL LANGMATCHES() RFC 4647 basic filtering with wildcard support (0.5.30)
-- SPARQL LANG() companion columns tracked through triple scans (0.5.30)
-- SQL/PGQ parameter references (`$name`, `$min_age`) in WHERE clauses (0.5.30)
-- SQL/PGQ HAVING inline aggregates (`HAVING COUNT(*) > 0`) now extracted correctly (0.5.30)
-- SQL/PGQ zero-length paths (`*0..N`) now emit source node as 0-hop match (0.5.30)
-- Cypher `collect(DISTINCT ...)` through non-aggregate function calls (0.5.30)
+- Single-file `.grafeo` storage broken in bindings: `grafeo-file` feature was missing from engine defaults (0.5.28).
+- Integer arithmetic overflow panic: checked arithmetic now returns NULL on overflow (0.5.29).
+- Label intersection across MATCH clauses: `MATCH (n:A) MATCH (n:B)` now filters to both labels (0.5.29).
+- CASE WHEN with NULL aggregate returned NULL when WHEN branch was true (0.5.29).
+- EXISTS with property filters silently dropped WHERE clause (0.5.29).
+- Keywords as property names (`order`, etc.) rejected in property contexts (0.5.29).
+- Gremlin `hasLabel` on edges, `coalesce()` semantics, `group().by()` two-pass, `optional()` per-row semantics, `values()` null filtering, `addE` with `as()` labels, `or()` three-valued logic (0.5.29).
+- SPARQL functions in SELECT projections, IN/NOT IN operators, BOUND() with OPTIONAL (0.5.29).
+- SQL/PGQ unbounded variable-length paths, COUNT(column) NULL skipping, CASE expressions, outer SELECT projection, ORDER BY on aggregate aliases (0.5.29).
+- SPARQL dateTime extraction functions (YEAR, MONTH, DAY, etc.) with timezone offsets (0.5.30).
+- SPARQL LANGMATCHES() RFC 4647 basic filtering with wildcard support (0.5.30).
+- SPARQL LANG() companion columns tracked through triple scans (0.5.30).
+- SQL/PGQ parameter references (`$name`, `$min_age`) in WHERE clauses (0.5.30).
+- SQL/PGQ HAVING inline aggregates (`HAVING COUNT(*) > 0`) now extracted correctly (0.5.30).
+- SQL/PGQ zero-length paths (`*0..N`) now emit source node as 0-hop match (0.5.30).
+- Cypher `collect(DISTINCT ...)` through non-aggregate function calls (0.5.30).
+
+### Dependencies
+
+- **grafeo-engine 0.5.30**: async storage foundation (`async_wal_checkpoint()`, `async_write_snapshot()`), Turtle/N-Quads parser and serializer, declarative `.gtest` spec test framework (2500+ tests), EXISTS in RETURN, GQL aggregate detection in WITH, adjacency list memory optimization (SmallVec to Vec), Gremlin rewrites (`coalesce`, `optional`, `group().by()`, `addE`, `or()`), SQL/PGQ HAVING inline aggregates and zero-length paths, SPARQL dateTime/LANGMATCHES functions, 86 stale spec test skips removed.
 
 ## [0.5.27] - 2026-03-27
 
-Starting with this release, grafeo-server uses **lockstep versioning** with the
-grafeo engine: server and engine share the same version number. This replaces
-the independent 0.4.x series and makes compatibility immediately obvious.
+Versioning release on engine 0.5.27: from here grafeo-server uses **lockstep versioning** with the grafeo engine, so server and engine share one version number. This replaces the independent 0.4.x series.
 
-### Changed
+### Fixed
 
-- **grafeo-engine 0.5.27**: GQL conformance (ISO/IEC 39075:2024, 234 queries cross-validated), SQL/PGQ GROUP BY/HAVING, post-edge quantifiers, path alternation, vector search filter optimization, adjacency inline capacity raised (SmallVec 4 to 8)
+- WAL directory-format data loss on close (#174) (engine 0.5.27).
+- UNWIND variable silently dropped in SET clause (#172, present since 0.5.14) (engine 0.5.27).
+- SET n:Label drops variable binding (#178, #182) (engine 0.5.27).
+- EXISTS/COUNT subquery bugs (target-side correlation, end-node label verification) (engine 0.5.27).
+- CREATE after MATCH creates phantom nodes (#181) (engine 0.5.27).
+- `labels(n)`/`type(r)` in aggregation (#187) (engine 0.5.27).
+- GROUP BY on list-valued keys, ORDER BY complex expressions leaked synthetic columns (engine 0.5.27).
+- SPARQL GROUP BY/ORDER BY with expressions (engine 0.5.27).
+- Single-file storage silent failure when WAL disabled (#185) (engine 0.5.27).
+- Windows read-only file ops failure (engine 0.5.27).
 
-### Fixed (via engine upgrade)
+### Dependencies
 
-- WAL directory-format data loss on close (#174)
-- UNWIND variable silently dropped in SET clause (#172, present since 0.5.14)
-- SET n:Label drops variable binding (#178, #182)
-- EXISTS/COUNT subquery bugs (target-side correlation, end-node label verification)
-- CREATE after MATCH creates phantom nodes (#181)
-- `labels(n)`/`type(r)` in aggregation (#187)
-- GROUP BY on list-valued keys, ORDER BY complex expressions leaked synthetic columns
-- SPARQL GROUP BY/ORDER BY with expressions
-- Single-file storage silent failure when WAL disabled (#185)
-- Windows read-only file ops failure
+- **grafeo-engine 0.5.27**: GQL conformance (ISO/IEC 39075:2024, 234 queries cross-validated), SQL/PGQ GROUP BY/HAVING, post-edge quantifiers, path alternation, vector search filter optimization, adjacency inline capacity raised (SmallVec 4 to 8).
 
 ## [0.4.9] - 2026-03-25
 
 ### Added
 
-- **Offline-first changefeed** (`sync` feature): `GET /db/{name}/changes?since={epoch}&limit={n}` returns a paginated JSON array of CDC events (creates, updates, deletes) for nodes, edges, and RDF triples. Store `server_epoch` from the response and pass it as `since` on the next poll to receive only new changes
-- **Offline-first sync apply** (`sync` feature): `POST /db/{name}/sync` accepts a `{ client_id, last_seen_epoch, changes: [...] }` body and applies the changeset with last-write-wins (LWW) conflict resolution. Returns `{ server_epoch, applied, skipped, conflicts, id_mappings }`. The `id_mappings` array maps each create request (by index) to the server-assigned entity ID. Idempotent: replaying the same request twice produces the same state
-- **RDF triple events in changefeed**: SPARQL INSERT DATA / DELETE DATA mutations now appear in the changefeed with `entity_type: "triple"` and N-Triples-encoded `triple_subject`, `triple_predicate`, `triple_object`, and `triple_graph` fields (requires `cdc` + `rdf` features in grafeo-engine)
-- **SSE push changefeed** (`push-changefeed` feature): `GET /db/{name}/changes/stream` streams CDC events as Server-Sent Events in real time. A `ChangeHub` background task polls each database at 100ms intervals and broadcasts to all connected subscribers. Clients receive a JSON-encoded `ChangeEventDto` in each `data:` field. Compatible with browsers, Dart/Flutter, and any HTTP/1.1 SSE client
-- **WebSocket CRDT subscriptions** (`push-changefeed` feature): the existing `/ws` WebSocket endpoint now accepts `Subscribe` and `Unsubscribe` messages. Each subscription is identified by a client-supplied `sub_id` and receives `Change` events as they arrive; multiple databases can be subscribed simultaneously on a single connection
-- **Schema version awareness** (`sync` feature): `SyncRequest` now accepts an optional `schema_version` field (FNV-1a hex hash over sorted label names and property keys). When present and mismatched, `SyncResponse` sets `schema_mismatch: true` and always returns `server_schema_version` so clients can detect drift even without sending their own version
-- **CRDT counter properties** (`sync` feature): `SyncChangeRequest` accepts a `crdt_op` field (`GrowAdd` for G-Counter, `Increment` for PN-Counter) alongside `crdt_property`. When set, the server merges the counter value instead of applying last-write-wins. CRDT operations are commutative and idempotent across replicas
-- **`grafeo-sync` helper crate**: thin async HTTP client wrapping the sync wire protocol. `SyncClient::pull()`, `push()`, and `sync()` handle epoch tracking automatically. Suitable for use in Dart/Flutter, WASM, and Rust-native clients
-- **Offline-first guide**: `docs/guides/offline-first.md` covers the full poll-push-sync cycle, wire protocol reference, Dart/Flutter example (local `grafeo_dart` FFI + `SharedPreferences` epoch tracking), WASM/browser example (`localStorage` + Service Worker buffering), conflict handling, and ID mapping patterns
-- **Primary-replica replication** (`replication` feature): CDC-based streaming replication for read-scalability
-  - `ReplicationMode` enum: `Standalone` (default), `Primary` (read-write, advertises itself), `Replica` (read-only, polls primary)
-  - Replica instances reject all write operations (POST/PUT/PATCH/DELETE) with `503 Service Unavailable` and `{"error": "replica_mode"}`
-  - Background poll task fetches `GET /db/{name}/changes?since={epoch}&limit=500` on the primary every 500ms and applies events via `SyncService::apply()`; per-database epoch progress tracked in `ReplicationState`
-  - `GET /admin/replication`: returns current mode, primary URL (replica mode), and per-database `{ last_applied_epoch, last_error }`
-  - Configured via `--replication-mode` (`standalone` | `primary` | `replica`) and `--primary-url` CLI args, or `GRAFEO_REPLICATION_MODE` / `GRAFEO_PRIMARY_URL` env vars
-
-### Fixed
-
-- **Bolt encoding for CRDT counters**: `grafeo-boltr` now encodes `Value::GCounter` and `Value::PnCounter` to `BoltValue::Integer` (resolved totals) so Bolt clients receive a usable scalar rather than a missing match arm compile error
+- **Offline-first changefeed** (`sync` feature): `GET /db/{name}/changes?since={epoch}&limit={n}` returns a paginated JSON array of CDC events (creates, updates, deletes) for nodes, edges, and RDF triples. Store `server_epoch` from the response and pass it as `since` on the next poll to receive only new changes.
+- **Offline-first sync apply** (`sync` feature): `POST /db/{name}/sync` accepts a `{ client_id, last_seen_epoch, changes: [...] }` body and applies the changeset with last-write-wins (LWW) conflict resolution. Returns `{ server_epoch, applied, skipped, conflicts, id_mappings }`. The `id_mappings` array maps each create request (by index) to the server-assigned entity ID. Idempotent: replaying the same request twice produces the same state.
+- **RDF triple events in changefeed**: SPARQL INSERT DATA / DELETE DATA mutations now appear in the changefeed with `entity_type: "triple"` and N-Triples-encoded `triple_subject`, `triple_predicate`, `triple_object`, and `triple_graph` fields (requires `cdc` + `rdf` features in grafeo-engine).
+- **SSE push changefeed** (`push-changefeed` feature): `GET /db/{name}/changes/stream` streams CDC events as Server-Sent Events in real time. A `ChangeHub` background task polls each database at 100ms intervals and broadcasts to all connected subscribers. Clients receive a JSON-encoded `ChangeEventDto` in each `data:` field. Compatible with browsers, Dart/Flutter, and any HTTP/1.1 SSE client.
+- **WebSocket CRDT subscriptions** (`push-changefeed` feature): the existing `/ws` WebSocket endpoint now accepts `Subscribe` and `Unsubscribe` messages. Each subscription is identified by a client-supplied `sub_id` and receives `Change` events as they arrive; multiple databases can be subscribed simultaneously on a single connection.
+- **Schema version awareness** (`sync` feature): `SyncRequest` now accepts an optional `schema_version` field (FNV-1a hex hash over sorted label names and property keys). When present and mismatched, `SyncResponse` sets `schema_mismatch: true` and always returns `server_schema_version` so clients can detect drift even without sending their own version.
+- **CRDT counter properties** (`sync` feature): `SyncChangeRequest` accepts a `crdt_op` field (`GrowAdd` for G-Counter, `Increment` for PN-Counter) alongside `crdt_property`. When set, the server merges the counter value instead of applying last-write-wins. CRDT operations are commutative and idempotent across replicas.
+- **`grafeo-sync` helper crate**: thin async HTTP client wrapping the sync wire protocol. `SyncClient::pull()`, `push()`, and `sync()` handle epoch tracking automatically. Suitable for use in Dart/Flutter, WASM, and Rust-native clients.
+- **Offline-first guide**: `docs/guides/offline-first.md` covers the full poll-push-sync cycle, wire protocol reference, Dart/Flutter example (local `grafeo_dart` FFI + `SharedPreferences` epoch tracking), WASM/browser example (`localStorage` + Service Worker buffering), conflict handling, and ID mapping patterns.
+- **Primary-replica replication** (`replication` feature): CDC-based streaming replication for read-scalability.
+  - `ReplicationMode` enum: `Standalone` (default), `Primary` (read-write, advertises itself), `Replica` (read-only, polls primary).
+  - Replica instances reject all write operations (POST/PUT/PATCH/DELETE) with `503 Service Unavailable` and `{"error": "replica_mode"}`.
+  - Background poll task fetches `GET /db/{name}/changes?since={epoch}&limit=500` on the primary every 500ms and applies events via `SyncService::apply()`; per-database epoch progress tracked in `ReplicationState`.
+  - `GET /admin/replication`: returns current mode, primary URL (replica mode), and per-database `{ last_applied_epoch, last_error }`.
+  - Configured via `--replication-mode` (`standalone` | `primary` | `replica`) and `--primary-url` CLI args, or `GRAFEO_REPLICATION_MODE` / `GRAFEO_PRIMARY_URL` env vars.
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to **0.5.25** (RDF CDC bridge, CDC structural metadata on create events, `Value::GCounter` and `Value::PnCounter` variants)
-- `ChangeEventDto` extended with `triple_subject`, `triple_predicate`, `triple_object`, `triple_graph` fields; `entity_type` now also accepts `"triple"`; `#[derive(Clone)]` added for broadcast channel support
-- `full` tier now includes `sync`, `push-changefeed`, and `replication` features
-- 123 total integration tests (10 new sync/CRDT/SSE/schema tests); 57 grafeo-service unit tests (6 new replication tests); new tests cover edge creates with id_mappings remapping, updates/deletes applied count, LWW conflict detection, limit/pagination, validation error reasons, and replication mode/epoch tracking
+- `ChangeEventDto` extended with `triple_subject`, `triple_predicate`, `triple_object`, `triple_graph` fields; `entity_type` now also accepts `"triple"`; `#[derive(Clone)]` added for broadcast channel support.
+- `full` tier now includes `sync`, `push-changefeed`, and `replication` features.
+- 123 total integration tests (10 new sync/CRDT/SSE/schema tests); 57 grafeo-service unit tests (6 new replication tests); new tests cover edge creates with id_mappings remapping, updates/deletes applied count, LWW conflict detection, limit/pagination, validation error reasons, and replication mode/epoch tracking.
+
+### Fixed
+
+- **Bolt encoding for CRDT counters**: `grafeo-boltr` now encodes `Value::GCounter` and `Value::PnCounter` to `BoltValue::Integer` (resolved totals) so Bolt clients receive a usable scalar rather than a missing match arm compile error.
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to **0.5.25** (RDF CDC bridge, CDC structural metadata on create events, `Value::GCounter` and `Value::PnCounter` variants).
 
 ## [0.4.8] - 2026-03-24
 
 ### Added
 
-- **Engine Prometheus metrics integration**: `/metrics` endpoint now includes per-database engine metrics (when the `metrics` feature is enabled), appended to existing server-level Prometheus output
-- **Read-only mode**: `--read-only` / `GRAFEO_READ_ONLY` opens all databases in read-only mode; mutating operations return HTTP 403 with `"read_only"` error code; `ServiceError::ReadOnly` variant added to the service error enum
-- **`temporal` feature flag**: forwards the engine's append-only versioned properties feature through the feature chain
-- **`jsonl-import` and `parquet-import` feature flags**: forward engine LOAD DATA format support for JSONL and Parquet imports
-- **`metrics` feature flag**: forwards engine-level Prometheus metrics collection
-- **`import` composite feature**: enables both `jsonl-import` and `parquet-import` in one flag
+- **Engine Prometheus metrics integration**: `/metrics` endpoint now includes per-database engine metrics (when the `metrics` feature is enabled), appended to existing server-level Prometheus output.
+- **Read-only mode**: `--read-only` / `GRAFEO_READ_ONLY` opens all databases in read-only mode; mutating operations return HTTP 403 with `"read_only"` error code; `ServiceError::ReadOnly` variant added to the service error enum.
+- **`temporal` feature flag**: forwards the engine's append-only versioned properties feature through the feature chain.
+- **`jsonl-import` and `parquet-import` feature flags**: forward engine LOAD DATA format support for JSONL and Parquet imports.
+- **`metrics` feature flag**: forwards engine-level Prometheus metrics collection.
+- **`import` composite feature**: enables both `jsonl-import` and `parquet-import` in one flag.
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to **0.5.24**
-- `full` tier now includes `temporal`, `import`, and `metrics` features
-- `detect_features()` reports `temporal`, `metrics`, `jsonl-import`, and `parquet-import` in the health endpoint when enabled
-- 184 total tests (112 integration + 72 workspace unit tests)
+- `full` tier now includes `temporal`, `import`, and `metrics` features.
+- `detect_features()` reports `temporal`, `metrics`, `jsonl-import`, and `parquet-import` in the health endpoint when enabled.
+- 184 total tests (112 integration + 72 workspace unit tests).
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to **0.5.24**.
 
 ## [0.4.7] - 2026-03-14
 
 ### Added
 
-- **Memory usage endpoint**: `GET /admin/{db}/memory` returns a hierarchical breakdown of memory usage across store (nodes, edges, properties), indexes (adjacency, label, property, vector, text), MVCC versioning, caches (parsed/optimized plan cache), string pools (label/type registries), and buffer manager regions
-- **Named graph endpoints**: manage sub-graphs within a database, distinct from databases themselves
-  - `GET /db/{name}/graphs`: list all named graphs in a database
-  - `POST /db/{name}/graphs`: create a named graph (`{"name": "..."}`)
-  - `DELETE /db/{name}/graphs/{graph}`: drop a named graph
-- **`grafeo-file` feature**: forwards the engine's single-file `.grafeo` database format through the feature chain (included in `storage` profile); enables `GrafeoDB::save("mydb.grafeo")` for DuckDB-style single-file databases with sidecar WAL
-- **5 new unit tests**: memory usage (default DB, not found), named graph CRUD (list empty, create/drop lifecycle, not found)
-- **4 new integration tests**: memory usage endpoint (success, 404), named graph CRUD (full lifecycle, 404)
-- **OpenAPI**: memory usage, named graph list/create/drop endpoints documented; `CreateGraphRequest` and `GraphListResponse` schemas added
+- **Memory usage endpoint**: `GET /admin/{db}/memory` returns a hierarchical breakdown of memory usage across store (nodes, edges, properties), indexes (adjacency, label, property, vector, text), MVCC versioning, caches (parsed/optimized plan cache), string pools (label/type registries), and buffer manager regions.
+- **Named graph endpoints**: manage sub-graphs within a database, distinct from databases themselves.
+  - `GET /db/{name}/graphs`: list all named graphs in a database.
+  - `POST /db/{name}/graphs`: create a named graph (`{"name": "..."}`).
+  - `DELETE /db/{name}/graphs/{graph}`: drop a named graph.
+- **`grafeo-file` feature**: forwards the engine's single-file `.grafeo` database format through the feature chain (included in `storage` profile); enables `GrafeoDB::save("mydb.grafeo")` for DuckDB-style single-file databases with sidecar WAL.
+- **5 new unit tests**: memory usage (default DB, not found), named graph CRUD (list empty, create/drop lifecycle, not found).
+- **4 new integration tests**: memory usage endpoint (success, 404), named graph CRUD (full lifecycle, 404).
+- **OpenAPI**: memory usage, named graph list/create/drop endpoints documented; `CreateGraphRequest` and `GraphListResponse` schemas added.
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to **0.5.21** (single-file `.grafeo` format, DDL schema persistence, memory introspection API, named graph WAL/snapshot persistence, LOAD DATA multi-format import, graph type enforcement, query introspection functions, snapshot v3 format, C#/Dart bindings, 1300+ spec tests)
-- Engine query compliance fixes (transparent to server): `SUM()` on empty set returns NULL, `CASE WHEN` with NULL correctly falls through, `SESSION SET SCHEMA`/`GRAPH` are independent per ISO/IEC 39075, `COUNT(*)` parsing, `CALL subquery` variable scope, correlated `EXISTS` via semi-join
-- `storage` feature group now includes `grafeo-file` alongside `parallel`, `wal`, `spill`, `mmap`
-- `detect_features()` reports `grafeo-file` in health endpoint when enabled
-- 164 total tests (92 integration + 72 workspace unit tests)
+- Engine query compliance fixes (transparent to server): `SUM()` on empty set returns NULL, `CASE WHEN` with NULL correctly falls through, `SESSION SET SCHEMA`/`GRAPH` are independent per ISO/IEC 39075, `COUNT(*)` parsing, `CALL subquery` variable scope, correlated `EXISTS` via semi-join.
+- `storage` feature group now includes `grafeo-file` alongside `parallel`, `wal`, `spill`, `mmap`.
+- `detect_features()` reports `grafeo-file` in health endpoint when enabled.
+- 164 total tests (92 integration + 72 workspace unit tests).
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to **0.5.21** (single-file `.grafeo` format, DDL schema persistence, memory introspection API, named graph WAL/snapshot persistence, LOAD DATA multi-format import, graph type enforcement, query introspection functions, snapshot v3 format, C#/Dart bindings, 1300+ spec tests).
 
 ## [0.4.6] - 2026-03-08
 
 ### Added
 
-- **Cache stats endpoint**: `GET /admin/{db}/cache` returns query plan cache statistics (parsed/optimized sizes, hit/miss counts, hit rates, invalidation count)
-- **Cache clear endpoint**: `POST /admin/{db}/cache/clear` manually clears the query plan cache (forces re-parsing and re-optimization)
-- **GQLSTATUS in HTTP responses**: non-success GQLSTATUS codes (per ISO/IEC 39075) included in `QueryResponse` JSON as `gql_status` field; omitted for standard success (`"00000"`)
+- **Cache stats endpoint**: `GET /admin/{db}/cache` returns query plan cache statistics (parsed/optimized sizes, hit/miss counts, hit rates, invalidation count).
+- **Cache clear endpoint**: `POST /admin/{db}/cache/clear` manually clears the query plan cache (forces re-parsing and re-optimization).
+- **GQLSTATUS in HTTP responses**: non-success GQLSTATUS codes (per ISO/IEC 39075) included in `QueryResponse` JSON as `gql_status` field; omitted for standard success (`"00000"`).
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to **0.5.16** (EXPLAIN/PROFILE statements, LOAD CSV, Cypher DDL, savepoints, correlated EXISTS subqueries, subpath variable binding, temporal map constructors, relationship WHERE clause, plan cache invalidation, SPARQL params fix)
 - **ZonedDatetime support**: new `Value::ZonedDatetime` variant encoded across all transports:
-  - HTTP: `{"$datetime": "2024-06-15T10:30:00+05:30"}`
-  - GWP: native `ZonedDateTime` with date, time, offset components
-  - Bolt: native `DateTime` with seconds, nanoseconds, tz_offset_seconds
-- **SPARQL regex support**: `sparql` feature now enables `grafeo-engine/regex` for SPARQL FILTER regex functions
-- Fixed duplicate `gwp`/`bolt` feature keys in workspace Cargo.toml (merged transport and tier definitions)
+  - HTTP: `{"$datetime": "2024-06-15T10:30:00+05:30"}`.
+  - GWP: native `ZonedDateTime` with date, time, offset components.
+  - Bolt: native `DateTime` with seconds, nanoseconds, tz_offset_seconds.
+- **SPARQL regex support**: `sparql` feature now enables `grafeo-engine/regex` for SPARQL FILTER regex functions.
+- Fixed duplicate `gwp`/`bolt` feature keys in workspace Cargo.toml (merged transport and tier definitions).
+- `Session::begin_tx()` renamed to `begin_transaction()` (engine API change).
+- `QueryResult` gains `gql_status` field (GQLSTATUS code per ISO/IEC 39075).
 
-### Internal
+### Dependencies
 
-- `Session::begin_tx()` renamed to `begin_transaction()` (engine API change)
-- `QueryResult` gains `gql_status` field (GQLSTATUS code per ISO/IEC 39075)
+- Bumped grafeo-engine and grafeo-common to **0.5.16** (EXPLAIN/PROFILE statements, LOAD CSV, Cypher DDL, savepoints, correlated EXISTS subqueries, subpath variable binding, temporal map constructors, relationship WHERE clause, plan cache invalidation, SPARQL params fix).
 
 ## [0.4.5] - 2026-02-28
 
@@ -550,113 +593,125 @@ the independent 0.4.x series and makes compatibility immediately obvious.
 
 - **GWP 0.1.6 migration (breaking)**: migrated from flat Database model to GQL Catalog hierarchy (Schema → Graph → Graph Type). Single `"default"` schema maps Grafeo's database namespace. New catalog methods: `list_schemas`, `list_graphs`, `create_graph`, `drop_graph`, `get_graph_info`, plus graph type stubs. `ResultHeader` now includes `ordered: false`. `TypeDescriptor` gains precision, scale, min/max length, max cardinality, is_group, is_open, duration_qualifier, component_types fields.
 - **Multi-language dispatch in GWP**: `GrafeoSession` tracks `language` field; `execute` routes through `QueryService::dispatch()` for language-specific execution; `reset_session` clears language. Same extension mechanism as Bolt (`{"language": "sparql"}`).
-- Bumped grafeo-engine and grafeo-common to **0.5.10** (bidirectional BFS, compact properties, skip index, union graph improvements)
-- Bumped boltr to **0.1.1** (ROUTE, TELEMETRY, TLS, bookmark utilities, state machine update)
-- Bumped gwp to **0.1.6** (GQL Catalog model: schemas, graphs, graph types)
-- 96 integration tests (85 default + 11 Bolt), 131 total with workspace unit tests
+- 96 integration tests (85 default + 11 Bolt), 131 total with workspace unit tests.
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to **0.5.10** (bidirectional BFS, compact properties, skip index, union graph improvements).
+- Bumped boltr to **0.1.1** (ROUTE, TELEMETRY, TLS, bookmark utilities, state machine update).
+- Bumped gwp to **0.1.6** (GQL Catalog model: schemas, graphs, graph types).
 
 ## [0.4.4] - 2026-02-22
 
 ### Added
 
-- **BoltR protocol** (`grafeo-boltr`): Bolt v5.x wire-compatible binary protocol for Neo4j driver connectivity
-  - Pure-Rust `boltr` crate: PackStream encoding/decoding, chunked framing, 15 Bolt message types, connection state machine, handshake (v5.1–v5.4), server framework with `BoltBackend` trait, client module for testing
-  - `grafeo-boltr` adapter: `GrafeoBackend` implementing `BoltBackend` for grafeo-engine, value encoding (grafeo_common::Value ↔ BoltValue), auth bridging (AuthProvider → AuthValidator)
-  - Grafeo extension: multi-language queries via RUN extra dict (`{"language": "sparql"}`)
-  - Server info in HELLO response: `{"server": "GrafeoDB/0.4.4"}`
-  - `--bolt-port` CLI flag / `GRAFEO_BOLT_PORT` env var (default: 7687)
-  - `--bolt-max-sessions` CLI flag / `GRAFEO_BOLT_MAX_SESSIONS` env var (default: 0 = unlimited)
-  - Idle session reaping via `--session-ttl` (shared with HTTP/GWP)
-  - Auth support: bearer and basic auth via Bolt HELLO/LOGON (feature: `auth`)
-  - Shutdown signal integration (graceful Ctrl-C handling)
-- **`bolt` feature flag**: enables Bolt v5 transport (`dep:grafeo-boltr`)
-- **`boltr` feature tier**: HTTP + Bolt + Studio + all-languages + storage + algos (swaps GWP for Bolt)
-- **`QueryService::dispatch()`**: public method for transport crates to use centralized language dispatch on their own engine sessions
-- **9 new Bolt integration tests**: connect/authenticate, execute query, transaction commit/rollback, reset from failed, query with parameters, health feature detection, multiple queries per session, server info inspection
-- **boltr client module** (feature: `client`): `BoltSession` and `BoltConnection` for integration testing
+- **BoltR protocol** (`grafeo-boltr`): Bolt v5.x wire-compatible binary protocol for Neo4j driver connectivity.
+  - Pure-Rust `boltr` crate: PackStream encoding/decoding, chunked framing, 15 Bolt message types, connection state machine, handshake (v5.1 to v5.4), server framework with `BoltBackend` trait, client module for testing.
+  - `grafeo-boltr` adapter: `GrafeoBackend` implementing `BoltBackend` for grafeo-engine, value encoding (grafeo_common::Value ↔ BoltValue), auth bridging (AuthProvider → AuthValidator).
+  - Grafeo extension: multi-language queries via RUN extra dict (`{"language": "sparql"}`).
+  - Server info in HELLO response: `{"server": "GrafeoDB/0.4.4"}`.
+  - `--bolt-port` CLI flag / `GRAFEO_BOLT_PORT` env var (default: 7687).
+  - `--bolt-max-sessions` CLI flag / `GRAFEO_BOLT_MAX_SESSIONS` env var (default: 0 = unlimited).
+  - Idle session reaping via `--session-ttl` (shared with HTTP/GWP).
+  - Auth support: bearer and basic auth via Bolt HELLO/LOGON (feature: `auth`).
+  - Shutdown signal integration (graceful Ctrl-C handling).
+- **`bolt` feature flag**: enables Bolt v5 transport (`dep:grafeo-boltr`).
+- **`boltr` feature tier**: HTTP + Bolt + Studio + all-languages + storage + algos (swaps GWP for Bolt).
+- **`QueryService::dispatch()`**: public method for transport crates to use centralized language dispatch on their own engine sessions.
+- **9 new Bolt integration tests**: connect/authenticate, execute query, transaction commit/rollback, reset from failed, query with parameters, health feature detection, multiple queries per session, server info inspection.
+- **boltr client module** (feature: `client`): `BoltSession` and `BoltConnection` for integration testing.
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to 0.5.8
-- GWP default port changed from 7687 to **7688** (`GRAFEO_GWP_PORT=7687` restores previous behavior)
-- BoltR takes standard Bolt port **7687** (Neo4j driver default)
-- GWP added to `default` feature tier (was HTTP + Studio only, now HTTP + GWP + Studio)
-- `full` tier now includes all 3 protocols: HTTP + GWP + Bolt
-- Renamed `crates/grafeo-bolt/` → `crates/grafeo-boltr/` (package: `grafeo-boltr`)
-- `auth` and `tls` features now forward to `grafeo-boltr?/auth` and `grafeo-boltr?/tls`
-- Standalone mode supports any combination of GWP/Bolt without HTTP
-- 94 integration tests (85 existing + 9 Bolt)
+- GWP default port changed from 7687 to **7688** (`GRAFEO_GWP_PORT=7687` restores previous behavior).
+- BoltR takes standard Bolt port **7687** (Neo4j driver default).
+- GWP added to `default` feature tier (was HTTP + Studio only, now HTTP + GWP + Studio).
+- `full` tier now includes all 3 protocols: HTTP + GWP + Bolt.
+- Renamed `crates/grafeo-bolt/` → `crates/grafeo-boltr/` (package: `grafeo-boltr`).
+- `auth` and `tls` features now forward to `grafeo-boltr?/auth` and `grafeo-boltr?/tls`.
+- Standalone mode supports any combination of GWP/Bolt without HTTP.
+- 94 integration tests (85 existing + 9 Bolt).
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to 0.5.8.
 
 ## [0.4.3] - 2026-02-19
 
 ### Added
 
-- **Admin endpoints** (HTTP + GWP): database introspection, maintenance, and index management via both REST and gRPC
-  - `GET /admin/{db}/stats`: detailed database statistics (node/edge/label/property counts, memory, disk usage)
-  - `GET /admin/{db}/wal`: WAL status (enabled, path, size, record count, epoch)
-  - `POST /admin/{db}/wal/checkpoint`: force WAL checkpoint (flush pending records to storage)
-  - `GET /admin/{db}/validate`: database integrity validation (dangling edges, index consistency)
-  - `POST /admin/{db}/index`: create property, vector, or text index
-  - `DELETE /admin/{db}/index`: drop property, vector, or text index
-- **Search endpoints** (HTTP + GWP): vector, text, and hybrid search via both REST and gRPC
-  - `POST /search/vector`: KNN vector similarity search via HNSW index (feature: `vector-index`)
-  - `POST /search/text`: full-text BM25 search (feature: `text-index`)
-  - `POST /search/hybrid`: combined vector + text search with rank fusion (feature: `hybrid-search`)
-- **grafeo-service admin module** (`admin.rs`): transport-agnostic `AdminService` with 6 operations (database_stats, wal_status, wal_checkpoint, validate, create_index, drop_index) and 7 unit tests
-- **grafeo-service search module** (`search.rs`): transport-agnostic `SearchService` with 3 operations (vector_search, text_search, hybrid_search); feature-gated with stub fallbacks when features are disabled
-- **gwp AdminService** (gRPC): 6 RPCs — `GetDatabaseStats`, `WalStatus`, `WalCheckpoint`, `Validate`, `CreateIndex`, `DropIndex`; registered in `GqlServer::builder()`
-- **gwp SearchService** (gRPC): 3 RPCs — `VectorSearch`, `TextSearch`, `HybridSearch` with filter support; registered in `GqlServer::builder()`
-- **grafeo-gwp backend**: implemented all 10 admin/search trait methods in `GrafeoBackend`, converting between service types and gwp proto types
-- **14 new integration tests**: 10 HTTP (admin stats, not-found, WAL status, WAL checkpoint, validate, create/drop index, stats after insertion, OpenAPI paths, search vector/text error handling) + 4 GWP (admin stats, WAL status, validate, create/drop index via raw tonic proto clients)
-- **OpenAPI**: admin and search endpoints fully documented with schemas (`DatabaseStats`, `WalStatusInfo`, `ValidationInfo`, `IndexDef`, `VectorSearchReq`, `TextSearchReq`, `HybridSearchReq`, `SearchHit`, `SearchResponse`) and "Admin" / "Search" tags
+- **Admin endpoints** (HTTP + GWP): database introspection, maintenance, and index management via both REST and gRPC.
+  - `GET /admin/{db}/stats`: detailed database statistics (node/edge/label/property counts, memory, disk usage).
+  - `GET /admin/{db}/wal`: WAL status (enabled, path, size, record count, epoch).
+  - `POST /admin/{db}/wal/checkpoint`: force WAL checkpoint (flush pending records to storage).
+  - `GET /admin/{db}/validate`: database integrity validation (dangling edges, index consistency).
+  - `POST /admin/{db}/index`: create property, vector, or text index.
+  - `DELETE /admin/{db}/index`: drop property, vector, or text index.
+- **Search endpoints** (HTTP + GWP): vector, text, and hybrid search via both REST and gRPC.
+  - `POST /search/vector`: KNN vector similarity search via HNSW index (feature: `vector-index`).
+  - `POST /search/text`: full-text BM25 search (feature: `text-index`).
+  - `POST /search/hybrid`: combined vector + text search with rank fusion (feature: `hybrid-search`).
+- **grafeo-service admin module** (`admin.rs`): transport-agnostic `AdminService` with 6 operations (database_stats, wal_status, wal_checkpoint, validate, create_index, drop_index) and 7 unit tests.
+- **grafeo-service search module** (`search.rs`): transport-agnostic `SearchService` with 3 operations (vector_search, text_search, hybrid_search); feature-gated with stub fallbacks when features are disabled.
+- **gwp AdminService** (gRPC): 6 RPCs: `GetDatabaseStats`, `WalStatus`, `WalCheckpoint`, `Validate`, `CreateIndex`, `DropIndex`; registered in `GqlServer::builder()`.
+- **gwp SearchService** (gRPC): 3 RPCs: `VectorSearch`, `TextSearch`, `HybridSearch` with filter support; registered in `GqlServer::builder()`.
+- **grafeo-gwp backend**: implemented all 10 admin/search trait methods in `GrafeoBackend`, converting between service types and gwp proto types.
+- **14 new integration tests**: 10 HTTP (admin stats, not-found, WAL status, WAL checkpoint, validate, create/drop index, stats after insertion, OpenAPI paths, search vector/text error handling) + 4 GWP (admin stats, WAL status, validate, create/drop index via raw tonic proto clients).
+- **OpenAPI**: admin and search endpoints fully documented with schemas (`DatabaseStats`, `WalStatusInfo`, `ValidationInfo`, `IndexDef`, `VectorSearchReq`, `TextSearchReq`, `HybridSearchReq`, `SearchHit`, `SearchResponse`) and "Admin" / "Search" tags.
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to 0.5.7
-- Bumped gwp to 0.1.5 (adds AdminService and SearchService gRPC definitions)
-- Added `algos` feature flag forwarding for graph algorithm procedures (CALL procedures now require the `algos` feature, enabled by default and in `full` tier)
-- 132 total tests (94 integration + 20 grafeo-service unit + 9 grafeo-gwp + 9 grafeo-http)
+- Added `algos` feature flag forwarding for graph algorithm procedures (CALL procedures now require the `algos` feature, enabled by default and in `full` tier).
+- 132 total tests (94 integration + 20 grafeo-service unit + 9 grafeo-gwp + 9 grafeo-http).
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to 0.5.7.
+- Bumped gwp to 0.1.5 (adds AdminService and SearchService gRPC definitions).
 
 ## [0.4.2] - 2026-02-18
 
 ### Changed
 
-- Bumped grafeo-engine and grafeo-common to 0.5.6 (UNWIND/FOR clauses, SSSP procedure, full node/edge maps in RETURN, UTF-8 lexer fix, embedding model config, text index sync, SPARQL COPY/MOVE/ADD, performance improvements)
-- Bumped gwp to 0.1.4 and migrated to builder pattern (`GqlServer::builder()`)
-- **GWP TLS**: when `tls` feature is enabled, GWP (gRPC) server uses the same `--tls-cert`/`--tls-key` files as HTTP for encrypted transport
-- **GWP authentication**: when `auth` feature is enabled, GWP handshake validates credentials using the same `--auth-token`/`--auth-user`/`--auth-password` as HTTP via a `GwpAuthValidator` adapter
-- **GWP idle timeout**: GWP sessions are automatically reaped after `--session-ttl` seconds of inactivity (previously only HTTP sessions had TTL cleanup)
-- **GWP max sessions**: `--gwp-max-sessions` CLI flag / `GRAFEO_GWP_MAX_SESSIONS` env var limits concurrent GWP sessions; new handshakes rejected with `RESOURCE_EXHAUSTED` when limit is reached (default: 0 = unlimited)
-- **GWP graceful shutdown**: Ctrl-C now drains in-flight gRPC requests, stops the idle session reaper, and awaits GWP task completion before process exit (previously the GWP task was dropped without draining)
-- **GWP health check**: `grpc.health.v1.Health` service served automatically on the GWP port via `tonic-health`
-- **GWP tracing**: structured `tracing` spans and events on all gRPC methods, including session lifecycle, query execution, transactions, and database operations
-- `AuthProvider` now derives `Clone` for cross-transport sharing
-- `grafeo-gwp` crate now has `tls` and `auth` feature flags, forwarded from the workspace `tls`/`auth` features
+- **GWP TLS**: when `tls` feature is enabled, GWP (gRPC) server uses the same `--tls-cert`/`--tls-key` files as HTTP for encrypted transport.
+- **GWP authentication**: when `auth` feature is enabled, GWP handshake validates credentials using the same `--auth-token`/`--auth-user`/`--auth-password` as HTTP via a `GwpAuthValidator` adapter.
+- **GWP idle timeout**: GWP sessions are automatically reaped after `--session-ttl` seconds of inactivity (previously only HTTP sessions had TTL cleanup).
+- **GWP max sessions**: `--gwp-max-sessions` CLI flag / `GRAFEO_GWP_MAX_SESSIONS` env var limits concurrent GWP sessions; new handshakes rejected with `RESOURCE_EXHAUSTED` when limit is reached (default: 0 = unlimited).
+- **GWP graceful shutdown**: Ctrl-C now drains in-flight gRPC requests, stops the idle session reaper, and awaits GWP task completion before process exit (previously the GWP task was dropped without draining).
+- **GWP health check**: `grpc.health.v1.Health` service served automatically on the GWP port via `tonic-health`.
+- **GWP tracing**: structured `tracing` spans and events on all gRPC methods, including session lifecycle, query execution, transactions, and database operations.
+- `AuthProvider` now derives `Clone` for cross-transport sharing.
+- `grafeo-gwp` crate now has `tls` and `auth` feature flags, forwarded from the workspace `tls`/`auth` features.
+
+### Dependencies
+
+- Bumped grafeo-engine and grafeo-common to 0.5.6 (UNWIND/FOR clauses, SSSP procedure, full node/edge maps in RETURN, UTF-8 lexer fix, embedding model config, text index sync, SPARQL COPY/MOVE/ADD, performance improvements).
+- Bumped gwp to 0.1.4 and migrated to builder pattern (`GqlServer::builder()`).
 
 ## [0.4.1] - 2026-02-16
 
 ### Added
 
-- **Result streaming**: query responses are now encoded and sent incrementally in batches of 1000 rows, reducing peak memory from O(rows x json_size) to O(batch_size x json_size) for the encoded output
-  - `RowBatchIter` in `grafeo-service`: transport-agnostic row-batch iterator with `QueryResultExt` extension trait and `DEFAULT_BATCH_SIZE` constant
-  - `StreamingQueryBody` in `grafeo-http`: `Stream` implementation producing chunked JSON byte-identical to the previous materialized `QueryResponse` serialization
-  - Lazy `GrafeoResultStream` in `grafeo-gwp`: state-machine replacing the pre-built `Vec<ResultFrame>` — large results now produce multiple `Batch` frames (e.g., 2500 rows = 3 batches instead of 1)
-- **13 new streaming unit tests**: grafeo-service (7: empty, exact multiple, partial final, larger-than-rows, size_hint, remaining, zero-floors-to-one), grafeo-http (3: empty JSON, materialized equality, multi-chunk), grafeo-gwp (3: empty frames, single batch, multi-batch)
-- **8 GWP integration tests**: database lifecycle via GWP client — list, create, delete, get_info, query after create, delete-then-recreate, duplicate error, configure-after-delete error
-- **18 per-crate unit tests**: grafeo-service (6: database CRUD, name validation, metrics, language mapping), grafeo-http (6: value encoding, query response, param conversion), grafeo-gwp (6: value conversion, roundtrip, unsupported types)
-- **Per-crate CI job**: matrix job in `ci.yml` running `cargo test -p <crate>` independently for grafeo-service, grafeo-http, grafeo-gwp
-
-### Fixed
-
-- **Engine close barrier**: `DatabaseManager::delete()` now explicitly drops the `Arc<DatabaseEntry>` after `close()` to ensure engine resources are fully released before filesystem cleanup
-- **Create-after-delete retry**: `DatabaseManager::create()` retries engine creation with 50ms backoff when resource contention is detected after a recent delete
-- **`gwp_health_reports_gwp_feature` test**: `spawn_server_with_gwp()` now populates `EnabledFeatures` with `"gwp"` server feature (was empty, causing health check to report no GWP)
+- **Result streaming**: query responses are now encoded and sent incrementally in batches of 1000 rows, reducing peak memory from O(rows x json_size) to O(batch_size x json_size) for the encoded output.
+  - `RowBatchIter` in `grafeo-service`: transport-agnostic row-batch iterator with `QueryResultExt` extension trait and `DEFAULT_BATCH_SIZE` constant.
+  - `StreamingQueryBody` in `grafeo-http`: `Stream` implementation producing chunked JSON byte-identical to the previous materialized `QueryResponse` serialization.
+  - Lazy `GrafeoResultStream` in `grafeo-gwp`: state-machine replacing the pre-built `Vec<ResultFrame>`; large results now produce multiple `Batch` frames (e.g., 2500 rows = 3 batches instead of 1).
+- **13 new streaming unit tests**: grafeo-service (7: empty, exact multiple, partial final, larger-than-rows, size_hint, remaining, zero-floors-to-one), grafeo-http (3: empty JSON, materialized equality, multi-chunk), grafeo-gwp (3: empty frames, single batch, multi-batch).
+- **8 GWP integration tests**: database lifecycle via GWP client: list, create, delete, get_info, query after create, delete-then-recreate, duplicate error, configure-after-delete error.
+- **18 per-crate unit tests**: grafeo-service (6: database CRUD, name validation, metrics, language mapping), grafeo-http (6: value encoding, query response, param conversion), grafeo-gwp (6: value conversion, roundtrip, unsupported types).
+- **Per-crate CI job**: matrix job in `ci.yml` running `cargo test -p <crate>` independently for grafeo-service, grafeo-http, grafeo-gwp.
 
 ### Changed
 
-- All query endpoints (`/query`, `/cypher`, `/graphql`, `/gremlin`, `/sparql`, `/sql`, `/tx/query`) now return streaming `Response<Body>` instead of `Json<QueryResponse>`; HTTP JSON format is unchanged (backward compatible)
-- Batch (`/batch`) and WebSocket (`/ws`) endpoints remain materialized (deferred)
-- per-crate unit tests amd seperste integrstion tests
+- All query endpoints (`/query`, `/cypher`, `/graphql`, `/gremlin`, `/sparql`, `/sql`, `/tx/query`) now return streaming `Response<Body>` instead of `Json<QueryResponse>`; HTTP JSON format is unchanged (backward compatible).
+- Batch (`/batch`) and WebSocket (`/ws`) endpoints remain materialized (deferred).
+- Per-crate unit tests and separate integration tests.
+
+### Fixed
+
+- **Engine close barrier**: `DatabaseManager::delete()` now explicitly drops the `Arc<DatabaseEntry>` after `close()` to ensure engine resources are fully released before filesystem cleanup.
+- **Create-after-delete retry**: `DatabaseManager::create()` retries engine creation with 50ms backoff when resource contention is detected after a recent delete.
+- **`gwp_health_reports_gwp_feature` test**: `spawn_server_with_gwp()` now populates `EnabledFeatures` with `"gwp"` server feature (was empty, causing health check to report no GWP).
 
 ## [0.4.0] - 2026-02-15
 
@@ -668,148 +723,162 @@ the independent 0.4.x series and makes compatibility immediately obvious.
   - `grafeo-gwp`: GQL Wire Protocol transport adapter: `GqlBackend` impl, value encoding, gRPC serving. Takes `ServiceState` directly (no HTTP dependency).
   - `grafeo-studio`: embedded web UI: rust-embed static file serving, SPA routing. Independent of transport layer.
   - `grafeo-bolt`: placeholder for future Bolt v5 wire protocol (Neo4j driver compatibility).
-- **Root binary crate** reduced to 3 files: `main.rs` (transport composition), `config.rs` (CLI), `lib.rs` (re-exports for tests)
-- **`EnabledFeatures`** moved from compile-time `cfg!()` checks in HTTP routes to a data struct populated by the binary crate and passed through `AppState`; eliminates phantom feature flags on library crates
-- **`GrafeoBackend`** now takes `ServiceState` directly instead of `AppState`, fully decoupling GWP from HTTP
-- **`grafeo_http::serve()`** convenience function wraps `axum::serve` with `ConnectInfo<SocketAddr>`; binary crate no longer depends on axum directly
-- Version bumped to 0.4.0
-- `gwp` dependency updated to 0.1.2, `tonic` updated to 0.14, grafeo-engine/common updated to 0.5.4
-- 59 integration tests (renumbered after workspace refactor)
+- **Root binary crate** reduced to 3 files: `main.rs` (transport composition), `config.rs` (CLI), `lib.rs` (re-exports for tests).
+- **`EnabledFeatures`** moved from compile-time `cfg!()` checks in HTTP routes to a data struct populated by the binary crate and passed through `AppState`; eliminates phantom feature flags on library crates.
+- **`GrafeoBackend`** now takes `ServiceState` directly instead of `AppState`, fully decoupling GWP from HTTP.
+- **`grafeo_http::serve()`** convenience function wraps `axum::serve` with `ConnectInfo<SocketAddr>`; binary crate no longer depends on axum directly.
+- Version bumped to 0.4.0.
+- 59 integration tests (renumbered after workspace refactor).
+
+### Dependencies
+
+- `gwp` dependency updated to 0.1.2, `tonic` updated to 0.14, grafeo-engine/common updated to 0.5.4.
 
 ## [0.3.0] - 2026-02-14
 
 ### Added
 
-- **GQL Wire Protocol (GWP)**: binary gRPC wire protocol on port 7687 (feature-gated: `gwp`, default on)
-  - Full `GqlBackend` implementation bridging `gwp` crate to grafeo-engine
-  - Persistent sessions with database switching via `SessionProperty::Graph`
-  - Bidirectional value conversion between `grafeo_common::Value` and `gwp::types::Value`
-  - Streaming `ResultStream` with header, row batch, and summary frames
-  - Transaction support (begin, commit, rollback) via `spawn_blocking`
-  - `--gwp-port` CLI flag / `GRAFEO_GWP_PORT` env var (default: 7687)
-- **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection
-- **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`
-- **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI, lightweight image for microservices
-- **4 Docker variants**: lite, gwp, standard (default), full
+- **GQL Wire Protocol (GWP)**: binary gRPC wire protocol on port 7687 (feature-gated: `gwp`, default on).
+  - Full `GqlBackend` implementation bridging `gwp` crate to grafeo-engine.
+  - Persistent sessions with database switching via `SessionProperty::Graph`.
+  - Bidirectional value conversion between `grafeo_common::Value` and `gwp::types::Value`.
+  - Streaming `ResultStream` with header, row batch, and summary frames.
+  - Transaction support (begin, commit, rollback) via `spawn_blocking`.
+  - `--gwp-port` CLI flag / `GRAFEO_GWP_PORT` env var (default: 7687).
+- **4 new integration tests**: GWP session lifecycle, query execution, transaction commit, health feature detection.
+- **Dual-port serving**: HTTP on :7474 + GWP (gRPC) on :7687, sharing the same `AppState`.
+- **`gwp` Docker variant**: GQL-only + GWP wire protocol, no UI, lightweight image for microservices.
+- **4 Docker variants**: lite, gwp, standard (default), full.
 
 ### Changed
 
 - GWP is introduced as an opt-in protocol alongside HTTP in this release. Once stability is proven, GWP will become the standard protocol from 0.4.x onwards, with the `gwp` Docker variant promoted to the recommended deployment for wire-protocol clients.
+- Bumped version to 0.3.0.
+- `gwp` added to default features and `full` preset.
+- `/health` endpoint now reports `"gwp"` in server features.
+- Dockerfile exposes both ports 7474 and 7687.
+- 63 integration tests total (4 new GWP tests).
 
-- Bumped version to 0.3.0
-- `gwp` added to default features and `full` preset
-- `/health` endpoint now reports `"gwp"` in server features
-- Dockerfile exposes both ports 7474 and 7687
-- New dependencies: `gwp` 0.1, `tonic` 0.12 (both feature-gated)
-- 63 integration tests total (4 new GWP tests)
+### Dependencies
+
+- New dependencies: `gwp` 0.1, `tonic` 0.12 (both feature-gated).
 
 ## [0.2.4] - 2026-02-13
 
 ### Added
 
-- **CALL procedure support**: 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.) accessible via `CALL grafeo.<algorithm>() YIELD ...` through all query endpoints
-- **`POST /sql` endpoint**: SQL/PGQ convenience endpoint for Property Graph Queries with graph pattern matching and CALL procedures
-- **SQL/PGQ language dispatch**: `language: "sql-pgq"` supported in `/query` and `/batch` endpoints
-- **SQL/PGQ metrics tracking**: per-language Prometheus counters for `sql-pgq` queries
-- **8 new integration tests**: CALL procedure listing, PageRank via GQL, WCC via Cypher, unknown procedure error, SQL/PGQ endpoint, language field dispatch, OpenAPI path, metrics tracking
+- **CALL procedure support**: 22+ built-in graph algorithms (PageRank, BFS, WCC, Dijkstra, Louvain, etc.) accessible via `CALL grafeo.<algorithm>() YIELD ...` through all query endpoints.
+- **`POST /sql` endpoint**: SQL/PGQ convenience endpoint for Property Graph Queries with graph pattern matching and CALL procedures.
+- **SQL/PGQ language dispatch**: `language: "sql-pgq"` supported in `/query` and `/batch` endpoints.
+- **SQL/PGQ metrics tracking**: per-language Prometheus counters for `sql-pgq` queries.
+- **8 new integration tests**: CALL procedure listing, PageRank via GQL, WCC via Cypher, unknown procedure error, SQL/PGQ endpoint, language field dispatch, OpenAPI path, metrics tracking.
 
 ### Changed
 
-- Bumped grafeo-engine to 0.5.3, grafeo-common to 0.5.3
-- OpenAPI description updated to mention SQL/PGQ and CALL procedures
-- 68 integration tests total
+- OpenAPI description updated to mention SQL/PGQ and CALL procedures.
+- 68 integration tests total.
+
+### Dependencies
+
+- Bumped grafeo-engine to 0.5.3, grafeo-common to 0.5.3.
 
 ## [0.2.3] - 2026-02-12
 
 ### Fixed
 
-- **Docker `full` build**: added `g++` and `cmake` to builder stage for native C++ dependencies (`onig_sys`, `aws-lc-sys`, `ort_sys`) that require `libstdc++` at link time
+- **Docker `full` build**: added `g++` and `cmake` to builder stage for native C++ dependencies (`onig_sys`, `aws-lc-sys`, `ort_sys`) that require `libstdc++` at link time.
 
 ## [0.2.2] - 2026-02-12
 
 ### Added
 
-- **Multi-variant Docker images**: three build targets: `lite` (no UI, GQL + storage only), `standard` (with UI, default features), and `full` (with UI, all features including auth and TLS)
-- **Docker build fix**: corrected `Dockerfile.dockerignore` paths for current build context (was referencing parent-directory layout)
+- **Multi-variant Docker images**: three build targets: `lite` (no UI, GQL + storage only), `standard` (with UI, default features), and `full` (with UI, all features including auth and TLS).
+- **Docker build fix**: corrected `Dockerfile.dockerignore` paths for current build context (was referencing parent-directory layout).
 
 ## [0.2.1] - 2026-02-11
 
 ### Added
 
-- **Feature flags**: Cargo features for optional functionality: `auth`, `tls`, `json-schema`, `full` (enables all)
-- **Authentication** (feature: `auth`): bearer token (`Authorization: Bearer <token>` / `X-API-Key`), HTTP Basic auth, constant-time comparison via `subtle`; `/health`, `/metrics`, and `/studio/` exempt from auth
-- **Rate limiting**: per-IP fixed-window rate limiter with configurable max requests and window duration; `X-Forwarded-For` aware; background cleanup of stale entries
-- **Structured logging**: `--log-format json` option for machine-parseable structured log output alongside the default human-readable `pretty` format
-- **Batch query endpoint**: `POST /batch` executes multiple queries in a single request within an implicit transaction; atomic rollback on any failure
-- **WebSocket streaming**: `GET /ws` for interactive query execution over persistent connections; JSON-tagged protocol with query, result, error, ping/pong message types; request correlation via optional `id` field
-- **TLS support** (feature: `tls`): built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware
-- **CORS hardening**: deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning
-- **Request ID tracking**: `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID
-- **Apache-2.0 LICENSE file**
-- **9 new integration tests**: WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests
+- **Feature flags**: Cargo features for optional functionality: `auth`, `tls`, `json-schema`, `full` (enables all).
+- **Authentication** (feature: `auth`): bearer token (`Authorization: Bearer <token>` / `X-API-Key`), HTTP Basic auth, constant-time comparison via `subtle`; `/health`, `/metrics`, and `/studio/` exempt from auth.
+- **Rate limiting**: per-IP fixed-window rate limiter with configurable max requests and window duration; `X-Forwarded-For` aware; background cleanup of stale entries.
+- **Structured logging**: `--log-format json` option for machine-parseable structured log output alongside the default human-readable `pretty` format.
+- **Batch query endpoint**: `POST /batch` executes multiple queries in a single request within an implicit transaction; atomic rollback on any failure.
+- **WebSocket streaming**: `GET /ws` for interactive query execution over persistent connections; JSON-tagged protocol with query, result, error, ping/pong message types; request correlation via optional `id` field.
+- **TLS support** (feature: `tls`): built-in HTTPS via `rustls` with `--tls-cert` and `--tls-key` CLI options; ring crypto provider; manual accept loop preserving `ConnectInfo` for IP-based middleware.
+- **CORS hardening**: deny cross-origin by default (no headers sent); explicit opt-in via `--cors-origins`; wildcard `"*"` supported with warning.
+- **Request ID tracking**: `X-Request-Id` header on all responses; echoes client-provided ID or generates a UUID.
+- **Apache-2.0 LICENSE file**.
+- **9 new integration tests**: WebSocket query, ping/pong, bad message, auth-required WebSocket; rate limiting enforcement and disabled-when-zero; batch query tests.
 
 ### Changed
 
-- **Route modularization**: split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`
-- **TRY DRY**: consolidated 4 near-identical query handlers into shared `execute_auto_commit`; inlined single-use batch helper; removed dead `contains` guard in system resources; extracted `total_active_sessions()` to `DatabaseManager`
-- **Build-time engine version**: `build.rs` extracts grafeo-engine version from `Cargo.lock` at compile time (`GRAFEO_ENGINE_VERSION` env var), eliminating hardcoded version strings
-- Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]`; `json-schema` now opt-in
-- Authentication is now feature-gated behind `auth`; users who don't need auth get a simpler build
-- `--cors-origins` default changed from allowing the dev server origin to denying all cross-origin requests
-- New dependencies: `futures-util` (WebSocket streams)
-- New optional dependencies: `subtle` (auth), `tokio-rustls`, `rustls`, `rustls-pemfile`, `hyper`, `hyper-util` (TLS)
-- New dev dependencies: `tokio-tungstenite` (WebSocket tests)
-- 60 integration tests total (with `--features auth`), 51 without auth
+- **Route modularization**: split monolithic `routes.rs` into `routes/query.rs`, `routes/transaction.rs`, `routes/database.rs`, `routes/batch.rs`, `routes/system.rs`, `routes/websocket.rs`, `routes/helpers.rs`, `routes/types.rs`.
+- **TRY DRY**: consolidated 4 near-identical query handlers into shared `execute_auto_commit`; inlined single-use batch helper; removed dead `contains` guard in system resources; extracted `total_active_sessions()` to `DatabaseManager`.
+- **Build-time engine version**: `build.rs` extracts grafeo-engine version from `Cargo.lock` at compile time (`GRAFEO_ENGINE_VERSION` env var), eliminating hardcoded version strings.
+- Default features changed from `["owl-schema", "rdfs-schema", "json-schema"]` to `["owl-schema", "rdfs-schema"]`; `json-schema` now opt-in.
+- Authentication is now feature-gated behind `auth`; users who don't need auth get a simpler build.
+- `--cors-origins` default changed from allowing the dev server origin to denying all cross-origin requests.
+- 60 integration tests total (with `--features auth`), 51 without auth.
+
+### Dependencies
+
+- New dependencies: `futures-util` (WebSocket streams).
+- New optional dependencies: `subtle` (auth), `tokio-rustls`, `rustls`, `rustls-pemfile`, `hyper`, `hyper-util` (TLS).
+- New dev dependencies: `tokio-tungstenite` (WebSocket tests).
 
 ## [0.2.0] - 2026-02-08
 
 ### Added
 
-- **Database creation options**: `POST /db` now accepts `database_type`, `storage_mode`, `options`, `schema_file`, and `schema_filename` fields
-- **Database types**: LPG (default), RDF, OWL Schema, RDFS Schema, JSON Schema
-- **Storage mode**: per-database in-memory or persistent (mixed mode supported)
-- **Resource configuration**: memory limit, WAL durability mode, backward edges toggle, thread count
-- **Schema file uploads**: base64-encoded OWL/RDFS/JSON Schema files parsed and loaded on creation (feature-gated: `owl-schema`, `rdfs-schema`, `json-schema`)
-- **`GET /system/resources` endpoint**: returns system RAM, allocated memory, available disk, compiled database types, and resource defaults
-- **`DatabaseMetadata`**: creation-time metadata stored alongside each database entry
-- **Studio UI: CreateDatabaseDialog**: full-form modal with database type radio group, storage mode toggle, memory slider, WAL/durability controls, backward edges toggle, thread selector, and schema file upload
-- **Studio UI: database type badges**: non-LPG databases show a type badge (RDF, OWL, RDFS, JSON) in the sidebar list
-- **9 new integration tests**: database creation with options, RDF database creation, persistent rejection without data-dir, system resources endpoint, resource allocation tracking, database info metadata, WAL durability options, invalid durability validation, OpenAPI path verification
+- **Database creation options**: `POST /db` now accepts `database_type`, `storage_mode`, `options`, `schema_file`, and `schema_filename` fields.
+- **Database types**: LPG (default), RDF, OWL Schema, RDFS Schema, JSON Schema.
+- **Storage mode**: per-database in-memory or persistent (mixed mode supported).
+- **Resource configuration**: memory limit, WAL durability mode, backward edges toggle, thread count.
+- **Schema file uploads**: base64-encoded OWL/RDFS/JSON Schema files parsed and loaded on creation (feature-gated: `owl-schema`, `rdfs-schema`, `json-schema`).
+- **`GET /system/resources` endpoint**: returns system RAM, allocated memory, available disk, compiled database types, and resource defaults.
+- **`DatabaseMetadata`**: creation-time metadata stored alongside each database entry.
+- **Studio UI: CreateDatabaseDialog**: full-form modal with database type radio group, storage mode toggle, memory slider, WAL/durability controls, backward edges toggle, thread selector, and schema file upload.
+- **Studio UI: database type badges**: non-LPG databases show a type badge (RDF, OWL, RDFS, JSON) in the sidebar list.
+- **9 new integration tests**: database creation with options, RDF database creation, persistent rejection without data-dir, system resources endpoint, resource allocation tracking, database info metadata, WAL durability options, invalid durability validation, OpenAPI path verification.
 
 ### Changed
 
-- Bumped grafeo-engine to 0.4.3, grafeo-common to 0.4.3
-- `DatabaseSummary` response now includes `database_type` field
-- `DatabaseInfoResponse` now includes `database_type`, `storage_mode`, `memory_limit_bytes`, `backward_edges`, `threads` fields
-- DatabasePanel sidebar replaced inline name+create input with "New Database" button opening CreateDatabaseDialog
-- New dependencies: `sysinfo` (system resource detection), `base64` (schema file decoding)
-- Optional dependencies: `sophia_turtle`, `sophia_api`, `sophia_inmem` (OWL/RDFS parsing), `jsonschema` (JSON Schema validation)
+- `DatabaseSummary` response now includes `database_type` field.
+- `DatabaseInfoResponse` now includes `database_type`, `storage_mode`, `memory_limit_bytes`, `backward_edges`, `threads` fields.
+- DatabasePanel sidebar replaced inline name+create input with "New Database" button opening CreateDatabaseDialog.
+
+### Dependencies
+
+- Bumped grafeo-engine to 0.4.3, grafeo-common to 0.4.3.
+- New dependencies: `sysinfo` (system resource detection), `base64` (schema file decoding).
+- Optional dependencies: `sophia_turtle`, `sophia_api`, `sophia_inmem` (OWL/RDFS parsing), `jsonschema` (JSON Schema validation).
 
 ## [0.1.2] - 2026-02-07
 
-### Fixed
-
-- Docker publish workflow tag extraction
-
 ### Changed
 
-- Version bump for Docker Hub publish retry
+- Version bump for Docker Hub publish retry.
+
+### Fixed
+
+- Docker publish workflow tag extraction.
 
 ## [0.1.1] - 2026-02-07
 
-### Fixed
-
-- Switched from path dependencies to crates.io versions (grafeo-engine 0.4.0, grafeo-common 0.4.0)
-- Dockerfile updated to work without engine source in build context
-- ESLint config added for client (`client/eslint.config.js`)
-- Rust build and clippy lint fixes
-- Code formatting (`cargo fmt`)
-
 ### Changed
 
-- Improved metrics module with expanded Prometheus-compatible output
-- Refined error types and auth middleware
-- Updated integration tests for multi-database support
+- Improved metrics module with expanded Prometheus-compatible output.
+- Refined error types and auth middleware.
+- Updated integration tests for multi-database support.
+
+### Fixed
+
+- Switched from path dependencies to crates.io versions (grafeo-engine 0.4.0, grafeo-common 0.4.0).
+- Dockerfile updated to work without engine source in build context.
+- ESLint config added for client (`client/eslint.config.js`).
+- Rust build and clippy lint fixes.
+- Code formatting (`cargo fmt`).
 
 ## [0.1.0] - 2026-02-07
 
@@ -817,71 +886,53 @@ Initial release.
 
 ### Added
 
-- **HTTP API** (axum) with JSON request/response on port 7474
-  - `POST /query`: auto-commit query execution
-  - `POST /cypher`: Cypher convenience endpoint
-  - `POST /graphql`: GraphQL convenience endpoint
-  - `POST /gremlin`: Gremlin convenience endpoint
-  - `POST /sparql`: SPARQL convenience endpoint
-  - `POST /tx/begin`, `/tx/query`, `/tx/commit`, `/tx/rollback`: explicit transactions via `X-Session-Id` header
-  - `GET /health`: server health check with version and uptime
-  - `GET /metrics`: Prometheus-compatible metrics endpoint
-- **Multi-database support**
-  - `GET /db`: list all databases
-  - `POST /db`: create a named database
-  - `DELETE /db/{name}`: delete a database
-  - `GET /db/{name}`: database info
-  - `GET /db/{name}/stats`: detailed statistics (memory, disk, counts)
-  - `GET /db/{name}/schema`: labels, edge types, property keys
-  - Default database always exists and cannot be deleted
-  - Persistent mode auto-discovers existing databases on startup
-  - Migration from single-file to multi-database directory layout
-- **Multi-language query dispatch**: GQL (default), Cypher, GraphQL, Gremlin, SPARQL
-- **Session management**: DashMap-based concurrent session registry with configurable TTL and background cleanup
-- **Bearer token authentication**: optional `GRAFEO_AUTH_TOKEN` env var, exempt endpoints (`/health`, `/studio/`)
-- **Per-query timeouts**: global `GRAFEO_QUERY_TIMEOUT` with per-request override via `timeout_ms`
-- **Request ID tracking**: `X-Request-Id` header on all responses
-- **Embedded web UI** (rust-embed) at `/studio/`
-  - CodeMirror 6 query editor with multi-language syntax highlighting
-  - Tabbed query sessions with history
-  - Table view for query results
-  - Graph visualization (Sigma.js + Graphology) with force-directed layout
-  - Node detail panel for inspecting properties
-  - Database sidebar with create/delete/select
-  - Keyboard shortcuts with help overlay
-  - Status bar with connection info and timing
-- **OpenAPI documentation** (utoipa + Swagger UI) at `/api/docs/`
-- **Configuration** via CLI args and `GRAFEO_*` environment variables
-  - `--host`, `--port`, `--data-dir`, `--session-ttl`, `--cors-origins`, `--query-timeout`, `--auth-token`, `--log-level`
-- **Docker support**
-  - 3-stage Dockerfile: Node (UI build) -> Rust (binary build) -> debian-slim (runtime)
-  - Multi-arch images (amd64, arm64) published to Docker Hub
-  - docker-compose.yml for quick start
-- **CI/CD** (GitHub Actions)
-  - `ci.yml`: fmt, clippy, docs, test (3 OS), security audit, client lint/build, Docker build
-  - `publish.yml`: Docker Hub publish on `v*` tags
-- **Pre-commit hooks** (prek): fmt, clippy, deny, typos
-- **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth
+- **HTTP API** (axum) with JSON request/response on port 7474.
+  - `POST /query`: auto-commit query execution.
+  - `POST /cypher`: Cypher convenience endpoint.
+  - `POST /graphql`: GraphQL convenience endpoint.
+  - `POST /gremlin`: Gremlin convenience endpoint.
+  - `POST /sparql`: SPARQL convenience endpoint.
+  - `POST /tx/begin`, `/tx/query`, `/tx/commit`, `/tx/rollback`: explicit transactions via `X-Session-Id` header.
+  - `GET /health`: server health check with version and uptime.
+  - `GET /metrics`: Prometheus-compatible metrics endpoint.
+- **Multi-database support**.
+  - `GET /db`: list all databases.
+  - `POST /db`: create a named database.
+  - `DELETE /db/{name}`: delete a database.
+  - `GET /db/{name}`: database info.
+  - `GET /db/{name}/stats`: detailed statistics (memory, disk, counts).
+  - `GET /db/{name}/schema`: labels, edge types, property keys.
+  - Default database always exists and cannot be deleted.
+  - Persistent mode auto-discovers existing databases on startup.
+  - Migration from single-file to multi-database directory layout.
+- **Multi-language query dispatch**: GQL (default), Cypher, GraphQL, Gremlin, SPARQL.
+- **Session management**: DashMap-based concurrent session registry with configurable TTL and background cleanup.
+- **Bearer token authentication**: optional `GRAFEO_AUTH_TOKEN` env var, exempt endpoints (`/health`, `/studio/`).
+- **Per-query timeouts**: global `GRAFEO_QUERY_TIMEOUT` with per-request override via `timeout_ms`.
+- **Request ID tracking**: `X-Request-Id` header on all responses.
+- **Embedded web UI** (rust-embed) at `/studio/`.
+  - CodeMirror 6 query editor with multi-language syntax highlighting.
+  - Tabbed query sessions with history.
+  - Table view for query results.
+  - Graph visualization (Sigma.js + Graphology) with force-directed layout.
+  - Node detail panel for inspecting properties.
+  - Database sidebar with create/delete/select.
+  - Keyboard shortcuts with help overlay.
+  - Status bar with connection info and timing.
+- **OpenAPI documentation** (utoipa + Swagger UI) at `/api/docs/`.
+- **Configuration** via CLI args and `GRAFEO_*` environment variables.
+  - `--host`, `--port`, `--data-dir`, `--session-ttl`, `--cors-origins`, `--query-timeout`, `--auth-token`, `--log-level`.
+- **Docker support**.
+  - 3-stage Dockerfile: Node (UI build) -> Rust (binary build) -> debian-slim (runtime).
+  - Multi-arch images (amd64, arm64) published to Docker Hub.
+  - docker-compose.yml for quick start.
+- **CI/CD** (GitHub Actions).
+  - `ci.yml`: fmt, clippy, docs, test (3 OS), security audit, client lint/build, Docker build.
+  - `publish.yml`: Docker Hub publish on `v*` tags.
+- **Pre-commit hooks** (prek): fmt, clippy, deny, typos.
+- **Integration test suite**: health, query, Cypher, transactions, multi-database CRUD, error cases, UI redirect, auth.
 
-[Unreleased]: https://github.com/GrafeoDB/grafeo-server/compare/v0.5.30...HEAD
-[0.5.30]: https://github.com/GrafeoDB/grafeo-server/compare/v0.5.27...v0.5.30
-[0.5.27]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.9...v0.5.27
-[0.4.9]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.8...v0.4.9
-[0.4.8]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.7...v0.4.8
-[0.4.7]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.6...v0.4.7
-[0.4.6]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.5...v0.4.6
-[0.4.5]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.4...v0.4.5
-[0.4.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.3...v0.4.4
-[0.4.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.2...v0.4.3
-[0.4.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.4...v0.3.0
-[0.2.4]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.3...v0.2.4
-[0.2.3]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.2...v0.2.0
-[0.1.2]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/GrafeoDB/grafeo-server/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/GrafeoDB/grafeo-server/releases/tag/v0.1.0
+---
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
