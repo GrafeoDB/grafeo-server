@@ -23,6 +23,10 @@ services:
       - "primary"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
       - "17474:7474"
     networks:
@@ -45,6 +49,10 @@ services:
       - "http://primary:7474"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
       - "17475:7474"
     depends_on:
@@ -70,6 +78,10 @@ services:
       - "http://primary:7474"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
       - "17476:7474"
     depends_on:

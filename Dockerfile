@@ -9,11 +9,15 @@
 #
 # Default target (no --target) builds "standard".
 #
-# Tiers:
-#   gwp      — GWP (gRPC), GQL + storage, no HTTP/UI
-#   bolt     — Bolt v5, Cypher + storage, no HTTP/UI
-#   standard — HTTP + Studio UI + all languages + algos + storage (default)
-#   full     — HTTP + GWP + Bolt + Studio + AI + auth + TLS + schemas
+# Tiers (every one includes auth):
+#   gwp      : GWP (gRPC), GQL + storage, no HTTP/UI
+#   bolt     : Bolt v5, Cypher + storage, no HTTP/UI
+#   standard : HTTP + Studio UI + all languages + algos + storage (default)
+#   full     : HTTP + GWP + Bolt + Studio + AI + TLS + schemas
+#
+# The images listen on 0.0.0.0, so they refuse to start without credentials:
+# set GRAFEO_AUTH_TOKEN (or GRAFEO_AUTH_USER and GRAFEO_AUTH_PASSWORD), or
+# GRAFEO_ALLOW_UNAUTHENTICATED=true to accept unauthenticated access.
 # =============================================================================
 
 # --- Stage: Build the web UI ---
@@ -35,13 +39,13 @@ COPY src/ src/
 # --- Build: gwp (GWP-only, GQL + storage, no HTTP/UI) ---
 FROM rust-base AS build-gwp
 RUN mkdir -p client/dist && \
-    cargo build --release --no-default-features --features "gwp" && \
+    cargo build --release --no-default-features --features "gwp,auth" && \
     strip target/release/grafeo-server
 
 # --- Build: bolt (Bolt v5, Cypher + storage, no HTTP/UI) ---
 FROM rust-base AS build-bolt
 RUN mkdir -p client/dist && \
-    cargo build --release --no-default-features --features "bolt" && \
+    cargo build --release --no-default-features --features "bolt,auth" && \
     strip target/release/grafeo-server
 
 # --- Build: standard (HTTP + Studio UI, all languages, default features) ---

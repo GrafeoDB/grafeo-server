@@ -6,9 +6,15 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "grafeo-server", version, about)]
 pub struct Config {
-    /// Bind address.
-    #[arg(long, default_value = "0.0.0.0", env = "GRAFEO_HOST")]
+    /// Bind address for every transport. Loopback by default; a non-loopback
+    /// address needs credentials or --allow-unauthenticated.
+    #[arg(long, default_value = "127.0.0.1", env = "GRAFEO_HOST")]
     pub host: String,
+
+    /// Accept unauthenticated access on a non-loopback --host. Without it the
+    /// server refuses to start exposed with no credentials configured.
+    #[arg(long, default_value_t = false, env = "GRAFEO_ALLOW_UNAUTHENTICATED")]
+    pub allow_unauthenticated: bool,
 
     /// Bind port.
     #[arg(long, default_value_t = 7474, env = "GRAFEO_PORT")]
@@ -169,5 +175,29 @@ impl Config {
     /// Returns true if TLS is configured.
     pub fn tls_enabled(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Whether the server may start on `--host`: a loopback address always,
+    /// any other only with credentials configured (`has_credentials`) or
+    /// `--allow-unauthenticated`. The error says how to proceed.
+    pub fn check_exposure(&self, has_credentials: bool) -> Result<(), String> {
+        let host: std::net::IpAddr = self
+            .host
+            .parse()
+            .map_err(|_| format!("invalid --host '{}': expected an IP address", self.host))?;
+        if host.is_loopback() || has_credentials || self.allow_unauthenticated {
+            return Ok(());
+        }
+        let credentials = if cfg!(feature = "auth") {
+            "set --auth-token (or --auth-user and --auth-password)"
+        } else {
+            "use a build with the `auth` feature and set --auth-token"
+        };
+        Err(format!(
+            "refusing to listen on {host} without credentials: anyone who can reach it could \
+             read and change every database. To proceed, {credentials}, bind to 127.0.0.1, or \
+             pass --allow-unauthenticated (GRAFEO_ALLOW_UNAUTHENTICATED=true) to accept \
+             unauthenticated access"
+        ))
     }
 }

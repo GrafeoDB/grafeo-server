@@ -92,7 +92,7 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["lpg", "http", "gwp", "studio", "all-languages", "storage", "algos", "tracing"]
+default = ["lpg", "http", "gwp", "studio", "all-languages", "storage", "algos", "tracing", "auth"]
 
 # Transport layers
 http = ["dep:grafeo-http", "grafeo-service/openapi"]

@@ -68,6 +68,15 @@ async fn main() {
 
     let service = ServiceState::new(&service_config);
 
+    #[cfg(feature = "auth")]
+    let has_credentials = service.auth().is_some_and(|a| a.is_enabled());
+    #[cfg(not(feature = "auth"))]
+    let has_credentials = false;
+    if let Err(msg) = config.check_exposure(has_credentials) {
+        tracing::error!("{msg}");
+        std::process::exit(2);
+    }
+
     if config.read_only && config.data_dir.is_none() {
         tracing::warn!("Read-only mode has no effect without --data-dir");
     }
@@ -465,6 +474,8 @@ async fn shutdown_signal() {
 /// Waits up to `timeout_secs` for active sessions to complete, logging
 /// progress every 5 seconds. Any sessions still open after the timeout
 /// are force-removed (their transactions will be rolled back by drop).
+/// These are HTTP transaction sessions, so only HTTP builds have them.
+#[cfg(feature = "http")]
 async fn drain_sessions(service: &ServiceState, timeout_secs: u64) {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
