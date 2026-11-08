@@ -382,9 +382,12 @@ impl QueryService {
         // Only clone the statements when data-change auditing is on (the
         // default is off).
         let audit_statements: Option<Vec<String>> = audit.as_ref().and_then(|a| {
-            a.logger
-                .data_changes_enabled()
-                .then(|| queries.iter().map(|q| crate::audit::truncate(&q.statement, 500)).collect())
+            a.logger.data_changes_enabled().then(|| {
+                queries
+                    .iter()
+                    .map(|q| crate::audit::truncate(&q.statement, 500))
+                    .collect()
+            })
         });
         let audit_db = db_name.to_owned();
 
