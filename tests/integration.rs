@@ -3616,7 +3616,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
             "name": "spilled",
             "database_type": "Lpg",
             "storage_mode": "Persistent",
-            "options": { "section_tiers": { "VectorStore": "force_disk" } }
+            "options": { "section_tiers": { "VectorStore": "force_ram" } }
         }))
         .send()
         .await
