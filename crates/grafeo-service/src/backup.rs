@@ -2099,11 +2099,9 @@ mod tests {
 
     #[tokio::test]
     async fn restore_to_epoch_bad_chain_keeps_database_online() {
-        // A corrupt full backup that the epoch check accepts is copied into
-        // the staging file unvalidated, so the replay succeeds. The swap
-        // happens, the reopen of the corrupt file fails, the original files
-        // are put back and the recovery reopens them: the entry ends
-        // Available with the original data.
+        // Engine 0.6.2 checks a full backup's checksum on restore and refuses
+        // the damaged file before anything is written, so the live database
+        // is never touched: the entry ends Available with the original data.
         let data_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let mgr =
@@ -2132,9 +2130,10 @@ mod tests {
             BackupService::restore_to_epoch(&mgr, "default", backup.end_epoch, backup_dir.path())
                 .await;
         let err = result.expect_err("a corrupt chain must fail");
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("failed to reopen database"),
-            "unexpected error: {err}"
+            msg.contains("GRAFEO-S002") && msg.contains(&backup.filename),
+            "the error must name the damaged backup file: {msg}"
         );
 
         let entry = mgr.get("default").unwrap();

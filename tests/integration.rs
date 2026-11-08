@@ -23,12 +23,10 @@ async fn spawn_server() -> String {
 /// Use this when you need to seed the database before the server starts
 /// (e.g. to populate the CDC log via the direct API before testing sync).
 async fn spawn_server_from_state(state: grafeo_server::AppState) -> String {
-    let mut app = grafeo_server::router(state);
+    let app = grafeo_server::router(state);
 
     #[cfg(feature = "studio")]
-    {
-        app = grafeo_studio::router().merge(app);
-    }
+    let app = grafeo_studio::router().merge(app);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -3996,12 +3994,10 @@ async fn compact_not_found() {
 
 async fn spawn_read_only_server() -> String {
     let state = grafeo_server::AppState::new_in_memory_read_only(300);
-    let mut app = grafeo_server::router(state);
+    let app = grafeo_server::router(state);
 
     #[cfg(feature = "studio")]
-    {
-        app = grafeo_studio::router().merge(app);
-    }
+    let app = grafeo_studio::router().merge(app);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();

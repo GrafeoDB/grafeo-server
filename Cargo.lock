@@ -498,12 +498,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1390,25 +1384,19 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf2c7d2c464a48f234ead8627d49453f9659b8d2b47950fd8cad890797aef41"
+checksum = "ca11785dbcfd3f5c9c32475ab7722e3da0fdcbfbcb535dff98a245fc245f9145"
 dependencies = [
- "bincode",
  "grafeo-common",
  "grafeo-core",
- "hashbrown 0.17.1",
  "parking_lot 0.13.0",
  "rayon",
- "serde",
- "smallvec",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1424,42 +1412,41 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4e0f9d88086eddbe708976798f2523168b3d6a79b90d42356cb6b303b3eda2"
+checksum = "aa27dcea8a70c2ce83fc751c3022fb207a2b68066ce52364f60c081863026e59"
 dependencies = [
  "arcstr",
  "bincode",
  "bumpalo",
- "byteorder",
  "bytes",
  "dashmap",
  "foldhash 0.2.0",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
  "indexmap",
+ "libc",
  "parking_lot 0.13.0",
  "serde",
  "smallvec",
  "thiserror",
  "tracing",
  "web-time",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "grafeo-core"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08edb309160b8361170bc1d95879e8c59d103557b42b5edce3698566b765af31"
+checksum = "c6de07617c96d44d033929522946c2238a74210c07024f3ac14fab17d6263a22"
 dependencies = [
  "arcstr",
  "bincode",
- "byteorder",
  "bytes",
  "crc32fast",
  "crossbeam",
  "dashmap",
- "foldhash 0.2.0",
  "grafeo-common",
  "hashbrown 0.17.1",
  "indexmap",
@@ -1478,9 +1465,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b64c6a248ca38da1e9157e2411afdd1a77e2e2f04231fdeab705a87770e7971"
+checksum = "0500f98699d74a6c3aa966ade00f5ca242c20ecfbcf5fa677c2ae7a5a483c72f"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1497,7 +1484,6 @@ dependencies = [
  "hf-hub",
  "indexmap",
  "md5",
- "memmap2",
  "ort",
  "parking_lot 0.13.0",
  "regex",
@@ -1505,7 +1491,6 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2",
- "smallvec",
  "thiserror",
  "tokenizers",
  "tracing",
@@ -1513,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1529,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-stream",
  "axum",
@@ -1559,14 +1544,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "grafeo-server"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1594,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -1621,27 +1606,25 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49dab6c0f2b3fb237b42c54b3fc70e3ffc31536bacf9c0eef5a7e2ce5884d3f6"
+checksum = "31d074f2ce89c265ceae49061121191fe2ffa74e5ddffcd67f2941b96e30af92"
 dependencies = [
  "bincode",
- "byteorder",
  "bytes",
  "crc32fast",
- "crossbeam",
  "fs2",
  "grafeo-common",
  "memmap2",
  "parking_lot 0.13.0",
  "serde",
  "thiserror",
- "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "grafeo-studio"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1650,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "grafeo-service",

@@ -2,9 +2,9 @@
 
 All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
-## [0.6.2] - Unreleased
+## [0.6.2] - 2026-11-08
 
-Security release: a page on another site can no longer write through the HTTP API or open the WebSocket, a token reaches only the databases in its scope, and the server no longer starts exposed without credentials. Breaking: the default `--host` is `127.0.0.1`, and the Docker images (on `0.0.0.0`) refuse to start without `GRAFEO_AUTH_TOKEN`, Basic credentials or `GRAFEO_ALLOW_UNAUTHENTICATED=true`. A read-write token that created or deleted databases, and a database-scoped admin token that managed tokens, now gets a 403.
+Security release: a page on another site can no longer write through the HTTP API or open the WebSocket, a token reaches only the databases in its scope, and the server no longer starts exposed without credentials. Breaking: the default `--host` is `127.0.0.1`, and the Docker images (on `0.0.0.0`) refuse to start without `GRAFEO_AUTH_TOKEN`, Basic credentials or `GRAFEO_ALLOW_UNAUTHENTICATED=true`. A read-write token that created or deleted databases, and a database-scoped admin token that managed tokens, now gets a 403. Lockstep with grafeo 0.6.2.
 
 ### Changed
 
@@ -34,6 +34,7 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 
 ### Dependencies
 
+- **grafeo-engine and grafeo-common 0.6.2** (from 0.6.1): see the engine's [0.6.2 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) for every fix.
 - **gwp 0.4.0** (from 0.3.2): admin and search requests carry the session, and gwp refuses one without a session when the server authenticates sessions.
 
 ### Contributors
