@@ -3566,10 +3566,10 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
 /// `section_tier_override_is_applied_on_reopen`.
 ///
 /// Engine 0.5.44 does not report overrides: `/admin/{db}/storage-tiers` lists
-/// only the sections that hold data, and a `force_disk` spill at open finds
-/// them empty. So this checks what the server controls: the override is
-/// accepted, kept in `options.json`, and the database serves requests from
-/// a second manager on the same directory.
+/// only the sections that hold data, and a spill at open finds them empty. So
+/// this checks what the server controls: the override is accepted, kept in
+/// `options.json`, and the database serves requests from a second manager on
+/// the same directory.
 // Uses `force_ram` (not `force_disk`): engine 0.6.2 spills only the vector
 // store with `wal` + `vector-index`, and the default-feature CI build has
 // neither, while `force_ram` is accepted in every build — so this restart
