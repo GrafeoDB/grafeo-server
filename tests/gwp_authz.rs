@@ -269,3 +269,54 @@ async fn a_call_without_a_session_is_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn schema_create_and_drop_need_the_write_role() {
+    let channel = spawn().await;
+    let mut catalog = proto::catalog_service_client::CatalogServiceClient::new(channel.clone());
+
+    // A read-only token can list schemas but must not create or drop them.
+    let ro = session(&channel, RO).await;
+    let err = catalog
+        .create_schema(proto::CreateSchemaRequest {
+            name: "s1".into(),
+            if_not_exists: false,
+            session_id: ro.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err}");
+    let err = catalog
+        .drop_schema(proto::DropSchemaRequest {
+            name: "s1".into(),
+            if_exists: true,
+            session_id: ro.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err}");
+
+    // A read-write token may.
+    let rw = session(&channel, RW).await;
+    catalog
+        .create_schema(proto::CreateSchemaRequest {
+            name: "s1".into(),
+            if_not_exists: true,
+            session_id: rw.clone(),
+        })
+        .await
+        .unwrap();
+
+    // A token scoped to another database may not: the session works in
+    // `default`, outside ADMIN_A's scope.
+    let admin_a = session(&channel, ADMIN_A).await;
+    let err = catalog
+        .create_schema(proto::CreateSchemaRequest {
+            name: "s2".into(),
+            if_not_exists: false,
+            session_id: admin_a,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied, "{err}");
+}

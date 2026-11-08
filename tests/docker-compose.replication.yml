@@ -28,7 +28,7 @@ services:
       - "0.0.0.0"
       - "--allow-unauthenticated"
     ports:
-      - "17474:7474"
+      - "127.0.0.1:17474:7474"
     networks:
       - repl
     healthcheck:
@@ -54,7 +54,7 @@ services:
       - "0.0.0.0"
       - "--allow-unauthenticated"
     ports:
-      - "17475:7474"
+      - "127.0.0.1:17475:7474"
     depends_on:
       primary:
         condition: service_healthy
@@ -83,7 +83,7 @@ services:
       - "0.0.0.0"
       - "--allow-unauthenticated"
     ports:
-      - "17476:7474"
+      - "127.0.0.1:17476:7474"
     depends_on:
       primary:
         condition: service_healthy

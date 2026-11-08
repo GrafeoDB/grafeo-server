@@ -1,11 +1,41 @@
 //! The server binds to loopback by default and refuses a non-loopback address
 //! without credentials, unless `--allow-unauthenticated` is given.
 
+use std::sync::{Mutex, OnceLock};
+
 use clap::Parser;
 use grafeo_server::config::Config;
 
+/// Serializes the in-process parses: `config` below removes the `GRAFEO_*`
+/// environment variables while parsing, so two tests must not interleave.
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Parses args with the `GRAFEO_*` environment removed: clap reads those for
+/// every flag, so a variable set in the test runner's environment would
+/// otherwise change the parse (the subprocess tests strip them for the child).
+#[allow(unsafe_code)] // env mutation is unsafe in edition 2024; see the SAFETY note below
 fn config(args: &[&str]) -> Config {
-    Config::try_parse_from(std::iter::once("grafeo-server").chain(args.iter().copied())).unwrap()
+    let _guard = env_lock().lock().unwrap();
+    // clap reads GRAFEO_* env vars for every flag, so a variable set in the
+    // environment running the tests would change what is parsed here. The
+    // subprocess tests strip the same variables for the child process.
+    let saved: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("GRAFEO_"))
+        .collect();
+    // SAFETY: the lock keeps the removal and the restore in one critical
+    // section, so no other test reads the environment in between.
+    for (key, _) in &saved {
+        unsafe { std::env::remove_var(key) };
+    }
+    let parsed =
+        Config::try_parse_from(std::iter::once("grafeo-server").chain(args.iter().copied()));
+    for (key, value) in saved {
+        unsafe { std::env::set_var(key, value) };
+    }
+    parsed.unwrap()
 }
 
 #[test]
@@ -117,5 +147,52 @@ fn read_only_without_a_database_refuses_to_start_cleanly() {
         std::fs::read_dir(dir.path()).unwrap().count(),
         0,
         "nothing created"
+    );
+}
+
+#[test]
+#[allow(unsafe_code)] // see config(): the lock makes the mutation safe here
+fn in_process_parse_ignores_grafeo_env_vars() {
+    // SAFETY: config() strips and restores the GRAFEO_* variables under its
+    // lock while parsing, so no in-process parse ever sees them; the variable
+    // is removed again right after.
+    unsafe { std::env::set_var("GRAFEO_HOST", "0.0.0.0") };
+    let c = config(&[]);
+    unsafe { std::env::remove_var("GRAFEO_HOST") };
+    assert_eq!(c.host, "127.0.0.1");
+}
+
+/// Empty configured credentials are not credentials: `--host 0.0.0.0
+/// --auth-user '' --auth-password ''` must still be refused, since a Basic
+/// `:` header would authenticate against the empty pair.
+#[test]
+fn empty_credentials_do_not_satisfy_the_exposure_check() {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_grafeo-server"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GRAFEO_") {
+            cmd.env_remove(key);
+        }
+    }
+    let out = cmd
+        .args([
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "0",
+            "--auth-user",
+            "",
+            "--auth-password",
+            "",
+            "--log-level",
+            "error",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
 }

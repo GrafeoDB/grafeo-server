@@ -10,8 +10,13 @@ services:
       - grafeo-data:/data
     environment:
       - GRAFEO_SESSION_TTL=300
-      # The image listens on 0.0.0.0, so it refuses to start without credentials.
-      - GRAFEO_AUTH_TOKEN=${GRAFEO_AUTH_TOKEN:?set GRAFEO_AUTH_TOKEN to the API token clients will send}
+      # The image listens on 0.0.0.0, so it refuses to start without credentials:
+      # set GRAFEO_AUTH_TOKEN, or GRAFEO_AUTH_USER and GRAFEO_AUTH_PASSWORD, in .env
+      # (an unset value is forwarded empty, and empty is not a credential), or set
+      # GRAFEO_ALLOW_UNAUTHENTICATED=true for a trusted network only.
+      - GRAFEO_AUTH_TOKEN=${GRAFEO_AUTH_TOKEN:-}
+      - GRAFEO_AUTH_USER=${GRAFEO_AUTH_USER:-}
+      - GRAFEO_AUTH_PASSWORD=${GRAFEO_AUTH_PASSWORD:-}
     restart: unless-stopped
 
 volumes:

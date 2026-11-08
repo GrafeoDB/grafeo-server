@@ -198,6 +198,20 @@ async fn main() {
             })
             .collect();
 
+        // Host names the cross-site check trusts for `Sec-Fetch-Site:
+        // same-origin`: loopback and `--host` by default, plus --trusted-hosts.
+        let mut trusted_hosts = grafeo_http::state::default_trusted_hosts();
+        trusted_hosts.push(config.host.clone());
+        trusted_hosts.extend(config.trusted_hosts.iter().cloned());
+        #[cfg(feature = "tls")]
+        let scheme = if config.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
+        #[cfg(not(feature = "tls"))]
+        let scheme = "http";
+
         let app_state = grafeo_http::AppState::with_config(
             service.clone(),
             config.cors_origins.clone(),
@@ -205,7 +219,8 @@ async fn main() {
             trusted_proxies,
             config.max_body_size,
             config.max_batch_size,
-        );
+        )
+        .with_trusted_hosts(trusted_hosts, scheme);
         #[cfg(feature = "auth")]
         let app_state = app_state.with_public_metrics(config.public_metrics);
 

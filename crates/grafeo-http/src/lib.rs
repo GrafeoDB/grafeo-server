@@ -409,13 +409,15 @@ pub fn router(state: AppState) -> Router {
 
     // The cross-site check runs before rate limiting and auth, so a foreign
     // page is refused whatever credentials the browser attaches, and inside
-    // the CORS layer, which answers preflights itself.
-    api.layer(axum::middleware::from_fn(
-        middleware::request_id::request_id_middleware,
-    ))
-    .layer(axum::middleware::from_fn_with_state(
+    // the CORS layer, which answers preflights itself. The request-id layer
+    // wraps it (applied later, so it runs first), so a refused request still
+    // carries its `X-Request-Id` and the refusal log has the `request_id`.
+    api.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::cross_site::cross_site_middleware,
+    ))
+    .layer(axum::middleware::from_fn(
+        middleware::request_id::request_id_middleware,
     ))
     .layer(cors_layer(&state))
     .with_state(state)
@@ -449,7 +451,14 @@ fn cors_layer(state: &AppState) -> CorsLayer {
 
     let x_request_id = axum::http::header::HeaderName::from_static("x-request-id");
     let base = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,

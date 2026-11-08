@@ -12,12 +12,15 @@
 //! (curl, drivers, other servers) passes. The decision:
 //!
 //! 1. `Sec-Fetch-Site: same-origin` or `none` (typed in the address bar)
-//!    passes. The browser sets it and a page can't, and it still holds behind
-//!    a proxy that rewrites `Host`.
+//!    passes only when the `Host` is a trusted name for this server
+//!    (`--trusted-hosts`, the `--host` value and loopback by default). The
+//!    browser sets the header and a page can't, but a DNS-rebinding page
+//!    sends `same-origin` with its own name in `Host`, so the header alone
+//!    is not enough.
 //! 2. Any other `Sec-Fetch-Site` (`same-site`, `cross-site`) passes only for
 //!    an `Origin` listed in `--cors-origins` (or `*`).
 //! 3. Without `Sec-Fetch-Site` (older browsers), an `Origin` passes when it
-//!    is listed or names the request's own `Host`.
+//!    is listed or names the request's own `Host` on the effective scheme.
 //!
 //! Reads (GET, HEAD) other than WebSocket upgrades pass: CORS keeps a foreign
 //! page from reading their answers. Preflights (OPTIONS) are left to the CORS
@@ -39,7 +42,14 @@ pub async fn cross_site_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if is_guarded(req.method(), req.headers()) && !is_allowed(req.headers(), state.cors_origins()) {
+    if is_guarded(req.method(), req.headers())
+        && !is_allowed(
+            req.headers(),
+            state.cors_origins(),
+            state.trusted_hosts(),
+            state.scheme(),
+        )
+    {
         tracing::warn!(
             method = %req.method(),
             path = %req.uri().path(),
@@ -72,30 +82,60 @@ fn is_guarded(method: &Method, headers: &HeaderMap) -> bool {
 }
 
 /// Whether a guarded request may go on (see the module docs for the rule).
-fn is_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+fn is_allowed(
+    headers: &HeaderMap,
+    allowed_origins: &[String],
+    trusted_hosts: &[String],
+    scheme: &str,
+) -> bool {
     let origin = headers.get(ORIGIN).and_then(|v| v.to_str().ok());
     let listed = origin.is_some_and(|o| allowed_origins.iter().any(|a| a == "*" || a == o));
+    let host = headers.get(HOST).and_then(|v| v.to_str().ok());
     match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        // The browser says the request is same-origin (or from the address
+        // bar). A DNS-rebinding page sends `same-origin` too, with its own
+        // name in `Host`, so the Host must be one this server answers on.
         Some(site)
             if site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none") =>
         {
-            true
+            host.is_some_and(|h| host_is_trusted(h, trusted_hosts))
         }
         Some(_) => listed,
         None => match origin {
             None => true,
-            Some(o) => listed || names_host(o, headers.get(HOST).and_then(|v| v.to_str().ok())),
+            Some(o) => listed || names_host(o, host, scheme),
         },
     }
 }
 
-/// Whether `origin` (`scheme://host[:port]`) names the authority in `Host`.
-fn names_host(origin: &str, host: Option<&str>) -> bool {
+/// The host part of a `Host` header value or trusted-host entry, without
+/// port or IPv6 brackets (`LOCALHOST:7474`, `[::1]:7474` → `localhost`, `::1`).
+fn host_part(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Whether `host` (a `Host` header value) is a trusted name for this server.
+fn host_is_trusted(host: &str, trusted_hosts: &[String]) -> bool {
+    let host = host_part(host).to_ascii_lowercase();
+    trusted_hosts
+        .iter()
+        .any(|t| host_part(t).to_ascii_lowercase() == host)
+}
+
+/// Whether `origin` (`scheme://host[:port]`) names the authority in `Host`
+/// on the effective request `scheme`.
+fn names_host(origin: &str, host: Option<&str>, scheme: &str) -> bool {
     let Some(host) = host else { return false };
-    let Some((_, authority)) = origin.split_once("://") else {
+    let Some((origin_scheme, authority)) = origin.split_once("://") else {
         return false; // "null" and other opaque origins
     };
-    !authority.is_empty() && authority.eq_ignore_ascii_case(host)
+    !authority.is_empty()
+        && origin_scheme.eq_ignore_ascii_case(scheme)
+        && authority.eq_ignore_ascii_case(host)
 }
 
 #[cfg(test)]
@@ -132,21 +172,44 @@ mod tests {
         let listed = ["https://app.example".to_string()];
         let any = ["*".to_string()];
         let host = ("host", "localhost:7474");
+        let trusted = crate::state::default_trusted_hosts();
+        let http = "http";
 
         // No browser headers: a non-browser client.
-        assert!(is_allowed(&headers(&[host]), none));
-        // Fetch metadata decides when present.
+        assert!(is_allowed(&headers(&[host]), none, &trusted, http));
+        // Fetch metadata decides when present, but `same-origin` needs a
+        // trusted Host: a DNS-rebinding page sends it with its own name.
         assert!(is_allowed(
             &headers(&[
                 host,
                 ("sec-fetch-site", "same-origin"),
                 ("origin", "https://proxy.example")
             ]),
-            none
+            none,
+            &trusted,
+            http
+        ));
+        assert!(!is_allowed(
+            &headers(&[
+                ("host", "evil.example:7474"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "http://evil.example:7474")
+            ]),
+            none,
+            &trusted,
+            http
         ));
         assert!(is_allowed(
             &headers(&[host, ("sec-fetch-site", "none")]),
-            none
+            none,
+            &trusted,
+            http
+        ));
+        assert!(!is_allowed(
+            &headers(&[("sec-fetch-site", "same-origin")]),
+            none,
+            &trusted,
+            http
         ));
         assert!(!is_allowed(
             &headers(&[
@@ -154,7 +217,9 @@ mod tests {
                 ("sec-fetch-site", "cross-site"),
                 ("origin", "https://evil.example")
             ]),
-            none
+            none,
+            &trusted,
+            http
         ));
         assert!(!is_allowed(
             &headers(&[
@@ -162,11 +227,15 @@ mod tests {
                 ("sec-fetch-site", "same-site"),
                 ("origin", "http://localhost:5173")
             ]),
-            none
+            none,
+            &trusted,
+            http
         ));
         assert!(!is_allowed(
             &headers(&[host, ("sec-fetch-site", "cross-site")]),
-            &any
+            &any,
+            &trusted,
+            http
         ));
         assert!(is_allowed(
             &headers(&[
@@ -174,7 +243,9 @@ mod tests {
                 ("sec-fetch-site", "cross-site"),
                 ("origin", "https://app.example")
             ]),
-            &listed
+            &listed,
+            &trusted,
+            http
         ));
         assert!(is_allowed(
             &headers(&[
@@ -182,29 +253,72 @@ mod tests {
                 ("sec-fetch-site", "cross-site"),
                 ("origin", "https://evil.example")
             ]),
-            &any
+            &any,
+            &trusted,
+            http
         ));
-        // Origin alone: listed or the server's own host.
+        // Origin alone: listed, or the server's own host on the same scheme.
         assert!(is_allowed(
             &headers(&[host, ("origin", "http://localhost:7474")]),
-            none
+            none,
+            &trusted,
+            http
         ));
         assert!(is_allowed(
             &headers(&[host, ("origin", "http://LOCALHOST:7474")]),
-            none
+            none,
+            &trusted,
+            http
+        ));
+        // The scheme is compared too: an https Origin is not the http server.
+        assert!(!is_allowed(
+            &headers(&[host, ("origin", "https://localhost:7474")]),
+            none,
+            &trusted,
+            http
+        ));
+        assert!(is_allowed(
+            &headers(&[host, ("origin", "https://localhost:7474")]),
+            none,
+            &trusted,
+            "https"
         ));
         assert!(!is_allowed(
             &headers(&[host, ("origin", "http://localhost:7475")]),
-            none
+            none,
+            &trusted,
+            http
         ));
-        assert!(!is_allowed(&headers(&[host, ("origin", "null")]), none));
+        assert!(!is_allowed(
+            &headers(&[host, ("origin", "null")]),
+            none,
+            &trusted,
+            http
+        ));
         assert!(!is_allowed(
             &headers(&[("origin", "http://localhost:7474")]),
-            none
+            none,
+            &trusted,
+            http
         ));
         assert!(is_allowed(
             &headers(&[host, ("origin", "https://app.example")]),
-            &listed
+            &listed,
+            &trusted,
+            http
         ));
+    }
+
+    #[test]
+    fn host_names_are_trusted_ignoring_case_port_and_brackets() {
+        let trusted = crate::state::default_trusted_hosts();
+        assert!(host_is_trusted("localhost:7474", &trusted));
+        assert!(host_is_trusted("LOCALHOST", &trusted));
+        assert!(host_is_trusted("127.0.0.1:7474", &trusted));
+        assert!(host_is_trusted("[::1]:7474", &trusted));
+        assert!(!host_is_trusted("evil.example", &trusted));
+        let custom = vec!["db.internal".to_string()];
+        assert!(host_is_trusted("db.internal:7474", &custom));
+        assert!(!host_is_trusted("db.internal.evil.example", &custom));
     }
 }

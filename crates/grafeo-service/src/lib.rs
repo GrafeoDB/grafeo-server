@@ -125,7 +125,9 @@ impl ServiceState {
     ///
     /// # Errors
     ///
-    /// The errors of [`DatabaseManager::try_new`].
+    /// The errors of [`DatabaseManager::try_new`], and of loading the token
+    /// store when one is configured (a corrupt `tokens.json` is a start-up
+    /// error, not a panic).
     pub fn try_new(config: &ServiceConfig) -> Result<Self, error::ServiceError> {
         #[allow(unused_mut)]
         let mut databases = DatabaseManager::try_new(config.data_dir.as_deref(), config.read_only)?;
@@ -168,10 +170,11 @@ impl ServiceState {
                         })
                     });
                     if let Some(ref path) = store_path {
-                        let store = Arc::new(
-                            token_store::TokenStore::load(path)
-                                .unwrap_or_else(|e| panic!("failed to load token store: {e}")),
-                        );
+                        let store = Arc::new(token_store::TokenStore::load(path).map_err(|e| {
+                            error::ServiceError::Internal(format!(
+                                "failed to load token store '{path}': {e}"
+                            ))
+                        })?);
                         auth::AuthProvider::with_token_store(
                             config.auth_token.clone(),
                             config.auth_user.clone(),
@@ -599,4 +602,37 @@ impl ServiceState {
 /// Resolve a database name from an optional request field.
 pub fn resolve_db_name(database: Option<&str>) -> &str {
     database.unwrap_or("default")
+}
+
+#[cfg(all(test, feature = "auth"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_corrupt_token_store_is_a_startup_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let config = ServiceConfig {
+            data_dir: None,
+            read_only: false,
+            session_ttl: 300,
+            query_timeout: 30,
+            rate_limit: 0,
+            rate_limit_window: 60,
+            auth_token: Some("t".to_string()),
+            auth_user: None,
+            auth_password: None,
+            token_store_path: Some(path.to_string_lossy().into_owned()),
+            #[cfg(feature = "replication")]
+            replication_mode: replication::ReplicationMode::Standalone,
+            backup_dir: None,
+            backup_retention: None,
+            audit: None,
+        };
+        let err = ServiceState::try_new(&config)
+            .err()
+            .expect("a corrupt token store must fail start-up");
+        assert!(err.to_string().contains("token store"), "{err}");
+    }
 }

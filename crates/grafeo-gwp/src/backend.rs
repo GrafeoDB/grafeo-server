@@ -220,6 +220,34 @@ impl GrafeoBackend {
         }
     }
 
+    /// Refuses a schema create/drop the calling session may not make: the
+    /// database must be in its token's scope, and its identity must have the
+    /// write role (capped to read-only on a read-only server), as the HTTP
+    /// schema routes check (`check_db_access` + `check_write`).
+    #[allow(clippy::result_large_err)]
+    fn authorize_schema_write(
+        &self,
+        ctx: &RequestContext,
+        target: &CatalogTarget,
+    ) -> Result<(), GqlError> {
+        self.authorize_call(ctx, &target.database, false)?;
+        #[cfg(feature = "auth")]
+        if let Some(identity) = &target.identity {
+            let identity = grafeo_service::auth::cap_identity_read_only(
+                identity.clone(),
+                self.state.is_read_only(),
+            );
+            if !identity.can_write() {
+                return Err(GqlError::Grpc(tonic::Status::permission_denied(
+                    "write access required",
+                )));
+            }
+        }
+        #[cfg(not(feature = "auth"))]
+        let _ = target;
+        Ok(())
+    }
+
     /// Whether the session in `ctx` may make an admin (`needs_admin`) or
     /// search call on database `database`: the database must be in its
     /// token's scope, and admin calls need the admin role, as the HTTP admin
@@ -647,6 +675,7 @@ impl GqlBackend for GrafeoBackend {
         if_not_exists: bool,
     ) -> Result<(), GqlError> {
         let target = self.catalog_target(ctx)?;
+        self.authorize_schema_write(ctx, &target)?;
         let created = AdminService::create_schema(
             self.state.databases(),
             self.state.metrics(),
@@ -674,6 +703,7 @@ impl GqlBackend for GrafeoBackend {
         if_exists: bool,
     ) -> Result<bool, GqlError> {
         let target = self.catalog_target(ctx)?;
+        self.authorize_schema_write(ctx, &target)?;
         let dropped = AdminService::drop_schema(
             self.state.databases(),
             self.state.metrics(),

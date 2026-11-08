@@ -133,6 +133,14 @@ pub struct Config {
     #[arg(long, env = "GRAFEO_TRUSTED_PROXIES", value_delimiter = ',')]
     pub trusted_proxies: Vec<String>,
 
+    /// Additional host names this server answers on (comma-separated), beyond
+    /// loopback and `--host`. The cross-site check trusts
+    /// `Sec-Fetch-Site: same-origin` only when the request's `Host` is one of
+    /// these, so a DNS-rebinding page cannot use that header to write. Add the
+    /// public name when a proxy rewrites `Host`.
+    #[arg(long, env = "GRAFEO_TRUSTED_HOSTS", value_delimiter = ',')]
+    pub trusted_hosts: Vec<String>,
+
     /// Maximum request body size in bytes (0 = use Axum default of 2 MB).
     #[arg(long, default_value_t = 2_097_152, env = "GRAFEO_MAX_BODY_SIZE")]
     pub max_body_size: usize,

@@ -318,3 +318,57 @@ async fn websocket_refuses_a_cross_site_page_even_with_cached_basic_auth() {
         tokio_tungstenite::connect_async(ws_request(&base, &[("authorization", &basic)])).await;
     assert!(result.is_ok(), "{:?}", result.err());
 }
+
+#[tokio::test]
+async fn same_origin_with_an_untrusted_host_is_refused() {
+    // DNS rebinding: the rebound page's own name is in Host and it sends
+    // Sec-Fetch-Site: same-origin, but the server does not answer on that
+    // name, so the header alone must not pass.
+    let base = spawn_default().await;
+    let (status, body) = send(
+        &base,
+        Method::POST,
+        "/query",
+        &[
+            ("host", "evil.example:7474"),
+            ("origin", "http://evil.example:7474"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+}
+
+#[tokio::test]
+async fn an_origin_on_another_scheme_is_not_the_servers_own() {
+    // The server is plain http; an https origin with the same authority is
+    // not this server's own origin.
+    let base = spawn_default().await;
+    let authority = base.trim_start_matches("http://");
+    let https_origin = format!("https://{authority}");
+    let (status, body) = send(&base, Method::POST, "/query", &[("origin", &https_origin)]).await;
+    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+
+    // The same authority on the server's own scheme passes.
+    let (status, body) = send(&base, Method::POST, "/query", &[("origin", &base)]).await;
+    assert!(!is_cross_site_refusal(status, &body), "{status} {body}");
+}
+
+#[tokio::test]
+async fn a_refused_cross_site_request_still_carries_a_request_id() {
+    let base = spawn_default().await;
+    let resp = Client::new()
+        .post(format!("{base}/query"))
+        .header("origin", EVIL)
+        .header("sec-fetch-site", "cross-site")
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "the 403 must carry an X-Request-Id header"
+    );
+}

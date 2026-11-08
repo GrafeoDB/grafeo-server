@@ -445,3 +445,34 @@ async fn public_metrics_keep_metrics_open() {
         .unwrap();
     assert_eq!(anonymous.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_percent_encoded_path_is_authorized_as_the_decoded_database() {
+    // `/admin/%61/stats` decodes to database `a` in the handler, so the scope
+    // check must compare the decoded name: ADMIN_A (scoped to `a`) passes,
+    // and a token scoped to the literal `%61` would not reach `a`.
+    let base = spawn().await;
+    let client = Client::new();
+    let resp = client
+        .get(format!("{base}/admin/%61/stats"))
+        .header("Authorization", format!("Bearer {ADMIN_A}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "ADMIN_A scoped to `a` reaches /admin/%61/stats: {}",
+        resp.text().await.unwrap()
+    );
+
+    // The other direction stays closed: a read-only token scoped to `a`
+    // cannot use the encoding to reach another database.
+    let resp = client
+        .get(format!("{base}/admin/%62/stats"))
+        .header("Authorization", format!("Bearer {ADMIN_A}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
