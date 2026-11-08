@@ -384,7 +384,7 @@ impl QueryService {
         let audit_statements: Option<Vec<String>> = audit.as_ref().and_then(|a| {
             a.logger
                 .data_changes_enabled()
-                .then(|| queries.iter().map(|q| q.statement.clone()).collect())
+                .then(|| queries.iter().map(|q| crate::audit::truncate(&q.statement, 500)).collect())
         });
         let audit_db = db_name.to_owned();
 
