@@ -31,6 +31,7 @@ fn service(data_dir: &str) -> grafeo_service::ServiceState {
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: None,
         backup_retention: None,
+        audit: None,
     })
 }
 

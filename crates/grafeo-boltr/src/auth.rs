@@ -20,11 +20,32 @@ pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant
 pub(crate) struct BoltrAuthValidator {
     provider: Arc<dyn AuthProviderTrait>,
     pub(crate) pending: PendingAuth,
+    audit: Option<Arc<grafeo_service::audit::AuditLogger>>,
 }
 
 impl BoltrAuthValidator {
-    pub fn new(provider: Arc<dyn AuthProviderTrait>, pending: PendingAuth) -> Self {
-        Self { provider, pending }
+    pub fn new(
+        provider: Arc<dyn AuthProviderTrait>,
+        pending: PendingAuth,
+        audit: Option<Arc<grafeo_service::audit::AuditLogger>>,
+    ) -> Self {
+        Self {
+            provider,
+            pending,
+            audit,
+        }
+    }
+
+    fn fail(&self, message: impl Into<String>) -> BoltError {
+        let message = message.into();
+        if let Some(audit) = &self.audit {
+            audit.log(
+                grafeo_service::audit::AuditEvent::new("auth_failure")
+                    .transport("bolt")
+                    .detail(&message),
+            );
+        }
+        BoltError::Authentication(message)
     }
 }
 
@@ -36,7 +57,7 @@ impl AuthValidator for BoltrAuthValidator {
                 let token = credentials.credentials.as_deref().unwrap_or("");
                 self.provider
                     .check_bearer(token)
-                    .ok_or_else(|| BoltError::Authentication("invalid bearer token".into()))?
+                    .ok_or_else(|| self.fail("invalid bearer token"))?
             }
             "basic" => {
                 let user = credentials.principal.as_deref().unwrap_or("");
@@ -49,16 +70,14 @@ impl AuthValidator for BoltrAuthValidator {
                         scope: grafeo_service::auth::TokenScope::default(),
                     }
                 } else {
-                    return Err(BoltError::Authentication("invalid credentials".into()));
+                    return Err(self.fail("invalid credentials"));
                 }
             }
             "none" => {
-                return Err(BoltError::Authentication("authentication required".into()));
+                return Err(self.fail("authentication required"));
             }
             other => {
-                return Err(BoltError::Authentication(format!(
-                    "unsupported auth scheme: {other}"
-                )));
+                return Err(self.fail(format!("unsupported auth scheme: {other}")));
             }
         };
 

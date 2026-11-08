@@ -25,6 +25,15 @@ pub struct ManagedSession {
     pub created_at: Instant,
     /// Last time the session was accessed.
     last_used: Instant,
+    /// Write statements that ran in this transaction with their counters,
+    /// queued while data-change auditing is on and logged by the commit (a
+    /// rollback or failed commit logs nothing). Statements are truncated at
+    /// push time and the queue is capped at `MAX_PENDING_WRITES`; writes past
+    /// the cap are counted in `pending_writes_dropped`. Empty when auditing
+    /// is off.
+    pub pending_writes: Vec<(String, grafeo_engine::database::WriteCounters)>,
+    /// Writes not queued because `pending_writes` was full.
+    pub pending_writes_dropped: u64,
 }
 
 /// Thread-safe global registry of open transaction sessions.
@@ -75,6 +84,8 @@ impl SessionRegistry {
             owner_token_id,
             created_at: now,
             last_used: now,
+            pending_writes: Vec::new(),
+            pending_writes_dropped: 0,
         }));
         self.sessions.insert(id.clone(), session);
         id

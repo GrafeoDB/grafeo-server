@@ -28,7 +28,7 @@ pub async fn create_token(
     auth: AuthContext,
     Json(req): Json<types::CreateTokenRequest>,
 ) -> Result<Json<types::TokenResponse>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -43,6 +43,14 @@ pub async fn create_token(
         req.expires_in,
     )
     .map_err(ApiError::from)?;
+
+    // The plaintext token is never audited, only the id and name.
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("token_created")
+            .actor(auth.actor())
+            .transport("http")
+            .detail(format!("token '{}' ({})", record.name, record.id)),
+    );
 
     Ok(Json(types::TokenResponse {
         id: record.id,
@@ -74,7 +82,7 @@ pub async fn list_tokens(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<types::TokenResponse>>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -107,7 +115,7 @@ pub async fn get_token(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<Json<types::TokenResponse>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -142,7 +150,7 @@ pub async fn delete_token(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
 
     let store = state.auth().and_then(|a| a.token_store()).ok_or_else(|| {
         grafeo_service::error::ServiceError::BadRequest(
@@ -150,8 +158,18 @@ pub async fn delete_token(
         )
     })?;
 
+    // Look the token up first so the revoke record names it, not just its id.
+    let name = grafeo_service::token_service::TokenService::get_token(store, &id)
+        .map_or_else(|_| "<unknown>".to_string(), |t| t.name);
     grafeo_service::token_service::TokenService::delete_token(store, &id)
         .map_err(ApiError::from)?;
+
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("token_revoked")
+            .actor(auth.actor())
+            .transport("http")
+            .detail(format!("token '{name}' ({id})")),
+    );
 
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

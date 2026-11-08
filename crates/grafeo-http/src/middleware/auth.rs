@@ -22,18 +22,16 @@ use grafeo_service::auth::TokenInfo;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Paths exempt from authentication (monitoring/scraping).
-fn is_exempt(path: &str, method: &Method) -> bool {
-    if *method == Method::OPTIONS {
-        return true;
-    }
-    matches!(path, "/health" | "/metrics")
+/// Paths exempt from authentication: CORS preflights, the `/health` probe,
+/// and `/metrics` when the server runs with `--public-metrics`.
+fn is_exempt(path: &str, method: &Method, public_metrics: bool) -> bool {
+    *method == Method::OPTIONS || path == "/health" || (public_metrics && path == "/metrics")
 }
 
 /// Middleware that authenticates requests using any configured method.
 ///
 /// When no authentication is configured, all requests pass through.
-/// `/health` and `/metrics` are always exempt.
+/// `/health` is always exempt, `/metrics` with `--public-metrics`.
 /// On success, `TokenInfo` is inserted into request extensions.
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -45,7 +43,7 @@ pub async fn auth_middleware(
         None => return Ok(next.run(req).await),
     };
 
-    if is_exempt(req.uri().path(), req.method()) {
+    if is_exempt(req.uri().path(), req.method(), state.public_metrics()) {
         return Ok(next.run(req).await);
     }
 
@@ -56,37 +54,48 @@ pub async fn auth_middleware(
         .map(String::from);
     let auth_header_ref = auth_header.as_deref();
 
-    // Try Bearer token
-    if let Some(token) = auth_header_ref.and_then(|v| v.strip_prefix("Bearer "))
-        && let Some(info) = auth_provider.check_bearer(token)
-    {
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
-    }
+    let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok());
 
-    // Try API key header (checked against the same token set)
-    if let Some(key) = req.headers().get("x-api-key").and_then(|v| v.to_str().ok())
-        && let Some(info) = auth_provider.check_bearer(key)
-    {
-        req.extensions_mut().insert(info);
-        return Ok(next.run(req).await);
-    }
-
-    // Try HTTP Basic auth (always admin scope)
-    if let Some(encoded) = auth_header_ref.and_then(|v| v.strip_prefix("Basic "))
-        && let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
-        && let Ok(decoded_str) = std::str::from_utf8(&decoded_bytes)
-        && let Some((user, pass)) = decoded_str.split_once(':')
-        && auth_provider.check_basic(user, pass)
-    {
-        // Basic auth = admin, unrestricted
-        req.extensions_mut().insert(TokenInfo {
-            id: "_basic".to_string(),
-            name: "basic-auth".to_string(),
-            scope: grafeo_service::auth::TokenScope::default(),
+    let info = auth_header_ref
+        // Bearer token
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|token| auth_provider.check_bearer(token))
+        // API key header (checked against the same token set)
+        .or_else(|| api_key.and_then(|key| auth_provider.check_bearer(key)))
+        // HTTP Basic auth: admin, unrestricted
+        .or_else(|| {
+            let encoded = auth_header_ref?.strip_prefix("Basic ")?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()?;
+            let (user, pass) = std::str::from_utf8(&decoded).ok()?.split_once(':')?;
+            auth_provider.check_basic(user, pass).then(|| TokenInfo {
+                id: "_basic".to_string(),
+                name: "basic-auth".to_string(),
+                scope: grafeo_service::auth::TokenScope::default(),
+            })
         });
-        return Ok(next.run(req).await);
-    }
 
-    Err(ApiError::unauthorized())
+    let Some(info) = info else {
+        state.audit_event(
+            grafeo_service::audit::AuditEvent::new("auth_failure")
+                .transport("http")
+                .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
+                .detail(format!("{} {}", req.method(), req.uri().path())),
+        );
+        return Err(ApiError::unauthorized());
+    };
+
+    if let Err(e) = super::authorize::authorize(req.method(), req.uri().path(), &info) {
+        state.audit_event(
+            grafeo_service::audit::AuditEvent::new("access_denied")
+                .actor(Some(&info.name))
+                .transport("http")
+                .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
+                .detail(format!("{} {}: {e}", req.method(), req.uri().path())),
+        );
+        return Err(e);
+    }
+    req.extensions_mut().insert(info);
+    Ok(next.run(req).await)
 }

@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.99.0"
 license = "Apache-2.0"
@@ -19,8 +19,8 @@ repository = "https://github.com/GrafeoDB/grafeo-server"
 
 [workspace.dependencies]
 # Engine
-grafeo-engine = { version = "=0.6.1", default-features = false }
-grafeo-common = { version = "=0.6.1" }
+grafeo-engine = { version = "=0.6.2", default-features = false }
+grafeo-common = { version = "=0.6.2" }
 
 # Internal crates
 grafeo-service = { path = "crates/grafeo-service" }
@@ -34,7 +34,7 @@ grafeo-boltr = { path = "crates/grafeo-boltr" }
 # message cap before LOGON.
 boltr = "0.3"
 # 0.3.2: the catalog service carries the calling session (`CatalogContext`).
-gwp = "0.3.2"
+gwp = "0.4.0"
 
 # Async
 tokio = { version = "1.54.1", features = ["full"] }
@@ -92,7 +92,7 @@ authors = ["S.T. Grond"]
 description = "HTTP server for the Grafeo graph database"
 
 [features]
-default = ["lpg", "http", "gwp", "studio", "all-languages", "storage", "algos", "tracing"]
+default = ["lpg", "http", "gwp", "studio", "all-languages", "storage", "algos", "tracing", "auth"]
 
 # Transport layers
 http = ["dep:grafeo-http", "grafeo-service/openapi"]
@@ -205,6 +205,9 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+# Listing gwp's RPCs from its service descriptors (tests/gwp_authz.rs).
+prost = "0.14"
+prost-types = "0.14"
 grafeo-http = { workspace = true }
 grafeo-gwp = { workspace = true }
 grafeo-boltr = { workspace = true }

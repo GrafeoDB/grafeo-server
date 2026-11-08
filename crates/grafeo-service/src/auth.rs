@@ -162,12 +162,17 @@ pub struct StaticAuthProvider {
 #[cfg(feature = "auth")]
 impl StaticAuthProvider {
     /// Creates an auth provider if any credentials are configured.
-    /// Returns `None` if no authentication is set up.
+    /// Returns `None` if no authentication is set up. An empty configured
+    /// value is not a credential: `--auth-user '' --auth-password ''` must
+    /// not both satisfy the exposure check and match a Basic `:` header.
     pub fn new(
         token: Option<String>,
         user: Option<String>,
         password: Option<String>,
     ) -> Option<Self> {
+        let token = token.filter(|t| !t.is_empty());
+        let user = user.filter(|u| !u.is_empty());
+        let password = password.filter(|p| !p.is_empty());
         if token.is_none() && user.is_none() {
             return None;
         }
@@ -187,18 +192,24 @@ impl StaticAuthProvider {
         store: std::sync::Arc<crate::token_store::TokenStore>,
     ) -> Option<Self> {
         // If we have a store, we always enable auth (even without a legacy token,
-        // managed tokens will authenticate via the store).
+        // managed tokens will authenticate via the store). Empty configured
+        // values are not credentials (see `new`).
         Some(Self {
-            bearer_token: token,
-            basic_user: user,
-            basic_password: password,
+            bearer_token: token.filter(|t| !t.is_empty()),
+            basic_user: user.filter(|u| !u.is_empty()),
+            basic_password: password.filter(|p| !p.is_empty()),
             token_store: Some(store),
         })
     }
 
-    /// Whether any authentication method is configured.
+    /// Whether any authentication method is configured. An empty configured
+    /// value does not count: it must not pass the exposure check while a
+    /// Basic `:` header would authenticate against it.
     pub fn is_enabled(&self) -> bool {
-        self.bearer_token.is_some() || self.basic_user.is_some() || self.token_store.is_some()
+        self.bearer_token.as_ref().is_some_and(|t| !t.is_empty())
+            || (self.basic_user.as_ref().is_some_and(|u| !u.is_empty())
+                && self.basic_password.as_ref().is_some_and(|p| !p.is_empty()))
+            || self.token_store.is_some()
     }
 
     /// Returns a reference to the token store, if configured.
@@ -908,5 +919,25 @@ mod tests {
 
         assert!(map.is_empty(), "all expired entries should be reaped");
         handle.abort();
+    }
+
+    #[test]
+    fn empty_credentials_are_not_credentials() {
+        // An empty value must not enable auth (the exposure check relies on
+        // it) and must not match a Basic `:` header.
+        assert!(
+            AuthProvider::new(
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new())
+            )
+            .is_none()
+        );
+        assert!(AuthProvider::new(None, Some(String::new()), Some(String::new())).is_none());
+        let p = AuthProvider::new(Some("tok".into()), Some(String::new()), Some(String::new()))
+            .unwrap();
+        assert!(p.is_enabled(), "the non-empty token still counts");
+        assert!(!p.check_basic("", ""));
+        assert!(p.check_bearer("").is_none());
     }
 }

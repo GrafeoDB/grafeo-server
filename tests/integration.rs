@@ -23,12 +23,10 @@ async fn spawn_server() -> String {
 /// Use this when you need to seed the database before the server starts
 /// (e.g. to populate the CDC log via the direct API before testing sync).
 async fn spawn_server_from_state(state: grafeo_server::AppState) -> String {
-    let mut app = grafeo_server::router(state);
+    let app = grafeo_server::router(state);
 
     #[cfg(feature = "studio")]
-    {
-        app = grafeo_studio::router().merge(app);
-    }
+    let app = grafeo_studio::router().merge(app);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -1362,11 +1360,18 @@ async fn health_exempt_from_auth() {
 
 #[cfg(feature = "auth")]
 #[tokio::test]
-async fn metrics_exempt_from_auth() {
+async fn metrics_need_the_token_when_auth_is_on() {
     let base = spawn_server_with_auth("secret-token").await;
     let client = Client::new();
 
     let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 401, "--public-metrics opens it");
+    let resp = client
+        .get(format!("{base}/metrics"))
+        .bearer_auth("secret-token")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -1493,8 +1498,15 @@ async fn basic_auth_exempt_paths() {
     let resp = client.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Metrics is always exempt
+    // Metrics needs the credentials too (open only with --public-metrics)
     let resp = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = client
+        .get(format!("{base}/metrics"))
+        .basic_auth("admin", Some("s3cret"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -2713,6 +2725,7 @@ async fn gwp_admin_stats() {
     let resp = admin_client
         .get_graph_stats(gwp::proto::GetGraphStatsRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2737,6 +2750,7 @@ async fn gwp_admin_wal_status() {
     let resp = admin_client
         .wal_status(gwp::proto::WalStatusRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2760,6 +2774,7 @@ async fn gwp_admin_validate() {
     let resp = admin_client
         .validate(gwp::proto::ValidateRequest {
             graph: "default".to_string(),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -2790,6 +2805,7 @@ async fn gwp_admin_create_index() {
                     property: "name".to_string(),
                 },
             )),
+            session_id: String::new(),
         })
         .await
         .unwrap();
@@ -2803,6 +2819,7 @@ async fn gwp_admin_create_index() {
                     property: "name".to_string(),
                 },
             )),
+            session_id: String::new(),
         })
         .await
         .unwrap()
@@ -3549,10 +3566,14 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
 /// `section_tier_override_is_applied_on_reopen`.
 ///
 /// Engine 0.5.44 does not report overrides: `/admin/{db}/storage-tiers` lists
-/// only the sections that hold data, and a `force_disk` spill at open finds
-/// them empty. So this checks what the server controls: the override is
-/// accepted, kept in `options.json`, and the database serves requests from
-/// a second manager on the same directory.
+/// only the sections that hold data, and a spill at open finds them empty. So
+/// this checks what the server controls: the override is accepted, kept in
+/// `options.json`, and the database serves requests from a second manager on
+/// the same directory.
+// Uses `force_ram` (not `force_disk`): engine 0.6.2 spills only the vector
+// store with `wal` + `vector-index`, and the default-feature CI build has
+// neither, while `force_ram` is accepted in every build — so this restart
+// survival test runs in every CI job.
 #[tokio::test]
 async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
     let data_dir = TempDir::new().unwrap();
@@ -3576,6 +3597,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
             replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
             backup_dir: None,
             backup_retention: None,
+            audit: None,
         };
         grafeo_service::ServiceState::new(&config)
     };
@@ -3594,7 +3616,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
             "name": "spilled",
             "database_type": "Lpg",
             "storage_mode": "Persistent",
-            "options": { "section_tiers": { "VectorStore": "force_disk" } }
+            "options": { "section_tiers": { "VectorStore": "force_ram" } }
         }))
         .send()
         .await
@@ -3616,7 +3638,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
         serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
     assert_eq!(
         stored["options"]["section_tiers"]["VectorStore"],
-        "force_disk"
+        "force_ram"
     );
 
     // Release the first manager's files, then open a second manager on the
@@ -3977,12 +3999,10 @@ async fn compact_not_found() {
 
 async fn spawn_read_only_server() -> String {
     let state = grafeo_server::AppState::new_in_memory_read_only(300);
-    let mut app = grafeo_server::router(state);
+    let app = grafeo_server::router(state);
 
     #[cfg(feature = "studio")]
-    {
-        app = grafeo_studio::router().merge(app);
-    }
+    let app = grafeo_studio::router().merge(app);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -4874,6 +4894,7 @@ fn sync_state() -> grafeo_server::AppState {
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
         backup_dir: None,
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     grafeo_server::AppState::new(
@@ -6179,6 +6200,7 @@ async fn spawn_server_with_backup() -> (String, TempDir, TempDir) {
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -6430,6 +6452,7 @@ async fn spawn_server_persistent_backup() -> (String, TempDir, TempDir) {
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -6464,6 +6487,7 @@ async fn spawn_server_persistent_backup_with_retention(keep: usize) -> (String, 
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: Some(keep),
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -7672,14 +7696,15 @@ async fn auth_scoped_token_filters_database_list() {
     assert_eq!(dbs[0]["name"], "db1");
 }
 
-/// Database access check: scoped token cannot create a database outside its scope.
+/// Database access check: a scoped admin token cannot create a database
+/// outside its scope. (Creating a database needs the admin role, #82.)
 #[cfg(feature = "auth")]
 #[tokio::test]
 async fn auth_scoped_token_cannot_create_db_outside_scope() {
     use grafeo_service::auth::TokenScope;
 
     let scope = TokenScope {
-        role: grafeo_service::auth::Role::ReadWrite,
+        role: grafeo_service::auth::Role::Admin,
         databases: vec!["allowed-db".to_string()],
     };
     let (base, _admin_token, tokens) = spawn_server_with_token_store(
@@ -8546,10 +8571,10 @@ async fn websocket_cors_no_origin_header_allowed() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rate_limit_xff_trusted_from_loopback() {
-    // Loopback peers are always trusted for XFF. Since our test server
-    // binds to 127.0.0.1, the peer IP is loopback. Different XFF values
-    // should be rate-limited independently.
+async fn rate_limit_ignores_xff_without_a_configured_trusted_proxy() {
+    // Loopback alone is not trusted: a forged XFF header must not choose the
+    // rate-limit bucket (or the audit log's source IP). All requests bucket
+    // by the peer address.
     let state = grafeo_server::AppState::with_config(
         grafeo_service::ServiceState::new_in_memory_with_rate_limit(
             300,
@@ -8558,7 +8583,47 @@ async fn rate_limit_xff_trusted_from_loopback() {
         ),
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
-        vec![], // no explicit trusted proxies needed: loopback is always trusted
+        vec![], // no trusted proxies configured
+        2_097_152,
+        100,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 2 requests with XFF=10.0.0.1 use up the peer's quota (XFF ignored)...
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    // ...so a third request is limited even though its XFF differs.
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+}
+
+#[tokio::test]
+async fn rate_limit_xff_honored_from_a_configured_proxy_rightmost_untrusted() {
+    // With 127.0.0.1 configured as a trusted proxy, the test server's peer
+    // (loopback) is trusted and XFF is parsed: the rightmost entry that is
+    // not itself a trusted proxy is the client.
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory_with_rate_limit(
+            300,
+            2,
+            std::time::Duration::from_secs(60),
+        ),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec!["127.0.0.1".parse().unwrap()],
         2_097_152,
         100,
     );
@@ -8576,10 +8641,38 @@ async fn rate_limit_xff_trusted_from_loopback() {
         assert_eq!(resp.status(), 200);
     }
 
-    // A request with a different XFF should still succeed (different IP bucket)
+    // A different XFF is a different bucket.
     let resp = client
         .get(format!("{base}/health"))
         .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A chain ending in the trusted proxy itself is not a client: the
+    // rightmost untrusted entry wins, so "spoofed, 10.0.0.3, 127.0.0.1"
+    // buckets as 10.0.0.3, not as the spoofed leftmost entry.
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "1.2.3.4, 10.0.0.3, 127.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "1.2.3.4, 10.0.0.3, 127.0.0.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429, "third request for 10.0.0.3 is limited");
+    // The spoofed leftmost address never got its own bucket.
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "1.2.3.4")
         .send()
         .await
         .unwrap();

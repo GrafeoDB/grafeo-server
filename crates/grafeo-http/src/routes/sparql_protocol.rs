@@ -75,7 +75,7 @@ pub async fn sparql_get(
     let timeout = state.effective_timeout(None);
     let identity = auth.identity(state.service().is_query_read_only());
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -85,6 +85,7 @@ pub async fn sparql_get(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 
@@ -147,7 +148,7 @@ pub async fn sparql_post(
             let params = convert_json_params(req.params.as_ref())?;
             let timeout = state.effective_timeout(req.timeout_ms);
 
-            let result = QueryService::execute(
+            let result = QueryService::execute_with_audit(
                 state.databases(),
                 state.metrics(),
                 &db_name,
@@ -157,6 +158,7 @@ pub async fn sparql_post(
                 timeout,
                 read_only,
                 Some(identity),
+                state.audit_ref("http", auth.actor()),
             )
             .await?;
 
@@ -173,7 +175,7 @@ pub async fn sparql_post(
 
     let timeout = state.effective_timeout(None);
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -183,6 +185,7 @@ pub async fn sparql_post(
         timeout,
         read_only,
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

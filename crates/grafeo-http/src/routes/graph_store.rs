@@ -91,7 +91,7 @@ pub async fn graph_store_get(
     let timeout = state.effective_timeout(None);
     let identity = auth.identity(state.service().is_query_read_only());
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -101,6 +101,7 @@ pub async fn graph_store_get(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 
@@ -150,7 +151,7 @@ pub async fn graph_store_head(
     let identity = auth.identity(state.service().is_query_read_only());
 
     // If the query succeeds, the graph exists (or is the default graph).
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -160,6 +161,7 @@ pub async fn graph_store_head(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 
@@ -219,7 +221,7 @@ pub async fn graph_store_put(
     let read_only = state.service().is_query_read_only();
     let identity = auth.identity(read_only);
 
-    QueryService::execute(
+    QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -229,13 +231,14 @@ pub async fn graph_store_put(
         timeout,
         read_only,
         Some(identity.clone()),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 
     // Insert new content.
     if !parsed.lines.is_empty() {
         let insert_sparql = build_insert_data(&target, &parsed);
-        QueryService::execute(
+        QueryService::execute_with_audit(
             state.databases(),
             state.metrics(),
             &db_name,
@@ -245,6 +248,7 @@ pub async fn graph_store_put(
             timeout,
             read_only,
             Some(identity),
+            state.audit_ref("http", auth.actor()),
         )
         .await?;
     }
@@ -279,7 +283,7 @@ pub async fn graph_store_post(
         let create_sparql = format!("CREATE GRAPH <{graph_iri}>");
         let timeout = state.effective_timeout(None);
 
-        QueryService::execute(
+        QueryService::execute_with_audit(
             state.databases(),
             state.metrics(),
             &db_name,
@@ -289,13 +293,14 @@ pub async fn graph_store_post(
             timeout,
             read_only,
             Some(identity.clone()),
+            state.audit_ref("http", auth.actor()),
         )
         .await?;
 
         if !parsed.lines.is_empty() {
             let target = GraphTarget::Named(graph_iri.clone());
             let insert_sparql = build_insert_data(&target, &parsed);
-            QueryService::execute(
+            QueryService::execute_with_audit(
                 state.databases(),
                 state.metrics(),
                 &db_name,
@@ -305,6 +310,7 @@ pub async fn graph_store_post(
                 timeout,
                 read_only,
                 Some(identity),
+                state.audit_ref("http", auth.actor()),
             )
             .await?;
         }
@@ -324,7 +330,7 @@ pub async fn graph_store_post(
     if !parsed.lines.is_empty() {
         let insert_sparql = build_insert_data(&target, &parsed);
         let timeout = state.effective_timeout(None);
-        QueryService::execute(
+        QueryService::execute_with_audit(
             state.databases(),
             state.metrics(),
             &db_name,
@@ -334,6 +340,7 @@ pub async fn graph_store_post(
             timeout,
             read_only,
             Some(identity),
+            state.audit_ref("http", auth.actor()),
         )
         .await?;
     }
@@ -363,7 +370,7 @@ pub async fn graph_store_delete(
     let timeout = state.effective_timeout(None);
     let identity = auth.identity(state.service().is_query_read_only());
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         &db_name,
@@ -373,6 +380,7 @@ pub async fn graph_store_delete(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await;
 

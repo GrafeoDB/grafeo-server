@@ -10,6 +10,7 @@
 //! **Zero transport dependencies** — no axum, no tonic, no wire-protocol code.
 
 pub mod admin;
+pub mod audit;
 pub mod auth;
 pub mod backup;
 #[cfg(feature = "push-changefeed")]
@@ -21,6 +22,7 @@ pub mod error;
 pub mod metrics;
 pub mod query;
 pub mod rate_limit;
+pub mod remote;
 #[cfg(feature = "replication")]
 pub mod replication;
 pub mod schema;
@@ -72,6 +74,8 @@ pub struct ServiceConfig {
     pub backup_dir: Option<String>,
     /// Number of backups to keep per database (retention policy).
     pub backup_retention: Option<usize>,
+    /// Audit log configuration; `None` disables auditing.
+    pub audit: Option<audit::AuditConfig>,
 }
 
 /// Shared service state, cloneable across all transport handlers.
@@ -102,13 +106,31 @@ struct Inner {
     replication_state: Arc<replication::ReplicationState>,
     backup_dir: Option<PathBuf>,
     backup_retention: Option<usize>,
+    audit: Option<Arc<audit::AuditLogger>>,
 }
 
 impl ServiceState {
     /// Creates a new service state from config.
+    ///
+    /// # Panics
+    ///
+    /// Where [`try_new`](Self::try_new) returns an error.
     pub fn new(config: &ServiceConfig) -> Self {
+        Self::try_new(config).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// As [`new`](Self::new), returning the start-up errors an operator can
+    /// fix (such as `--read-only` on a data directory without a database)
+    /// instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`DatabaseManager::try_new`], and of loading the token
+    /// store when one is configured (a corrupt `tokens.json` is a start-up
+    /// error, not a panic).
+    pub fn try_new(config: &ServiceConfig) -> Result<Self, error::ServiceError> {
         #[allow(unused_mut)]
-        let mut databases = DatabaseManager::new(config.data_dir.as_deref(), config.read_only);
+        let mut databases = DatabaseManager::try_new(config.data_dir.as_deref(), config.read_only)?;
 
         // Enable CDC on all databases when running as a replication primary,
         // so that mutations produce change events for replicas to consume.
@@ -117,7 +139,7 @@ impl ServiceState {
             databases.set_cdc_enabled(true);
         }
 
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
                 databases,
                 sessions: SessionRegistry::new(),
@@ -148,10 +170,11 @@ impl ServiceState {
                         })
                     });
                     if let Some(ref path) = store_path {
-                        let store = Arc::new(
-                            token_store::TokenStore::load(path)
-                                .unwrap_or_else(|e| panic!("failed to load token store: {e}")),
-                        );
+                        let store = Arc::new(token_store::TokenStore::load(path).map_err(|e| {
+                            error::ServiceError::Internal(format!(
+                                "failed to load token store '{path}': {e}"
+                            ))
+                        })?);
                         auth::AuthProvider::with_token_store(
                             config.auth_token.clone(),
                             config.auth_user.clone(),
@@ -180,8 +203,19 @@ impl ServiceState {
                 }),
                 backup_dir: config.backup_dir.as_ref().map(PathBuf::from),
                 backup_retention: config.backup_retention,
+                audit: config
+                    .audit
+                    .clone()
+                    .map(|cfg| {
+                        audit::AuditLogger::new(cfg).map(Arc::new).map_err(|e| {
+                            error::ServiceError::Internal(format!(
+                                "failed to open the audit log: {e}"
+                            ))
+                        })
+                    })
+                    .transpose()?,
             }),
-        }
+        })
     }
 
     /// Creates an in-memory service state (for tests and ephemeral use).
@@ -206,6 +240,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -233,6 +268,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -260,6 +296,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -289,6 +326,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -318,6 +356,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -344,6 +383,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -374,6 +414,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -470,6 +511,66 @@ impl ServiceState {
         self.inner.backup_retention
     }
 
+    // --- Audit ---
+
+    /// The audit logger, when auditing is on (`--audit`).
+    pub fn audit(&self) -> Option<&Arc<audit::AuditLogger>> {
+        self.inner.audit.as_ref()
+    }
+
+    /// An owned audit handle for the query path; `None` when auditing is off.
+    pub fn audit_ref(
+        &self,
+        transport: &'static str,
+        actor: Option<&str>,
+    ) -> Option<audit::AuditRef> {
+        self.inner.audit.as_ref().map(|logger| audit::AuditRef {
+            logger: Arc::clone(logger),
+            actor: actor.map(str::to_string),
+            transport,
+        })
+    }
+
+    /// Records one audit event; a no-op when auditing is off.
+    pub fn audit_event(&self, event: audit::AuditEvent) {
+        if let Some(audit) = &self.inner.audit {
+            audit.log(event);
+        }
+    }
+
+    /// Audits a write statement that changed data. A no-op unless auditing
+    /// is on and `--audit-data-changes` is set.
+    pub fn audit_data_change(
+        &self,
+        actor: Option<&str>,
+        database: &str,
+        transport: &str,
+        statement: &str,
+        counters: &grafeo_engine::database::WriteCounters,
+    ) {
+        if let Some(audit) = &self.inner.audit {
+            audit.data_change(actor, database, transport, statement, counters);
+        }
+    }
+
+    /// Enables the audit log on this state. Call it before the state is
+    /// shared (cloned into handlers).
+    pub fn with_audit(mut self, config: audit::AuditConfig) -> std::io::Result<Self> {
+        let logger = Arc::new(audit::AuditLogger::new(config)?);
+        Arc::get_mut(&mut self.inner)
+            .expect("with_audit is called before the state is shared")
+            .audit = Some(logger);
+        Ok(self)
+    }
+
+    /// Creates an in-memory state with the audit log enabled (for tests).
+    pub fn new_in_memory_with_audit(
+        session_ttl: u64,
+        config: audit::AuditConfig,
+    ) -> std::io::Result<Self> {
+        Self::new_in_memory(session_ttl).with_audit(config)
+    }
+
     // --- Maintenance ---
 
     /// Clean up expired sessions. Returns count removed.
@@ -501,4 +602,37 @@ impl ServiceState {
 /// Resolve a database name from an optional request field.
 pub fn resolve_db_name(database: Option<&str>) -> &str {
     database.unwrap_or("default")
+}
+
+#[cfg(all(test, feature = "auth"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_corrupt_token_store_is_a_startup_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let config = ServiceConfig {
+            data_dir: None,
+            read_only: false,
+            session_ttl: 300,
+            query_timeout: 30,
+            rate_limit: 0,
+            rate_limit_window: 60,
+            auth_token: Some("t".to_string()),
+            auth_user: None,
+            auth_password: None,
+            token_store_path: Some(path.to_string_lossy().into_owned()),
+            #[cfg(feature = "replication")]
+            replication_mode: replication::ReplicationMode::Standalone,
+            backup_dir: None,
+            backup_retention: None,
+            audit: None,
+        };
+        let err = ServiceState::try_new(&config)
+            .err()
+            .expect("a corrupt token store must fail start-up");
+        assert!(err.to_string().contains("token store"), "{err}");
+    }
 }

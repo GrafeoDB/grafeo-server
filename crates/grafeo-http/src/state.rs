@@ -28,6 +28,24 @@ struct AppInner {
     trusted_proxies: Vec<IpAddr>,
     max_body_size: usize,
     max_batch_size: usize,
+    /// `/metrics` answers without credentials (`--public-metrics`).
+    public_metrics: bool,
+    /// Host names this server answers on (`--trusted-hosts`, the `--host`
+    /// value, and loopback by default); the cross-site check trusts
+    /// `Sec-Fetch-Site: same-origin` only for these.
+    trusted_hosts: Vec<String>,
+    /// The scheme clients use (`https` when TLS is on), for comparing an
+    /// `Origin` against the request's `Host`.
+    scheme: &'static str,
+}
+
+/// Host names every server trusts without configuration: loopback names.
+pub fn default_trusted_hosts() -> Vec<String> {
+    vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ]
 }
 
 impl Deref for AppState {
@@ -53,6 +71,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -74,6 +95,9 @@ impl AppState {
                 trusted_proxies,
                 max_body_size,
                 max_batch_size,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -88,6 +112,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -103,6 +130,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -118,6 +148,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -132,6 +165,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -154,6 +190,9 @@ impl AppState {
                 trusted_proxies: vec![],
                 max_body_size: 2_097_152,
                 max_batch_size: 1000,
+                public_metrics: false,
+                trusted_hosts: default_trusted_hosts(),
+                scheme: "http",
             }),
         }
     }
@@ -161,6 +200,45 @@ impl AppState {
     /// Returns the configured CORS allowed origins.
     pub fn cors_origins(&self) -> &[String] {
         &self.inner.cors_origins
+    }
+
+    /// Lets `/metrics` answer without credentials when auth is on
+    /// (`--public-metrics`). Call it while building the state, before it is
+    /// cloned.
+    #[must_use]
+    pub fn with_public_metrics(mut self, public: bool) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_public_metrics is called before the state is shared")
+            .public_metrics = public;
+        self
+    }
+
+    /// Whether `/metrics` answers without credentials.
+    pub fn public_metrics(&self) -> bool {
+        self.inner.public_metrics
+    }
+
+    /// Sets the trusted host names and the client-facing scheme (for the
+    /// cross-site check). Call it while building the state, before it is
+    /// cloned.
+    #[must_use]
+    pub fn with_trusted_hosts(mut self, hosts: Vec<String>, scheme: &'static str) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("with_trusted_hosts is called before the state is shared");
+        inner.trusted_hosts = hosts;
+        inner.scheme = scheme;
+        self
+    }
+
+    /// Host names this server answers on; the cross-site check trusts
+    /// `Sec-Fetch-Site: same-origin` only for these.
+    pub fn trusted_hosts(&self) -> &[String] {
+        &self.inner.trusted_hosts
+    }
+
+    /// The scheme clients use (`https` when TLS is on).
+    pub fn scheme(&self) -> &'static str {
+        self.inner.scheme
     }
 
     /// Returns the compiled feature flags.

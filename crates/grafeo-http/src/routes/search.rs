@@ -1,8 +1,9 @@
-//! Search endpoints — vector, text, and hybrid search.
+//! Search endpoints: vector, text and hybrid search.
 
 use axum::extract::{Json, State};
 
 use crate::error::ApiError;
+use crate::middleware::auth_context::AuthContext;
 use crate::state::AppState;
 use crate::types::SearchResponse;
 
@@ -25,9 +26,11 @@ use grafeo_service::types;
 )]
 pub async fn vector_search(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(req): Json<types::VectorSearchReq>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let db_name = req.database.clone();
+    auth.check_db_access(&db_name)?;
     let hits = SearchService::vector_search(state.databases(), &db_name, req).await?;
     Ok(Json(SearchResponse { hits }))
 }
@@ -48,9 +51,11 @@ pub async fn vector_search(
 )]
 pub async fn text_search(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(req): Json<types::TextSearchReq>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let db_name = req.database.clone();
+    auth.check_db_access(&db_name)?;
     let hits = SearchService::text_search(state.databases(), &db_name, req).await?;
     Ok(Json(SearchResponse { hits }))
 }
@@ -71,9 +76,11 @@ pub async fn text_search(
 )]
 pub async fn hybrid_search(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(req): Json<types::HybridSearchReq>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let db_name = req.database.clone();
+    auth.check_db_access(&db_name)?;
     let hits = SearchService::hybrid_search(state.databases(), &db_name, req).await?;
     Ok(Json(SearchResponse { hits }))
 }

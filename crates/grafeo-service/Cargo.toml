@@ -108,7 +108,7 @@ ring-index = ["grafeo-engine/ring-index", "triple-store"]
 arrow-export = ["grafeo-engine/arrow-export"]
 
 # Schema loading
-owl-schema = ["dep:sophia_turtle", "dep:sophia_api"]
+owl-schema = ["dep:sophia_turtle", "dep:sophia_api", "sparql"]
 rdfs-schema = ["owl-schema"]
 json-schema = []
 

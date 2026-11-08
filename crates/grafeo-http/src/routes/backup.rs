@@ -89,7 +89,7 @@ pub async fn list_all_backups(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<types::BackupEntry>>, ApiError> {
-    auth.check_admin()?;
+    auth.check_server_admin()?;
     let backup_dir = require_backup_dir(&state)?;
     let entries = BackupService::list_backups(None, &backup_dir)?;
     Ok(Json(entries))
@@ -121,6 +121,9 @@ pub async fn restore_backup(
     Json(req): Json<types::RestoreRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     auth.check_admin()?;
+    // A cross-database restore reads the source database's data.
+    auth.check_db_access(&db)?;
+    auth.check_db_access(req.source_db.as_deref().unwrap_or(db.as_str()))?;
     let backup_dir = require_backup_dir(&state)?;
 
     // Source database defaults to the target for same-db restores. When
@@ -133,7 +136,7 @@ pub async fn restore_backup(
     // segments and the JSON body arrives as arbitrary strings, so both
     // paths need explicit traversal checks before they're joined.
     for param in [db.as_str(), source_db, req.backup.as_str()] {
-        if param.contains('/') || param.contains('\\') || param.contains("..") {
+        if !grafeo_service::backup::is_plain_name(param) {
             return Err(grafeo_service::error::ServiceError::BadRequest(
                 "invalid path parameter".to_string(),
             )
@@ -201,7 +204,7 @@ pub async fn download_backup(
 
     // Validate both params — axum percent-decodes path segments
     for param in [&db, &filename] {
-        if param.contains('/') || param.contains('\\') || param.contains("..") {
+        if !grafeo_service::backup::is_plain_name(param) {
             return Err(grafeo_service::error::ServiceError::BadRequest(
                 "invalid path parameter".to_string(),
             )

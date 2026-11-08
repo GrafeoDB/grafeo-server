@@ -38,6 +38,9 @@ pub struct BoltrOptions {
     pub tls_key: Option<String>,
     #[cfg(feature = "auth")]
     pub auth_provider: Option<std::sync::Arc<dyn grafeo_service::auth::AuthProviderTrait>>,
+    /// Audit logger for failed LOGON authentication, shared with the
+    /// service state.
+    pub audit: Option<std::sync::Arc<grafeo_service::audit::AuditLogger>>,
     pub shutdown: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
@@ -85,7 +88,11 @@ pub async fn serve(
     #[cfg(feature = "auth")]
     if let Some(provider) = options.auth_provider {
         let pending = backend_pending.clone();
-        builder = builder.auth(auth::BoltrAuthValidator::new(provider, pending));
+        builder = builder.auth(auth::BoltrAuthValidator::new(
+            provider,
+            pending,
+            options.audit,
+        ));
 
         // Reap stale auth nonces from clients that never completed session creation.
         _reaper = Some(grafeo_service::auth::spawn_pending_auth_reaper(

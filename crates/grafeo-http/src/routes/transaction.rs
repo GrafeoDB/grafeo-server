@@ -96,7 +96,7 @@ pub async fn tx_query(
     let params = convert_json_params(req.params.as_ref())?;
     let timeout = state.effective_timeout(req.timeout_ms);
 
-    let result = QueryService::tx_execute(
+    let result = QueryService::tx_execute_with_audit(
         state.sessions(),
         state.metrics(),
         &session_id,
@@ -106,6 +106,7 @@ pub async fn tx_query(
         params,
         timeout,
         caller_token_id,
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 
@@ -137,11 +138,12 @@ pub async fn tx_commit(
     let session_id = get_session_id(&headers)?;
     let caller_token_id = auth.0.as_ref().map(|info| info.id.as_str());
 
-    QueryService::commit(
+    QueryService::commit_with_audit(
         state.sessions(),
         &session_id,
         state.session_ttl(),
         caller_token_id,
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

@@ -20,11 +20,13 @@ Pure Rust, single binary. Available in four tiers to match different deployment 
 
 ```bash
 # Standard - HTTP + Studio UI, all query languages
-docker run -p 7474:7474 grafeo/grafeo-server
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
 
-# With persistent storage
-docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /data
+# With persistent storage (args replace the image CMD, so pass --host explicitly)
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token -v grafeo-data:/data grafeo/grafeo-server --host 0.0.0.0 --data-dir /data
 ```
+
+The images listen on `0.0.0.0`, so they refuse to start without credentials: set `GRAFEO_AUTH_TOKEN` (or `GRAFEO_AUTH_USER` and `GRAFEO_AUTH_PASSWORD`), or `GRAFEO_ALLOW_UNAUTHENTICATED=true` to accept unauthenticated access (for a trusted network only).
 
 Four image tiers are available:
 
@@ -37,13 +39,13 @@ Four image tiers are available:
 
 ```bash
 # GWP - gRPC wire protocol, GQL only
-docker run -p 7688:7688 grafeo/grafeo-server:gwp --data-dir /data
+docker run -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:gwp --host 0.0.0.0 --data-dir /data
 
 # Bolt - Neo4j-compatible wire protocol, Cypher
-docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
+docker run -p 7687:7687 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:bolt --host 0.0.0.0 --data-dir /data
 
 # Full - everything including AI, auth, TLS, schemas
-docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 grafeo/grafeo-server:full
+docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:full
 ```
 
 Versioned tags: `grafeo-server:0.4.8`, `grafeo-server:0.4.8-gwp`, `grafeo-server:0.4.8-bolt`, `grafeo-server:0.4.8-full`.
@@ -53,7 +55,7 @@ See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-
 ### Docker Compose
 
 ```bash
-docker compose up -d
+GRAFEO_AUTH_TOKEN=my-secret-token docker compose up -d
 ```
 
 The server is available at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`.
@@ -70,6 +72,8 @@ cargo run -- --data-dir ./data
 # Or in-memory mode for quick experimentation
 cargo run
 ```
+
+From source the server listens on `127.0.0.1` only. To serve other machines, pass `--host 0.0.0.0` with credentials (see [Authentication](#authentication)).
 
 ## API
 
@@ -348,36 +352,46 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 
 | Variable | CLI Flag | Default | Description |
 |----------|----------|---------|-------------|
-| `GRAFEO_HOST` | `--host` | `0.0.0.0` | Bind address |
+| `GRAFEO_HOST` | `--host` | `127.0.0.1` | Bind address for every transport; a non-loopback address needs credentials or `--allow-unauthenticated` |
+| `GRAFEO_ALLOW_UNAUTHENTICATED` | `--allow-unauthenticated` | `false` | Start on a non-loopback `--host` without credentials |
 | `GRAFEO_PORT` | `--port` | `7474` | HTTP bind port |
 | `GRAFEO_DATA_DIR` | `--data-dir` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_READ_ONLY` | `--read-only` | `false` | Open all databases in read-only mode |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
 | `GRAFEO_GWP_PORT` | `--gwp-port` | `7688` | GQL Wire Protocol (gRPC) port |
-| `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `0` | Max concurrent GWP sessions (0 = unlimited) |
+| `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `1000` | Max concurrent GWP sessions (0 = unlimited) |
 | `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
-| `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
+| `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `1000` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
 | `GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE` | `--bolt-max-unauthenticated-message-size` | `0` | Largest Bolt message before LOGON, in bytes (0 = the default, 64 KiB) |
 | `GRAFEO_BOLT_HANDSHAKE_TIMEOUT` | `--bolt-handshake-timeout` | `30` | Seconds a Bolt connection has to finish its handshake, HELLO and LOGON (0 = no limit) |
-| `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated allowed origins (`*` for all) |
+| `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated origins whose pages may call the API, write and open the WebSocket (`*` for all) |
+| `GRAFEO_TRUSTED_HOSTS` | `--trusted-hosts` | loopback + `--host` | Additional host names the server answers on; `Sec-Fetch-Site: same-origin` is trusted only for these `Host` values (DNS-rebinding protection). Add the public name when a proxy rewrites `Host` |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
 | `GRAFEO_RATE_LIMIT` | `--rate-limit` | `0` | Max requests per window per IP (0 = disabled) |
 | `GRAFEO_RATE_LIMIT_WINDOW` | `--rate-limit-window` | `60` | Rate limit window in seconds |
+| `GRAFEO_AUDIT` | `--audit` | `false` | Audit log: JSON lines with failed authentication (source IP), refused requests, token/database lifecycle events |
+| `GRAFEO_AUDIT_LOG_FILE` | `--audit-log-file` | _(stdout)_ | Audit log file, rotating at `--audit-max-size-mb` |
+| `GRAFEO_AUDIT_MAX_SIZE_MB` | `--audit-max-size-mb` | `100` | Rotate the audit log file past this size in MiB (0 = never) |
+| `GRAFEO_AUDIT_KEEP` | `--audit-keep` | `5` | Rotated audit log files to keep |
+| `GRAFEO_AUDIT_DATA_CHANGES` | `--audit-data-changes` | `false` | Also audit write statements that changed data |
 
-### Authentication (feature: `auth`)
+### Authentication
 
-Requires building with `--features auth` or `--features full`.
+Included in the default build and every image (feature `auth`). A server on a non-loopback `--host` refuses to start without credentials unless `--allow-unauthenticated` is given.
 
 | Variable | CLI Flag | Default | Description |
 |----------|----------|---------|-------------|
 | `GRAFEO_AUTH_TOKEN` | `--auth-token` | _(none)_ | Bearer token / API key |
 | `GRAFEO_AUTH_USER` | `--auth-user` | _(none)_ | HTTP Basic username (requires password) |
 | `GRAFEO_AUTH_PASSWORD` | `--auth-password` | _(none)_ | HTTP Basic password (requires username) |
+| `GRAFEO_PUBLIC_METRICS` | `--public-metrics` | `false` | Serve `/metrics` without credentials when auth is on |
 
-When an auth token is set, all API endpoints require `Authorization: Bearer <token>` or `X-API-Key: <token>`. `/health`, `/metrics` and `/studio/` are exempt.
+When an auth token is set, all API endpoints require `Authorization: Bearer <token>` or `X-API-Key: <token>`. `/health` and `/studio/` are exempt, and `/metrics` too with `--public-metrics` (`GRAFEO_PUBLIC_METRICS`); otherwise a Prometheus scrape sends the token (`authorization` in its scrape config).
+
+A browser page from another origin can't write (POST, PUT, PATCH, DELETE) or open the WebSocket, with or without credentials, unless `--cors-origins` lists its origin; such a request gets 403 `cross_site_request`. Non-browser clients and Studio are unaffected.
 
 ```bash
 # Bearer token
@@ -405,14 +419,14 @@ grafeo-server --tls-cert cert.pem --tls-key key.pem
 ### Examples
 
 ```bash
-# Minimal (in-memory, no auth)
+# Minimal (in-memory, loopback only, no auth)
 grafeo-server
 
 # Persistent with auth and rate limiting
 grafeo-server --data-dir ./data --auth-token my-token --rate-limit 100
 
 # Production with TLS
-grafeo-server --data-dir /data --tls-cert /certs/cert.pem --tls-key /certs/key.pem \
+grafeo-server --host 0.0.0.0 --data-dir /data --tls-cert /certs/cert.pem --tls-key /certs/key.pem \
   --auth-token $API_TOKEN --rate-limit 1000 --cors-origins "https://app.example.com" \
   --log-format json
 ```

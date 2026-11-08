@@ -8,28 +8,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use grafeo_engine::auth::{Identity, Role};
+use grafeo_engine::auth::Identity;
 use grafeo_engine::database::QueryResult;
 
+use crate::audit::AuditRef;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 use crate::metrics::{Language, Metrics, determine_language};
+use crate::remote::remote_session;
 use crate::session::{ManagedSession, SessionRegistry};
 use crate::types::BatchQuery;
-
-/// Create a session from a database handle, using the provided identity
-/// or falling back to read_only / full-access based on the flag.
-fn create_session(
-    db: &grafeo_engine::GrafeoDB,
-    identity: Option<Identity>,
-    read_only: bool,
-) -> grafeo_engine::Session {
-    match identity {
-        Some(id) => db.session_with_identity(id),
-        None if read_only => db.session_with_role(Role::ReadOnly),
-        None => db.session(),
-    }
-}
 
 /// Centralized query execution service.
 ///
@@ -54,15 +42,52 @@ impl QueryService {
         read_only: bool,
         identity: Option<Identity>,
     ) -> Result<QueryResult, ServiceError> {
+        Self::execute_with_audit(
+            databases, metrics, db_name, statement, language, params, timeout, read_only, identity,
+            None,
+        )
+        .await
+    }
+
+    /// As [`execute`](Self::execute), also auditing the statement when it
+    /// changed data (`audit` is `None` when the audit log is off). The audit
+    /// write happens inside the blocking task, so a write that commits after
+    /// the caller's timeout still lands in the log.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_with_audit(
+        databases: &DatabaseManager,
+        metrics: &Metrics,
+        db_name: &str,
+        statement: &str,
+        language: Option<&str>,
+        params: Option<HashMap<String, grafeo_common::Value>>,
+        timeout: Option<Duration>,
+        read_only: bool,
+        identity: Option<Identity>,
+        audit: Option<AuditRef>,
+    ) -> Result<QueryResult, ServiceError> {
         let entry = databases.get_available(db_name)?;
 
         let lang = determine_language(language)?;
         let stmt = statement.to_owned();
+        let audit_db = db_name.to_owned();
 
         let result = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let session = create_session(&db, identity, read_only);
-            dispatch_query(&session, &stmt, lang, params.as_ref())
+            let session = remote_session(&db, identity, read_only);
+            let r = dispatch_query(&session, &stmt, lang, params.as_ref());
+            if let (Some(audit), Ok(qr)) = (&audit, &r)
+                && qr.counters.contains_updates()
+            {
+                audit.logger.data_change(
+                    audit.actor.as_deref(),
+                    &audit_db,
+                    audit.transport,
+                    &stmt,
+                    &qr.counters,
+                );
+            }
+            r
         })
         .await;
 
@@ -92,16 +117,67 @@ impl QueryService {
         timeout: Option<Duration>,
         caller_token_id: Option<&str>,
     ) -> Result<QueryResult, ServiceError> {
+        Self::tx_execute_with_audit(
+            sessions,
+            metrics,
+            session_id,
+            ttl_secs,
+            statement,
+            language,
+            params,
+            timeout,
+            caller_token_id,
+            None,
+        )
+        .await
+    }
+
+    /// As [`tx_execute`](Self::tx_execute), also auditing the statement when
+    /// it changed data (`audit` is `None` when the audit log is off).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn tx_execute_with_audit(
+        sessions: &SessionRegistry,
+        metrics: &Metrics,
+        session_id: &str,
+        ttl_secs: u64,
+        statement: &str,
+        language: Option<&str>,
+        params: Option<HashMap<String, grafeo_common::Value>>,
+        timeout: Option<Duration>,
+        caller_token_id: Option<&str>,
+        audit: Option<AuditRef>,
+    ) -> Result<QueryResult, ServiceError> {
         let session_arc = sessions
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
 
         let lang = determine_language(language)?;
         let stmt = statement.to_owned();
+        // Transaction writes are audited at commit time (see
+        // `commit_with_audit`), not here: a rollback or a failed commit must
+        // not leave a `data_change` line for writes that never persisted.
+        // While data-change auditing is on, the (truncated) statement and its
+        // counters are queued on the session, capped, for the commit to log.
+        let collect = audit
+            .as_ref()
+            .is_some_and(|a| a.logger.data_changes_enabled());
 
         let result = run_with_timeout(timeout, move || {
-            let session = session_arc.lock();
-            dispatch_query(&session.engine_session, &stmt, lang, params.as_ref())
+            let mut session = session_arc.lock();
+            let r = dispatch_query(&session.engine_session, &stmt, lang, params.as_ref());
+            if collect
+                && let Ok(qr) = &r
+                && qr.counters.contains_updates()
+            {
+                if session.pending_writes.len() < crate::audit::MAX_PENDING_WRITES {
+                    session
+                        .pending_writes
+                        .push((crate::audit::truncate(&stmt, 500), qr.counters));
+                } else {
+                    session.pending_writes_dropped += 1;
+                }
+            }
+            r
         })
         .await;
 
@@ -135,7 +211,7 @@ impl QueryService {
         let db_name = db_name.to_owned();
         let session_id = tokio::task::spawn_blocking(move || {
             let db = entry.db();
-            let mut engine_session = create_session(&db, identity, read_only);
+            let mut engine_session = remote_session(&db, identity, read_only);
             engine_session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -160,9 +236,25 @@ impl QueryService {
         ttl_secs: u64,
         caller_token_id: Option<&str>,
     ) -> Result<(), ServiceError> {
+        Self::commit_with_audit(sessions, session_id, ttl_secs, caller_token_id, None).await
+    }
+
+    /// As [`commit`](Self::commit), auditing the transaction's write
+    /// statements when the commit succeeds (`audit` is `None` when the audit
+    /// log is off). Statements that ran in the transaction were queued on
+    /// the session by `tx_execute_with_audit`; a failed commit logs nothing,
+    /// since nothing persisted.
+    pub async fn commit_with_audit(
+        sessions: &SessionRegistry,
+        session_id: &str,
+        ttl_secs: u64,
+        caller_token_id: Option<&str>,
+        audit: Option<AuditRef>,
+    ) -> Result<(), ServiceError> {
         let session_arc = sessions
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
+        let audit_session = session_arc.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let mut session = session_arc.lock();
@@ -174,6 +266,39 @@ impl QueryService {
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))
         .and_then(|r| r);
+
+        if result.is_ok()
+            && let Some(audit) = audit
+        {
+            let (db_name, writes, dropped) = {
+                let mut session = audit_session.lock();
+                (
+                    session.db_name.clone(),
+                    std::mem::take(&mut session.pending_writes),
+                    std::mem::take(&mut session.pending_writes_dropped),
+                )
+            };
+            for (stmt, counters) in writes {
+                audit.logger.data_change(
+                    audit.actor.as_deref(),
+                    &db_name,
+                    audit.transport,
+                    &stmt,
+                    &counters,
+                );
+            }
+            if dropped > 0 {
+                audit.logger.log(
+                    crate::audit::AuditEvent::new("data_change")
+                        .actor(audit.actor.as_deref())
+                        .database(&db_name)
+                        .transport(audit.transport)
+                        .detail(format!(
+                            "{dropped} further transaction writes not recorded (queue cap)"
+                        )),
+                );
+            }
+        }
 
         sessions.remove(session_id);
         result
@@ -217,6 +342,25 @@ impl QueryService {
         read_only: bool,
         identity: Option<Identity>,
     ) -> Result<Vec<QueryResult>, ServiceError> {
+        Self::batch_execute_with_audit(
+            databases, metrics, db_name, queries, timeout, read_only, identity, None,
+        )
+        .await
+    }
+
+    /// As [`batch_execute`](Self::batch_execute), also auditing every
+    /// statement that changed data (`audit` is `None` when auditing is off).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn batch_execute_with_audit(
+        databases: &DatabaseManager,
+        metrics: &Metrics,
+        db_name: &str,
+        queries: Vec<BatchQuery>,
+        timeout: Option<Duration>,
+        read_only: bool,
+        identity: Option<Identity>,
+        audit: Option<AuditRef>,
+    ) -> Result<Vec<QueryResult>, ServiceError> {
         if queries.is_empty() {
             return Ok(vec![]);
         }
@@ -235,10 +379,21 @@ impl QueryService {
             })
             .collect::<Result<_, _>>()?;
         let batch_languages = languages.clone();
+        // Only clone the statements when data-change auditing is on (the
+        // default is off).
+        let audit_statements: Option<Vec<String>> = audit.as_ref().and_then(|a| {
+            a.logger.data_changes_enabled().then(|| {
+                queries
+                    .iter()
+                    .map(|q| crate::audit::truncate(&q.statement, 500))
+                    .collect()
+            })
+        });
+        let audit_db = db_name.to_owned();
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let mut session = create_session(&db, identity, read_only);
+            let mut session = remote_session(&db, identity, read_only);
             session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -266,11 +421,28 @@ impl QueryService {
 
             session.commit().map_err(ServiceError::from_engine)?;
 
+            // Audit the writes inside the blocking task, after the commit: a
+            // batch that commits after the caller's timeout is still logged,
+            // and a rolled-back one never is.
+            if let (Some(audit), Some(statements)) = (&audit, &audit_statements) {
+                for (idx, qr) in results.iter().enumerate() {
+                    if qr.counters.contains_updates() {
+                        audit.logger.data_change(
+                            audit.actor.as_deref(),
+                            &audit_db,
+                            audit.transport,
+                            &statements[idx],
+                            &qr.counters,
+                        );
+                    }
+                }
+            }
+
             Ok(results)
         })
         .await?;
 
-        // Record metrics for all successful queries
+        // Record metrics for all successful queries.
         for (lang, qr) in languages.iter().zip(results.iter()) {
             let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
             metrics.record_query(*lang, dur_us);
@@ -955,7 +1127,7 @@ mod tests {
     async fn execute_write_with_read_only_identity_returns_forbidden() {
         let s = state();
         // Use a read-only identity to attempt a write operation.
-        let identity = Identity::new("readonly-user", [Role::ReadOnly]);
+        let identity = Identity::new("readonly-user", [grafeo_engine::auth::Role::ReadOnly]);
         let err = QueryService::execute(
             s.databases(),
             s.metrics(),

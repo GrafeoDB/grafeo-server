@@ -13,6 +13,11 @@ use crate::error::ApiError;
 pub struct AuthContext(pub Option<grafeo_service::auth::TokenInfo>);
 
 impl AuthContext {
+    /// The authenticated token's name, for audit records. `None` when auth is off.
+    pub fn actor(&self) -> Option<&str> {
+        self.0.as_ref().map(|info| info.name.as_str())
+    }
+
     /// Check that the token can access the given database. No-op when auth is off.
     pub fn check_db_access(&self, db_name: &str) -> Result<(), ApiError> {
         if let Some(ref info) = self.0
@@ -32,6 +37,21 @@ impl AuthContext {
             && !info.identity().can_admin()
         {
             return Err(ApiError::forbidden("admin access required".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Check that the token is an admin with no database list: server-wide
+    /// operations (token management, every database's backups, replication
+    /// status). No-op when auth is off.
+    pub fn check_server_admin(&self) -> Result<(), ApiError> {
+        self.check_admin()?;
+        if let Some(ref info) = self.0
+            && !info.scope.databases.is_empty()
+        {
+            return Err(ApiError::forbidden(
+                "admin access to every database required".to_string(),
+            ));
         }
         Ok(())
     }

@@ -155,12 +155,7 @@ impl BoltBackend for GrafeoBackend {
             let ro = self.state.is_query_read_only();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    if ro {
-                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-                    } else {
-                        db.session()
-                    }
+                    grafeo_service::remote::remote_session(&entry.db(), None, ro)
                 })
                 .await
                 .map_err(BoltError::backend)?,
@@ -221,9 +216,7 @@ impl BoltBackend for GrafeoBackend {
                 let ro = self.state.is_query_read_only();
                 let id_clone = identity.clone();
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    let effective = grafeo_service::auth::cap_identity_read_only(id_clone, ro);
-                    db.session_with_identity(effective)
+                    grafeo_service::remote::remote_session(&entry.db(), Some(id_clone), ro)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -292,18 +285,10 @@ impl BoltBackend for GrafeoBackend {
                     s.identity.clone()
                 };
 
+                #[cfg(not(feature = "auth"))]
+                let identity = None;
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    let db = entry.db();
-                    #[cfg(feature = "auth")]
-                    if let Some(id) = identity {
-                        let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                        return db.session_with_identity(effective);
-                    }
-                    if ro {
-                        db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-                    } else {
-                        db.session()
-                    }
+                    grafeo_service::remote::remote_session(&entry.db(), identity, ro)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -341,18 +326,10 @@ impl BoltBackend for GrafeoBackend {
         #[cfg(feature = "auth")]
         let identity = session_arc.lock().identity.clone();
 
+        #[cfg(not(feature = "auth"))]
+        let identity = None;
         let engine_session = tokio::task::spawn_blocking(move || {
-            let db = entry.db();
-            #[cfg(feature = "auth")]
-            if let Some(id) = identity {
-                let effective = grafeo_service::auth::cap_identity_read_only(id, ro);
-                return db.session_with_identity(effective);
-            }
-            if ro {
-                db.session_with_role(grafeo_engine::auth::Role::ReadOnly)
-            } else {
-                db.session()
-            }
+            grafeo_service::remote::remote_session(&entry.db(), identity, ro)
         })
         .await
         .map_err(BoltError::backend)?;
@@ -374,6 +351,8 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         let is_mutation = is_mutation_query(query);
         let statement = query.to_owned();
+        let audit_stmt = statement.clone();
+        let audit_session = session_arc.clone();
         let params = convert_params(parameters);
 
         // Grafeo extension: language selection via extra dict.
@@ -401,6 +380,21 @@ impl BoltBackend for GrafeoBackend {
         })
         .await
         .map_err(BoltError::backend)??;
+
+        if result.counters.contains_updates() {
+            let s = audit_session.lock();
+            #[cfg(feature = "auth")]
+            let actor = s.identity.as_ref().map(|i| i.user_id().to_string());
+            #[cfg(not(feature = "auth"))]
+            let actor: Option<String> = None;
+            self.state.audit_data_change(
+                actor.as_deref(),
+                &s.database,
+                "bolt",
+                &audit_stmt,
+                &result.counters,
+            );
+        }
 
         let columns = result.columns.clone();
         let records: Vec<BoltRecord> = result

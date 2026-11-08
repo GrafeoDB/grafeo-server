@@ -498,12 +498,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1390,25 +1384,19 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf2c7d2c464a48f234ead8627d49453f9659b8d2b47950fd8cad890797aef41"
+checksum = "ca11785dbcfd3f5c9c32475ab7722e3da0fdcbfbcb535dff98a245fc245f9145"
 dependencies = [
- "bincode",
  "grafeo-common",
  "grafeo-core",
- "hashbrown 0.17.1",
  "parking_lot 0.13.0",
  "rayon",
- "serde",
- "smallvec",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1424,42 +1412,41 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4e0f9d88086eddbe708976798f2523168b3d6a79b90d42356cb6b303b3eda2"
+checksum = "aa27dcea8a70c2ce83fc751c3022fb207a2b68066ce52364f60c081863026e59"
 dependencies = [
  "arcstr",
  "bincode",
  "bumpalo",
- "byteorder",
  "bytes",
  "dashmap",
  "foldhash 0.2.0",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
  "indexmap",
+ "libc",
  "parking_lot 0.13.0",
  "serde",
  "smallvec",
  "thiserror",
  "tracing",
  "web-time",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "grafeo-core"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08edb309160b8361170bc1d95879e8c59d103557b42b5edce3698566b765af31"
+checksum = "c6de07617c96d44d033929522946c2238a74210c07024f3ac14fab17d6263a22"
 dependencies = [
  "arcstr",
  "bincode",
- "byteorder",
  "bytes",
  "crc32fast",
  "crossbeam",
  "dashmap",
- "foldhash 0.2.0",
  "grafeo-common",
  "hashbrown 0.17.1",
  "indexmap",
@@ -1478,9 +1465,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b64c6a248ca38da1e9157e2411afdd1a77e2e2f04231fdeab705a87770e7971"
+checksum = "0500f98699d74a6c3aa966ade00f5ca242c20ecfbcf5fa677c2ae7a5a483c72f"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1497,7 +1484,6 @@ dependencies = [
  "hf-hub",
  "indexmap",
  "md5",
- "memmap2",
  "ort",
  "parking_lot 0.13.0",
  "regex",
@@ -1505,7 +1491,6 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2",
- "smallvec",
  "thiserror",
  "tokenizers",
  "tracing",
@@ -1513,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1529,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-stream",
  "axum",
@@ -1559,14 +1544,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "grafeo-server"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1580,6 +1565,8 @@ dependencies = [
  "grafeo-service",
  "grafeo-studio",
  "gwp",
+ "prost",
+ "prost-types",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -1592,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -1619,27 +1606,25 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49dab6c0f2b3fb237b42c54b3fc70e3ffc31536bacf9c0eef5a7e2ce5884d3f6"
+checksum = "31d074f2ce89c265ceae49061121191fe2ffa74e5ddffcd67f2941b96e30af92"
 dependencies = [
  "bincode",
- "byteorder",
  "bytes",
  "crc32fast",
- "crossbeam",
  "fs2",
  "grafeo-common",
  "memmap2",
  "parking_lot 0.13.0",
  "serde",
  "thiserror",
- "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "grafeo-studio"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1648,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "grafeo-service",
@@ -1661,9 +1646,9 @@ dependencies = [
 
 [[package]]
 name = "gwp"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22a0bc4eeba46a3318ee6e69697447c8b770e3ef41fa05fb6947bf03f5b61ce"
+checksum = "989680815d3a3868b87132d685c8e91d892428f61b9db57de4556472b34076c3"
 dependencies = [
  "prost",
  "prost-build",
@@ -4161,9 +4146,9 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+checksum = "e2cdfc673aabd30fe8fee92e65837b644c37c5d47f0f97ae6d5e0f1237d15e1b"
 dependencies = [
  "async-trait",
  "axum",
@@ -4183,6 +4168,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -4191,9 +4177,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-build"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
+checksum = "ac6d916d206ed7bdda1778ddff9bda43303789c258877e7bc22fb44ee5c984b4"
 dependencies = [
  "prettyplease 0.2.37",
  "proc-macro2",
@@ -4203,9 +4189,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-health"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+checksum = "bc97d645691d64d96db1afe386d0d2918ac84ab56e2c91e153f22f6349a378cd"
 dependencies = [
  "prost",
  "tokio",
@@ -4216,9 +4202,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
+checksum = "eba464054e2226f182a34489b8b079bf4c6e3e7ab5fd7fc30e024f24aa92a484"
 dependencies = [
  "bytes",
  "prost",
@@ -4227,9 +4213,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost-build"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
+checksum = "2ea216ddc448e08e7839ab09e20e60b06b6a1c32745ccb212c0ebd161c199f1b"
 dependencies = [
  "prettyplease 0.2.37",
  "proc-macro2",

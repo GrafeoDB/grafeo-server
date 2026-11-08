@@ -23,8 +23,12 @@ services:
       - "primary"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
-      - "17474:7474"
+      - "127.0.0.1:17474:7474"
     networks:
       - repl
     healthcheck:
@@ -45,8 +49,12 @@ services:
       - "http://primary:7474"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
-      - "17475:7474"
+      - "127.0.0.1:17475:7474"
     depends_on:
       primary:
         condition: service_healthy
@@ -70,8 +78,12 @@ services:
       - "http://primary:7474"
       - "--port"
       - "7474"
+      # The test cluster runs without credentials on the container network.
+      - "--host"
+      - "0.0.0.0"
+      - "--allow-unauthenticated"
     ports:
-      - "17476:7474"
+      - "127.0.0.1:17476:7474"
     depends_on:
       primary:
         condition: service_healthy

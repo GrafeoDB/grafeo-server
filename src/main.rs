@@ -64,9 +64,30 @@ async fn main() {
         replication_mode,
         backup_dir: config.backup_dir.clone(),
         backup_retention: config.backup_retention,
+        audit: config.audit.then(|| grafeo_service::audit::AuditConfig {
+            log_file: config.audit_log_file.as_ref().map(std::path::PathBuf::from),
+            max_size_bytes: config.audit_max_size_mb * 1024 * 1024,
+            keep: config.audit_keep,
+            data_changes: config.audit_data_changes,
+        }),
     };
 
-    let service = ServiceState::new(&service_config);
+    let service = match ServiceState::try_new(&service_config) {
+        Ok(service) => service,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(2);
+        }
+    };
+
+    #[cfg(feature = "auth")]
+    let has_credentials = service.auth().is_some_and(|a| a.is_enabled());
+    #[cfg(not(feature = "auth"))]
+    let has_credentials = false;
+    if let Err(msg) = config.check_exposure(has_credentials) {
+        tracing::error!("{msg}");
+        std::process::exit(2);
+    }
 
     if config.read_only && config.data_dir.is_none() {
         tracing::warn!("Read-only mode has no effect without --data-dir");
@@ -76,6 +97,7 @@ async fn main() {
         version = env!("CARGO_PKG_VERSION"),
         persistent = config.data_dir.is_some(),
         read_only = config.read_only,
+        audit = config.audit,
         "Grafeo Server starting",
     );
 
@@ -149,6 +171,7 @@ async fn main() {
         #[cfg(feature = "bolt")]
         bolt_handle.await.ok();
 
+        shutdown_audit(&service);
         tracing::info!("Grafeo Server shut down");
         return;
     }
@@ -176,6 +199,20 @@ async fn main() {
             })
             .collect();
 
+        // Host names the cross-site check trusts for `Sec-Fetch-Site:
+        // same-origin`: loopback and `--host` by default, plus --trusted-hosts.
+        let mut trusted_hosts = grafeo_http::state::default_trusted_hosts();
+        trusted_hosts.push(config.host.clone());
+        trusted_hosts.extend(config.trusted_hosts.iter().cloned());
+        #[cfg(feature = "tls")]
+        let scheme = if config.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
+        #[cfg(not(feature = "tls"))]
+        let scheme = "http";
+
         let app_state = grafeo_http::AppState::with_config(
             service.clone(),
             config.cors_origins.clone(),
@@ -183,7 +220,10 @@ async fn main() {
             trusted_proxies,
             config.max_body_size,
             config.max_batch_size,
-        );
+        )
+        .with_trusted_hosts(trusted_hosts, scheme);
+        #[cfg(feature = "auth")]
+        let app_state = app_state.with_public_metrics(config.public_metrics);
 
         #[cfg_attr(not(feature = "studio"), allow(unused_mut))]
         let mut app = grafeo_http::router(app_state.clone());
@@ -262,6 +302,7 @@ async fn main() {
             #[cfg(feature = "bolt")]
             bolt_handle.await.ok();
 
+            shutdown_audit(&service);
             tracing::info!("Grafeo Server shut down");
             return;
         }
@@ -278,6 +319,7 @@ async fn main() {
         #[cfg(feature = "bolt")]
         bolt_handle.await.ok();
 
+        shutdown_audit(&service);
         tracing::info!("Grafeo Server shut down");
     }
 
@@ -404,8 +446,6 @@ fn detect_features() -> EnabledFeatures {
 /// Builds GWP server options from CLI config and service state.
 #[cfg(feature = "gwp")]
 fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::GwpOptions {
-    let _ = service; // used only when auth feature is enabled
-
     grafeo_gwp::GwpOptions {
         idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
         max_sessions: if config.gwp_max_sessions > 0 {
@@ -419,6 +459,7 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
         auth_provider: service.auth().map(std::sync::Arc::clone),
+        audit: service.audit().map(std::sync::Arc::clone),
         shutdown: None,
     }
 }
@@ -426,8 +467,6 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
 /// Builds BoltR server options from CLI config and service state.
 #[cfg(feature = "bolt")]
 fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::BoltrOptions {
-    let _ = service; // used only when auth feature is enabled
-
     grafeo_boltr::BoltrOptions {
         idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
         max_sessions: if config.bolt_max_sessions > 0 {
@@ -448,7 +487,16 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
         auth_provider: service.auth().map(std::sync::Arc::clone),
+        audit: service.audit().map(std::sync::Arc::clone),
         shutdown: None,
+    }
+}
+
+/// Flushes and stops the audit log writer, so a graceful shutdown does not
+/// abandon queued audit events.
+fn shutdown_audit(service: &ServiceState) {
+    if let Some(audit) = service.audit() {
+        audit.shutdown();
     }
 }
 
@@ -465,6 +513,8 @@ async fn shutdown_signal() {
 /// Waits up to `timeout_secs` for active sessions to complete, logging
 /// progress every 5 seconds. Any sessions still open after the timeout
 /// are force-removed (their transactions will be rolled back by drop).
+/// These are HTTP transaction sessions, so only HTTP builds have them.
+#[cfg(feature = "http")]
 async fn drain_sessions(service: &ServiceState, timeout_secs: u64) {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);

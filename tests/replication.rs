@@ -38,6 +38,7 @@ async fn spawn_primary() -> String {
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
         backup_dir: None,
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -74,6 +75,7 @@ async fn spawn_replica(primary_url: &str) -> (String, grafeo_service::ServiceSta
         },
         backup_dir: None,
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(

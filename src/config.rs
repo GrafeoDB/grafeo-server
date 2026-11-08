@@ -4,11 +4,18 @@ use clap::Parser;
 
 /// HTTP server for the Grafeo graph database.
 #[derive(Parser, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // every bool is an independent flag
 #[command(name = "grafeo-server", version, about)]
 pub struct Config {
-    /// Bind address.
-    #[arg(long, default_value = "0.0.0.0", env = "GRAFEO_HOST")]
+    /// Bind address for every transport. Loopback by default; a non-loopback
+    /// address needs credentials or --allow-unauthenticated.
+    #[arg(long, default_value = "127.0.0.1", env = "GRAFEO_HOST")]
     pub host: String,
+
+    /// Accept unauthenticated access on a non-loopback --host. Without it the
+    /// server refuses to start exposed with no credentials configured.
+    #[arg(long, default_value_t = false, env = "GRAFEO_ALLOW_UNAUTHENTICATED")]
+    pub allow_unauthenticated: bool,
 
     /// Bind port.
     #[arg(long, default_value_t = 7474, env = "GRAFEO_PORT")]
@@ -51,6 +58,12 @@ pub struct Config {
     #[arg(long, env = "GRAFEO_AUTH_PASSWORD", requires = "auth_user")]
     pub auth_password: Option<String>,
 
+    /// Let `/metrics` answer without credentials when auth is on, for
+    /// scrapers on a trusted network. Without it `/metrics` needs a token.
+    #[cfg(feature = "auth")]
+    #[arg(long, default_value_t = false, env = "GRAFEO_PUBLIC_METRICS")]
+    pub public_metrics: bool,
+
     /// Path to token store JSON file for managed API keys.
     /// Default: {data_dir}/tokens.json when --data-dir is set.
     #[cfg(feature = "auth")]
@@ -62,9 +75,9 @@ pub struct Config {
     #[arg(long, default_value_t = 7688, env = "GRAFEO_GWP_PORT")]
     pub gwp_port: u16,
 
-    /// Maximum concurrent GWP sessions. 0 = unlimited.
+    /// Maximum concurrent GWP sessions. 1,000 by default; 0 = unlimited.
     #[cfg(feature = "gwp")]
-    #[arg(long, default_value_t = 0, env = "GRAFEO_GWP_MAX_SESSIONS")]
+    #[arg(long, default_value_t = 1000, env = "GRAFEO_GWP_MAX_SESSIONS")]
     pub gwp_max_sessions: usize,
 
     /// Bolt v5 protocol port.
@@ -72,9 +85,9 @@ pub struct Config {
     #[arg(long, default_value_t = 7687, env = "GRAFEO_BOLT_PORT")]
     pub bolt_port: u16,
 
-    /// Maximum concurrent Bolt sessions. 0 = unlimited.
+    /// Maximum concurrent Bolt sessions. 1,000 by default; 0 = unlimited.
     #[cfg(feature = "bolt")]
-    #[arg(long, default_value_t = 0, env = "GRAFEO_BOLT_MAX_SESSIONS")]
+    #[arg(long, default_value_t = 1000, env = "GRAFEO_BOLT_MAX_SESSIONS")]
     pub bolt_max_sessions: usize,
 
     /// Largest Bolt message accepted, in bytes. 0 = the default (16 MiB).
@@ -115,10 +128,19 @@ pub struct Config {
     pub log_format: String,
 
     /// Trusted reverse-proxy IPs (comma-separated). X-Forwarded-For is only
-    /// used for rate limiting when the TCP peer matches a trusted proxy.
-    /// Default: loopback only (127.0.0.1, ::1).
+    /// honored when the TCP peer matches one of these (rate limiting and the
+    /// audit log's source IP); the rightmost untrusted entry is used.
+    /// Default: none — add 127.0.0.1 to trust a local proxy.
     #[arg(long, env = "GRAFEO_TRUSTED_PROXIES", value_delimiter = ',')]
     pub trusted_proxies: Vec<String>,
+
+    /// Additional host names this server answers on (comma-separated), beyond
+    /// loopback and `--host`. The cross-site check trusts
+    /// `Sec-Fetch-Site: same-origin` only when the request's `Host` is one of
+    /// these, so a DNS-rebinding page cannot use that header to write. Add the
+    /// public name when a proxy rewrites `Host`.
+    #[arg(long, env = "GRAFEO_TRUSTED_HOSTS", value_delimiter = ',')]
+    pub trusted_hosts: Vec<String>,
 
     /// Maximum request body size in bytes (0 = use Axum default of 2 MB).
     #[arg(long, default_value_t = 2_097_152, env = "GRAFEO_MAX_BODY_SIZE")]
@@ -158,6 +180,35 @@ pub struct Config {
     #[cfg(feature = "replication")]
     #[arg(long, env = "GRAFEO_PRIMARY_URL")]
     pub primary_url: Option<String>,
+
+    /// Enable the audit log: JSON lines with failed authentication attempts
+    /// (with source IP), refused requests and cross-site writes, token and
+    /// database lifecycle events, and — with --audit-data-changes — every
+    /// write statement that changed data.
+    #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT")]
+    pub audit: bool,
+
+    /// Audit log file; rotates at --audit-max-size-mb. Default: stdout.
+    #[arg(long, env = "GRAFEO_AUDIT_LOG_FILE")]
+    pub audit_log_file: Option<String>,
+
+    /// Rotate the audit log file once it grows past this many MiB. 0 = never.
+    #[arg(long, default_value_t = 100, env = "GRAFEO_AUDIT_MAX_SIZE_MB")]
+    pub audit_max_size_mb: u64,
+
+    /// Number of rotated audit log files to keep.
+    #[arg(long, default_value_t = 5, env = "GRAFEO_AUDIT_KEEP")]
+    pub audit_keep: u32,
+
+    /// Also audit data changes (write statements), not just security events.
+    /// Verbose: off by default. Requires --audit.
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "audit",
+        env = "GRAFEO_AUDIT_DATA_CHANGES"
+    )]
+    pub audit_data_changes: bool,
 }
 
 impl Config {
@@ -169,5 +220,29 @@ impl Config {
     /// Returns true if TLS is configured.
     pub fn tls_enabled(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Whether the server may start on `--host`: a loopback address always,
+    /// any other only with credentials configured (`has_credentials`) or
+    /// `--allow-unauthenticated`. The error says how to proceed.
+    pub fn check_exposure(&self, has_credentials: bool) -> Result<(), String> {
+        let host: std::net::IpAddr = self
+            .host
+            .parse()
+            .map_err(|_| format!("invalid --host '{}': expected an IP address", self.host))?;
+        if host.is_loopback() || has_credentials || self.allow_unauthenticated {
+            return Ok(());
+        }
+        let credentials = if cfg!(feature = "auth") {
+            "set --auth-token (or --auth-user and --auth-password)"
+        } else {
+            "use a build with the `auth` feature and set --auth-token"
+        };
+        Err(format!(
+            "refusing to listen on {host} without credentials: anyone who can reach it could \
+             read and change every database. To proceed, {credentials}, bind to 127.0.0.1, or \
+             pass --allow-unauthenticated (GRAFEO_ALLOW_UNAUTHENTICATED=true) to accept \
+             unauthenticated access"
+        ))
     }
 }

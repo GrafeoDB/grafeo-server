@@ -282,11 +282,21 @@ fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, 
     }
 }
 
-/// Rejects `force_disk` for sections the engine cannot spill. Only sections
-/// whose `SectionType::default_flags().mmap_able` is true (CompactStore,
-/// VectorStore, TextIndex, RdfRing, PropertyIndex in engine 0.5.44) can be
-/// kept on disk; for the others the engine silently ignores the override.
-/// Called from `create` only, so the reopen path never rejects a stored file.
+/// Whether the engine can spill a section of this type to disk in this build.
+/// Engine 0.6.2 allows `force_disk` only on the vector store, and only in a
+/// build with `wal` and `vector-index` (whose consumer writes the spill
+/// files); anything else is refused at open with
+/// `ForceDiskOnUnspillableSection`.
+fn section_can_spill(section: grafeo_common::storage::SectionType) -> bool {
+    matches!(section, grafeo_common::storage::SectionType::VectorStore)
+        && cfg!(feature = "wal")
+        && cfg!(feature = "vector-index")
+}
+
+/// Rejects `force_disk` for sections the engine cannot spill in this build
+/// (see [`section_can_spill`]), before the engine opens the database and
+/// fails with `ForceDiskOnUnspillableSection`. Called from `create` only; the
+/// reopen path sanitizes stored tiers instead (see [`sanitize_stored_tiers`]).
 fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceError> {
     let Some(ref section_tiers) = options.section_tiers else {
         return Ok(());
@@ -296,15 +306,38 @@ fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceE
         if matches!(
             parse_tier_override(tier_str)?,
             grafeo_common::storage::TierOverride::ForceDisk
-        ) && !section.default_flags().mmap_able
+        ) && !section_can_spill(section)
         {
             return Err(ServiceError::BadRequest(format!(
-                "section '{section_name}' cannot be kept on disk: only CompactStore, \
-                 VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                "section '{section_name}' cannot be kept on disk: only the vector store \
+                 spills, and only in a server built with the 'wal' and 'vector-index' features"
             )));
         }
     }
     Ok(())
+}
+
+/// Maps stored `force_disk` tiers the engine cannot spill in this build back
+/// to `auto`, so a database created on an older server (or a build with
+/// different features) still opens after the upgrade; the data is kept and
+/// only the tier override is dropped. Called on the reopen path only.
+fn sanitize_stored_tiers(options: &mut DatabaseOptions, options_path: &Path) {
+    let Some(tiers) = options.section_tiers.as_mut() else {
+        return;
+    };
+    for (name, tier) in tiers.iter_mut() {
+        if tier == "force_disk"
+            && let Ok(section) = parse_section_type(name)
+            && !section_can_spill(section)
+        {
+            tracing::warn!(
+                path = %options_path.display(),
+                section = %name,
+                "dropping stored force_disk tier: this build cannot spill that section (engine 0.6.2 spills only the vector store, with 'wal' and 'vector-index')"
+            );
+            *tier = "auto".to_string();
+        }
+    }
 }
 
 /// Creation-time metadata stored alongside each database.
@@ -427,7 +460,24 @@ impl DatabaseManager {
     /// Creates a new manager. In persistent mode, scans `data_dir` for existing
     /// database subdirectories and opens each one. Ensures the `"default"` database
     /// always exists. Performs migration from the old single-file layout if needed.
+    ///
+    /// # Panics
+    ///
+    /// Where [`try_new`](Self::try_new) returns an error, and on the start-up
+    /// failures `try_new` still panics on.
     pub fn new(data_dir: Option<&str>, read_only: bool) -> Self {
+        Self::try_new(data_dir, read_only).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// As [`new`](Self::new), but a read-only manager whose data directory has
+    /// no default database returns an error instead of panicking (a
+    /// read-only start creates no database).
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::Unavailable`] for a read-only data directory without a
+    /// default database.
+    pub fn try_new(data_dir: Option<&str>, read_only: bool) -> Result<Self, ServiceError> {
         let mgr = Self {
             databases: DashMap::new(),
             creating: DashSet::new(),
@@ -546,6 +596,15 @@ impl DatabaseManager {
             // Ensure "default" exists
             if !mgr.databases.contains_key("default") {
                 let default_dir = dir.join("default");
+                if mgr.read_only {
+                    return Err(ServiceError::Unavailable(format!(
+                        "read-only mode needs an existing default database, and {} has none \
+                         (or it did not open: see the log above). Start once without \
+                         --read-only to create it, or point --data-dir at a directory that \
+                         holds one",
+                        dir.display()
+                    )));
+                }
                 // An empty default must never be created next to files of an
                 // earlier one: it would shadow them, or adopt and rewrite
                 // them. Recovery is retried on every start.
@@ -562,12 +621,8 @@ impl DatabaseManager {
                     .expect("failed to create default db directory");
                 let db_path = default_dir.join("data.grafeo");
                 tracing::info!("Creating default persistent database");
-                let db = if mgr.read_only {
-                    GrafeoDB::open_read_only(db_path.to_str().unwrap())
-                        .expect("failed to create default db")
-                } else {
-                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db")
-                };
+                let db =
+                    GrafeoDB::open(db_path.to_str().unwrap()).expect("failed to create default db");
                 mgr.databases.insert(
                     "default".to_string(),
                     Arc::new(DatabaseEntry::new(
@@ -591,7 +646,7 @@ impl DatabaseManager {
             );
         }
 
-        mgr
+        Ok(mgr)
     }
 
     /// Enables or disables CDC on all current databases and future ones.
@@ -703,6 +758,8 @@ impl DatabaseManager {
         // file's sections depend on it: opening an RDF file as a property
         // graph would rewrite it without its RDF data at the next checkpoint.
         // Any other validation error keeps the database closed.
+        let mut stored = stored;
+        sanitize_stored_tiers(&mut stored.options, &options_path);
         let configured = match configure(base.clone(), stored.database_type, &stored.options) {
             Ok(config) => config,
             Err(e) => {
@@ -1563,6 +1620,9 @@ mod tests {
         entry.set_available();
     }
 
+    // VectorStore `force_disk` needs the vector-index feature (engine 0.6.2
+    // spills only the vector store, and only with `wal` + `vector-index`).
+    #[cfg(all(feature = "wal", feature = "vector-index"))]
     #[test]
     fn create_database_with_section_tier_overrides() {
         use std::collections::HashMap;
@@ -1907,6 +1967,35 @@ mod tests {
         assert!(!dir.path().join("b64").exists());
     }
 
+    // Engine 0.6.2 spills only the vector store, and only with `wal` +
+    // `vector-index`; on a build missing either, the create is a 400 naming
+    // them, not a 500 from the engine at open.
+    #[cfg(not(all(feature = "wal", feature = "vector-index")))]
+    #[test]
+    fn create_rejects_vector_store_force_disk_without_the_feature() {
+        let mgr = DatabaseManager::new(None, false);
+        let req = CreateDatabaseRequest {
+            name: "v".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(
+                    [("VectorStore".to_string(), "force_disk".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+        let err = mgr.create(&req).expect_err("force_disk must be rejected");
+        let ServiceError::BadRequest(msg) = err else {
+            panic!("expected BadRequest, got: {err}");
+        };
+        assert!(msg.contains("wal") && msg.contains("vector-index"), "{msg}");
+    }
+
     #[test]
     fn create_rejects_force_disk_for_sections_that_cannot_spill() {
         let dir = tempfile::tempdir().unwrap();
@@ -1926,8 +2015,8 @@ mod tests {
             assert_eq!(
                 msg,
                 format!(
-                    "section '{section}' cannot be kept on disk: only CompactStore, \
-                     VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                    "section '{section}' cannot be kept on disk: only the vector store \
+                     spills, and only in a server built with the 'wal' and 'vector-index' features"
                 )
             );
             assert!(mgr.get("nospill").is_none());
@@ -2240,6 +2329,7 @@ mod tests {
         assert!(mgr.reopen_config(&db_file).unwrap().0.cdc_enabled());
     }
 
+    #[cfg(all(feature = "wal", feature = "vector-index"))]
     #[test]
     fn section_tier_override_is_applied_on_reopen() {
         use grafeo_common::storage::{SectionType, TierOverride};

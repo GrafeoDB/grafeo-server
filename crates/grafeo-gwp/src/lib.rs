@@ -75,6 +75,10 @@ pub struct GwpOptions {
     #[cfg(feature = "auth")]
     pub auth_provider: Option<std::sync::Arc<dyn grafeo_service::auth::AuthProviderTrait>>,
 
+    /// Audit logger for failed handshake authentication, shared with the
+    /// service state.
+    pub audit: Option<std::sync::Arc<grafeo_service::audit::AuditLogger>>,
+
     /// Shutdown signal. When the future resolves, the server stops
     /// accepting connections, drains in-flight requests, and stops
     /// the idle session reaper.
@@ -138,7 +142,11 @@ pub async fn serve(
     #[cfg(feature = "auth")]
     if let Some(provider) = options.auth_provider {
         let pending_clone = pending.clone();
-        builder = builder.auth(auth::GwpAuthValidator::new(provider, pending_clone));
+        builder = builder.auth(auth::GwpAuthValidator::new(
+            provider,
+            pending_clone,
+            options.audit,
+        ));
 
         // Reap stale auth nonces from clients that never completed session creation.
         _reaper = Some(grafeo_service::auth::spawn_pending_auth_reaper(

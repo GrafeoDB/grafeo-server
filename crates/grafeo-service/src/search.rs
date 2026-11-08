@@ -42,7 +42,7 @@ impl SearchService {
         Ok(results
             .into_iter()
             .map(|(node_id, distance)| types::SearchHit {
-                node_id: node_id.0,
+                node_id: node_id.as_u64(),
                 score: f64::from(distance),
                 properties: std::collections::HashMap::new(),
             })
@@ -82,7 +82,7 @@ impl SearchService {
         Ok(results
             .into_iter()
             .map(|(node_id, score)| types::SearchHit {
-                node_id: node_id.0,
+                node_id: node_id.as_u64(),
                 score,
                 properties: std::collections::HashMap::new(),
             })
@@ -134,7 +134,7 @@ impl SearchService {
         Ok(results
             .into_iter()
             .map(|(node_id, score)| types::SearchHit {
-                node_id: node_id.0,
+                node_id: node_id.as_u64(),
                 score,
                 properties: std::collections::HashMap::new(),
             })
