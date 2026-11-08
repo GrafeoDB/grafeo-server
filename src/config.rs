@@ -128,8 +128,9 @@ pub struct Config {
     pub log_format: String,
 
     /// Trusted reverse-proxy IPs (comma-separated). X-Forwarded-For is only
-    /// used for rate limiting when the TCP peer matches a trusted proxy.
-    /// Default: loopback only (127.0.0.1, ::1).
+    /// honored when the TCP peer matches one of these (rate limiting and the
+    /// audit log's source IP); the rightmost untrusted entry is used.
+    /// Default: none — add 127.0.0.1 to trust a local proxy.
     #[arg(long, env = "GRAFEO_TRUSTED_PROXIES", value_delimiter = ',')]
     pub trusted_proxies: Vec<String>,
 
@@ -181,8 +182,9 @@ pub struct Config {
     pub primary_url: Option<String>,
 
     /// Enable the audit log: JSON lines with failed authentication attempts
-    /// (with source IP), token and database lifecycle events, and — with
-    /// --audit-data-changes — every write statement that changed data.
+    /// (with source IP), refused requests, token and database lifecycle
+    /// events, and — with --audit-data-changes — every write statement that
+    /// changed data.
     #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT")]
     pub audit: bool,
 
@@ -199,8 +201,13 @@ pub struct Config {
     pub audit_keep: u32,
 
     /// Also audit data changes (write statements), not just security events.
-    /// Verbose: off by default.
-    #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT_DATA_CHANGES")]
+    /// Verbose: off by default. Requires --audit.
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "audit",
+        env = "GRAFEO_AUDIT_DATA_CHANGES"
+    )]
     pub audit_data_changes: bool,
 }
 

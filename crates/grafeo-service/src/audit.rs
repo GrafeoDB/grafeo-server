@@ -1,18 +1,26 @@
 //! Audit log: a structured (JSON-lines) record of security-relevant events.
 //!
 //! Opt-in at run time with `--audit` (`GRAFEO_AUDIT=true`): failed
-//! authentication attempts with the source IP, token and database lifecycle
-//! events, and — with `--audit-data-changes` — every write statement that
-//! changed data. Events are one JSON object per line, written to stdout or,
-//! with `--audit-log-file`, to a file that rotates at `--audit-max-size-mb`
-//! (keeping `--audit-keep` rotated files as `audit.log.1`, `audit.log.2`, ...).
+//! authentication attempts with the source IP, refused requests, token and
+//! database lifecycle events, and — with `--audit-data-changes` — every write
+//! statement that changed data. Events are one JSON object per line, written
+//! to stdout or, with `--audit-log-file`, to a file that rotates at
+//! `--audit-max-size-mb` (keeping `--audit-keep` rotated files as
+//! `audit.log.1`, `audit.log.2`, ...).
 //!
-//! Secrets (token plaintexts, passwords) are never logged: token events name
-//! the token's id and name only.
+//! Token plaintexts and passwords are never logged: token events name the
+//! token's id and name only. Note that with `--audit-data-changes` the write
+//! statements themselves are recorded, so a secret written as a statement
+//! literal ends up in the log like any other value.
+//!
+//! Writes happen on a dedicated writer thread (the send is a bounded,
+//! non-blocking channel), so a brute-force burst of `auth_failure` events
+//! never does file I/O on a Tokio worker; when the channel is full, events
+//! are dropped and counted rather than blocking the request path.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 
 use serde::Serialize;
 
@@ -23,7 +31,7 @@ pub struct AuditConfig {
     pub log_file: Option<PathBuf>,
     /// Rotate the file once it grows past this size. 0 turns rotation off.
     pub max_size_bytes: u64,
-    /// How many rotated files to keep.
+    /// How many rotated files to keep. 0 truncates the active file instead.
     pub keep: u32,
     /// Also audit data changes (write statements), not just security events.
     pub data_changes: bool,
@@ -58,7 +66,8 @@ pub struct AuditEvent {
     pub transport: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ip: Option<String>,
-    /// Free-form context (method and path, statement, counters). Never a secret.
+    /// Free-form context (method and path, reason, statement, counters).
+    /// Never a credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -104,66 +113,57 @@ impl AuditEvent {
     }
 }
 
-/// A borrowed handle for the query path: the logger plus who is asking.
-pub struct AuditRef<'a> {
-    pub logger: &'a AuditLogger,
-    pub actor: Option<&'a str>,
-    pub transport: &'a str,
+/// An owned audit handle: the logger plus who is asking. Cheap to clone, and
+/// `Send`, so it can move into a blocking task.
+#[derive(Clone)]
+pub struct AuditRef {
+    pub logger: Arc<AuditLogger>,
+    pub actor: Option<String>,
+    pub transport: &'static str,
 }
 
-enum AuditSink {
-    Stdout,
-    File {
-        file: std::fs::File,
-        path: PathBuf,
-        size: u64,
-    },
+enum Msg {
+    Line(String),
+    /// Flush the sink and acknowledge, so a test can read the file.
+    Flush(mpsc::Sender<()>),
 }
 
-/// The audit log writer. Cheap to clone via `Arc`; writes are serialized
-/// through a mutex so events from concurrent requests never interleave.
+/// The audit log writer. `log` only enqueues the line; a dedicated thread
+/// does the file I/O and rotation.
 pub struct AuditLogger {
-    config: AuditConfig,
-    sink: Mutex<AuditSink>,
+    tx: mpsc::SyncSender<Msg>,
+    dropped: Arc<AtomicU64>,
+    data_changes: bool,
 }
 
 impl AuditLogger {
-    /// Opens the configured sink. Fails when the log file cannot be created.
+    /// Starts the writer thread and opens the configured sink. Fails when the
+    /// log file cannot be created.
     pub fn new(config: AuditConfig) -> std::io::Result<Self> {
-        let sink = match &config.log_file {
-            None => AuditSink::Stdout,
-            Some(path) => {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)?;
-                let size = file.metadata()?.len();
-                AuditSink::File {
-                    file,
-                    path: path.clone(),
-                    size,
-                }
-            }
-        };
+        let data_changes = config.data_changes;
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1024);
+        let dropped = Arc::new(AtomicU64::new(0));
+        {
+            let dropped = Arc::clone(&dropped);
+            std::thread::Builder::new()
+                .name("grafeo-audit".to_string())
+                .spawn(move || writer_loop(config, rx, dropped))?;
+        }
         Ok(Self {
-            config,
-            sink: Mutex::new(sink),
+            tx,
+            dropped,
+            data_changes,
         })
     }
 
     /// Whether data changes (write statements) are audited too.
     pub fn data_changes_enabled(&self) -> bool {
-        self.config.data_changes
+        self.data_changes
     }
 
-    /// Writes one event as a JSON line, rotating the file first when needed.
-    /// A write error is reported to the tracing log, never to the caller:
-    /// auditing must not break the request it records.
+    /// Enqueues one event as a JSON line. Never blocks: when the writer
+    /// thread is behind, the event is dropped and counted (a warn every
+    /// 1,000th drop), so a brute-force burst cannot stall request workers.
     pub fn log(&self, event: AuditEvent) {
         let mut line = match serde_json::to_string(&event) {
             Ok(line) => line,
@@ -173,53 +173,29 @@ impl AuditLogger {
             }
         };
         line.push('\n');
-        let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-        if let AuditSink::File { file, path, size } = &mut *sink {
-            if self.config.max_size_bytes > 0
-                && size.saturating_add(line.len() as u64) > self.config.max_size_bytes
-            {
-                Self::rotate(path, self.config.keep);
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path.as_path())
-                {
-                    Ok(f) => {
-                        *file = f;
-                        *size = 0;
-                    }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), "audit log rotation failed: {e}");
-                        return;
-                    }
+        match self.tx.try_send(Msg::Line(line)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                let n = self.dropped.fetch_add(1, Ordering::Relaxed);
+                if n.is_multiple_of(1000) {
+                    tracing::warn!(
+                        dropped = n + 1,
+                        "audit log writer is behind; dropped events (back-pressure)"
+                    );
                 }
             }
-            match file.write_all(line.as_bytes()) {
-                Ok(()) => *size += line.len() as u64,
-                Err(e) => tracing::warn!("audit log write failed: {e}"),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                tracing::warn!("audit log writer thread is gone");
             }
-            let _ = file.flush();
-        } else if let Err(e) = std::io::stdout().write_all(line.as_bytes()) {
-            tracing::warn!("audit log write to stdout failed: {e}");
         }
     }
 
-    /// Shifts `path.1`..`path.keep` one up and removes the oldest, so `path`
-    /// can be renamed to `path.1`.
-    fn rotate(path: &Path, keep: u32) {
-        if keep == 0 {
-            return;
+    /// Waits until every event logged so far is written to the sink.
+    pub fn flush(&self) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.tx.send(Msg::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
         }
-        let oldest = rotated_path(path, keep);
-        let _ = std::fs::remove_file(&oldest);
-        for i in (1..keep).rev() {
-            let from = rotated_path(path, i);
-            let to = rotated_path(path, i + 1);
-            if from.exists() {
-                let _ = std::fs::rename(&from, &to);
-            }
-        }
-        let _ = std::fs::rename(path, rotated_path(path, 1));
     }
 
     /// Audits a write statement that changed data (`result.counters` says so).
@@ -231,7 +207,7 @@ impl AuditLogger {
         statement: &str,
         counters: &grafeo_engine::database::WriteCounters,
     ) {
-        if !self.config.data_changes {
+        if !self.data_changes {
             return;
         }
         let detail = format!("{} | counters: {counters:?}", truncate(statement, 500));
@@ -245,13 +221,117 @@ impl AuditLogger {
     }
 }
 
+/// Opens the audit file owner-only, so logged values are not world-readable.
+fn open_audit_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+enum Sink {
+    Stdout,
+    File {
+        file: std::fs::File,
+        path: PathBuf,
+        size: u64,
+    },
+}
+
+fn writer_loop(config: AuditConfig, rx: mpsc::Receiver<Msg>, dropped: Arc<AtomicU64>) {
+    use std::io::Write as _;
+    let mut sink = match &config.log_file {
+        None => Sink::Stdout,
+        Some(path) => {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match open_audit_file(path) {
+                Ok(file) => Sink::File {
+                    size: file.metadata().map_or(0, |m| m.len()),
+                    file,
+                    path: path.clone(),
+                },
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), "cannot open the audit log: {e}");
+                    Sink::Stdout
+                }
+            }
+        }
+    };
+
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Line(line) => {
+                if let Sink::File { file, path, size } = &mut sink {
+                    if config.max_size_bytes > 0
+                        && size.saturating_add(line.len() as u64) > config.max_size_bytes
+                    {
+                        rotate(path, config.keep);
+                        match open_audit_file(path) {
+                            Ok(f) => {
+                                *file = f;
+                                *size = 0;
+                            }
+                            Err(e) => {
+                                tracing::warn!(path = %path.display(), "audit log rotation failed: {e}");
+                                continue;
+                            }
+                        }
+                    }
+                    match file.write_all(line.as_bytes()) {
+                        Ok(()) => *size += line.len() as u64,
+                        Err(e) => tracing::warn!("audit log write failed: {e}"),
+                    }
+                    let _ = file.flush();
+                } else {
+                    let _ = std::io::stdout().write_all(line.as_bytes());
+                }
+            }
+            Msg::Flush(ack) => {
+                if let Sink::File { file, .. } = &mut sink {
+                    let _ = file.flush();
+                }
+                let _ = ack.send(());
+            }
+        }
+    }
+    let _ = dropped;
+}
+
+/// Rotates the log file: with `keep > 0`, shifts `path.1`..`path.keep` one up
+/// (removing the oldest) so `path` can be renamed to `path.1`; with
+/// `keep == 0`, removes the active file so the next open starts a fresh one.
+fn rotate(path: &Path, keep: u32) {
+    if keep == 0 {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let oldest = rotated_path(path, keep);
+    let _ = std::fs::remove_file(&oldest);
+    for i in (1..keep).rev() {
+        let from = rotated_path(path, i);
+        let to = rotated_path(path, i + 1);
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+    let _ = std::fs::rename(path, rotated_path(path, 1));
+}
+
 fn rotated_path(path: &Path, i: u32) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(format!(".{i}"));
     PathBuf::from(p)
 }
 
-/// Truncates to `max` chars, on a char boundary, with an ellipsis marker.
+/// Truncates to `max` bytes, on a char boundary, with an ellipsis marker.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -341,6 +421,7 @@ mod tests {
         for i in 0..10 {
             logger.log(AuditEvent::new("token_created").detail(format!("event {i}")));
         }
+        logger.flush();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("event 9"));
         let rotated = std::fs::read_to_string(path.with_extension("log.1")).unwrap();
@@ -354,10 +435,51 @@ mod tests {
     }
 
     #[test]
+    fn keep_zero_truncates_instead_of_growing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let cfg = AuditConfig {
+            log_file: Some(path.clone()),
+            max_size_bytes: 100,
+            keep: 0,
+            data_changes: false,
+        };
+        let logger = AuditLogger::new(cfg).unwrap();
+        for i in 0..20 {
+            logger.log(AuditEvent::new("auth_failure").detail(format!("event {i}")));
+        }
+        logger.flush();
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            size < 400,
+            "the active file must not grow past a rotation: {size}"
+        );
+        assert!(!path.with_extension("log.1").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let logger = AuditLogger::new(AuditConfig {
+            log_file: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        logger.log(AuditEvent::new("auth_failure"));
+        logger.flush();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audit log must be owner-only, got {mode:o}");
+    }
+
+    #[test]
     fn stdout_config_needs_no_file() {
         let logger = AuditLogger::new(AuditConfig::default()).unwrap();
         assert!(!logger.data_changes_enabled());
         logger.log(AuditEvent::new("auth_failure"));
+        logger.flush();
     }
 
     #[test]

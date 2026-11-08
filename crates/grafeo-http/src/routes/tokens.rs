@@ -158,6 +158,9 @@ pub async fn delete_token(
         )
     })?;
 
+    // Look the token up first so the revoke record names it, not just its id.
+    let name = grafeo_service::token_service::TokenService::get_token(store, &id)
+        .map_or_else(|_| "<unknown>".to_string(), |t| t.name);
     grafeo_service::token_service::TokenService::delete_token(store, &id)
         .map_err(ApiError::from)?;
 
@@ -165,7 +168,7 @@ pub async fn delete_token(
         grafeo_service::audit::AuditEvent::new("token_revoked")
             .actor(auth.actor())
             .transport("http")
-            .detail(format!("token id {id}")),
+            .detail(format!("token '{name}' ({id})")),
     );
 
     Ok(Json(serde_json::json!({ "deleted": true })))

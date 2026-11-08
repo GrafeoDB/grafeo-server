@@ -2965,4 +2965,64 @@ mod tests {
 
         assert_eq!(mgr.get("capped").unwrap().db().memory_limit(), Some(limit));
     }
+
+    /// The swap-then-reopen-failure branch of an epoch restore: the recovery
+    /// must not serve a dead handle. Engine 0.6.2 refuses a corrupt backup
+    /// before the swap, so the reopen failure is forced directly here.
+    fn recovery_setup() -> (
+        tempfile::TempDir,
+        DatabaseManager,
+        Arc<DatabaseEntry>,
+        PathBuf,
+        grafeo_engine::Config,
+    ) {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mgr = DatabaseManager::new(Some(data_dir.path().to_str().unwrap()), false);
+        mgr.get("default")
+            .unwrap()
+            .db()
+            .session()
+            .execute("INSERT (:Person {name: 'Alice'})")
+            .unwrap();
+        let entry = mgr.get("default").unwrap();
+        // Release the live handle, as the restore does before the swap, so the
+        // file can be replaced underneath.
+        entry.db().close().unwrap();
+        let db_file = data_dir.path().join("default").join("data.grafeo");
+        let (reopen_config, _) = mgr.reopen_config(&db_file).unwrap();
+        (data_dir, mgr, entry, db_file, reopen_config)
+    }
+
+    #[tokio::test]
+    async fn recover_after_failed_reopen_leaves_entry_restoring_on_a_bad_file() {
+        let (_dir, _mgr, entry, db_file, reopen_config) = recovery_setup();
+        std::fs::write(&db_file, b"garbage").unwrap();
+        entry.set_restoring();
+        BackupService::recover_after_failed_epoch_restore(
+            &entry,
+            &db_file,
+            "default",
+            &reopen_config,
+        )
+        .await;
+        assert!(
+            entry.is_restoring(),
+            "a reopen failure must leave the entry in Restoring (callers get 503)"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_after_failed_reopen_reopens_a_valid_file() {
+        let (_dir, _mgr, entry, db_file, reopen_config) = recovery_setup();
+        entry.set_restoring();
+        BackupService::recover_after_failed_epoch_restore(
+            &entry,
+            &db_file,
+            "default",
+            &reopen_config,
+        )
+        .await;
+        assert!(!entry.is_restoring(), "a valid file recovers the entry");
+        assert_eq!(entry.db().node_count().unwrap(), 1);
+    }
 }

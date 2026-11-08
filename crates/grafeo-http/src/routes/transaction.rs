@@ -138,11 +138,12 @@ pub async fn tx_commit(
     let session_id = get_session_id(&headers)?;
     let caller_token_id = auth.0.as_ref().map(|info| info.id.as_str());
 
-    QueryService::commit(
+    QueryService::commit_with_audit(
         state.sessions(),
         &session_id,
         state.session_ttl(),
         caller_token_id,
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

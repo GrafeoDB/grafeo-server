@@ -8,7 +8,7 @@ Security release: a page on another site can no longer write through the HTTP AP
 
 ### Added
 
-- **An opt-in audit log** (#84): `--audit` (`GRAFEO_AUDIT=true`) writes one JSON line per security-relevant event — failed authentication with the source IP (`auth_failure`), refused requests (`access_denied`), token created/revoked and database created/deleted with the acting token's name, over HTTP, GWP and Bolt. `--audit-log-file` (`GRAFEO_AUDIT_LOG_FILE`) writes to a file instead of stdout and rotates at `--audit-max-size-mb` (default 100 MiB, keeping `--audit-keep` files, default 5). `--audit-data-changes` (`GRAFEO_AUDIT_DATA_CHANGES`) additionally records every write statement that changed data (`data_change` with the database, transport, actor and counters). Token plaintexts are never logged.
+- **An opt-in audit log** (#84): `--audit` (`GRAFEO_AUDIT=true`) writes one JSON line per security-relevant event — failed authentication with the source IP (`auth_failure`), refused requests with the reason (`access_denied`), token created/revoked (name and id) and database created/deleted with the acting token's name, over HTTP, GWP and Bolt. `--audit-log-file` (`GRAFEO_AUDIT_LOG_FILE`) writes to a file instead of stdout, created owner-only (0600) and rotated at `--audit-max-size-mb` (default 100 MiB, keeping `--audit-keep` files, default 5; 0 truncates the active file). `--audit-data-changes` (`GRAFEO_AUDIT_DATA_CHANGES`, requires `--audit`) additionally records every write statement that changed data (`data_change` with the database, transport, actor and counters) — auto-commit writes including ones that commit after the caller's timeout, and transaction writes at commit time, so rolled-back writes are never logged. Token plaintexts and passwords are never logged, but statement literals are recorded with `--audit-data-changes`. Writes go through a bounded channel to a dedicated writer thread, so a brute-force burst of `auth_failure` events never blocks a request worker (events are dropped and counted when the channel is full).
 
 ### Changed
 
@@ -20,6 +20,7 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 - **Server-wide operations need an admin token with no database list**: token management (`/admin/tokens`), `GET /backups` and `GET /admin/replication` refuse an admin token limited to some databases. The bootstrap `--auth-token` and Basic auth have no list.
 - **`/metrics` needs credentials when auth is on**: it answered anyone, with database names, node and edge totals and query counts. Send the token in the Prometheus scrape config, or pass `--public-metrics` (`GRAFEO_PUBLIC_METRICS`) to keep it open.
 - **Bolt and GWP accept 1,000 sessions each by default**: `--bolt-max-sessions` and `--gwp-max-sessions` were unlimited (0), which still means unlimited when set.
+- **X-Forwarded-For is honored only from a configured `--trusted-proxies` entry** (loopback is no longer trusted implicitly), and the rightmost untrusted entry is used, so a client behind a local proxy cannot forge its rate-limit bucket or the audit log's `source_ip`. Add `127.0.0.1` to `--trusted-proxies` to trust a local proxy.
 
 ### Fixed
 
@@ -39,6 +40,10 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 - **Schema files can't add statements of their own**: an OWL or RDFS literal holding a quote could end its `INSERT DATA` and add other triples to the new database. Literals are escaped, and an IRI, language tag or blank node label that SPARQL can't hold is refused with 400.
 - **Backup names stay inside the backup directory**: a database or backup name such as `C:x` passed the check and, on Windows, made the backup path switch drive (admin routes only). A name must now be one plain file name.
 - **A database-scoped admin token can't create unscoped tokens**: `POST /admin/tokens` let it mint an admin token for every database, and `GET /backups` showed it every database's backups.
+- **`Sec-Fetch-Site: same-origin` needs a trusted `Host`**: a DNS-rebinding page sends that header with its own name in `Host`; the cross-site check now trusts it only when `Host` is one of `--trusted-hosts`, the `--host` value or loopback. An `Origin` without fetch metadata must also match the server's scheme, not just its authority.
+- **A GWP read-only session can't create or drop schemas**: `create_schema_in`/`drop_schema_in` now check the calling session's scope and write role, as the HTTP schema routes do (`drop_schema` deletes the schema's data).
+- **The database-scope check compares decoded path segments**: `/admin/%61/stats` acts on database `a`, and a token scoped to the literal `%61` can no longer reach it; the token-management table matches exactly `/admin/tokens` and `/admin/tokens/{id}` by method.
+- **Empty credentials are not credentials**: `--auth-user '' --auth-password ''` no longer passes the exposure check (a Basic `:` header would have authenticated against it), and a corrupt `tokens.json` is a clean start-up error (exit 2), not a panic.
 
 ### Dependencies
 

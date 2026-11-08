@@ -372,7 +372,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
 | `GRAFEO_RATE_LIMIT` | `--rate-limit` | `0` | Max requests per window per IP (0 = disabled) |
 | `GRAFEO_RATE_LIMIT_WINDOW` | `--rate-limit-window` | `60` | Rate limit window in seconds |
-| `GRAFEO_AUDIT` | `--audit` | `false` | Audit log: JSON lines with failed authentication (source IP), token/database lifecycle events |
+| `GRAFEO_AUDIT` | `--audit` | `false` | Audit log: JSON lines with failed authentication (source IP), refused requests, token/database lifecycle events |
 | `GRAFEO_AUDIT_LOG_FILE` | `--audit-log-file` | _(stdout)_ | Audit log file, rotating at `--audit-max-size-mb` |
 | `GRAFEO_AUDIT_MAX_SIZE_MB` | `--audit-max-size-mb` | `100` | Rotate the audit log file past this size in MiB (0 = never) |
 | `GRAFEO_AUDIT_KEEP` | `--audit-keep` | `5` | Rotated audit log files to keep |

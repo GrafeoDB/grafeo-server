@@ -113,7 +113,12 @@ fn is_allowed(
 fn host_part(host: &str) -> &str {
     let host = host.trim();
     if let Some(rest) = host.strip_prefix('[') {
+        // [::1]:7474
         return rest.split(']').next().unwrap_or(rest);
+    }
+    // A bare IPv6 literal has several colons; only host:port has one.
+    if host.matches(':').count() > 1 {
+        return host;
     }
     host.split(':').next().unwrap_or(host)
 }

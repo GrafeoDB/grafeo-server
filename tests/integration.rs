@@ -8567,10 +8567,10 @@ async fn websocket_cors_no_origin_header_allowed() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rate_limit_xff_trusted_from_loopback() {
-    // Loopback peers are always trusted for XFF. Since our test server
-    // binds to 127.0.0.1, the peer IP is loopback. Different XFF values
-    // should be rate-limited independently.
+async fn rate_limit_ignores_xff_without_a_configured_trusted_proxy() {
+    // Loopback alone is not trusted: a forged XFF header must not choose the
+    // rate-limit bucket (or the audit log's source IP). All requests bucket
+    // by the peer address.
     let state = grafeo_server::AppState::with_config(
         grafeo_service::ServiceState::new_in_memory_with_rate_limit(
             300,
@@ -8579,7 +8579,47 @@ async fn rate_limit_xff_trusted_from_loopback() {
         ),
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
-        vec![], // no explicit trusted proxies needed: loopback is always trusted
+        vec![], // no trusted proxies configured
+        2_097_152,
+        100,
+    );
+    let base = spawn_server_from_state(state).await;
+    let client = Client::new();
+
+    // 2 requests with XFF=10.0.0.1 use up the peer's quota (XFF ignored)...
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    // ...so a third request is limited even though its XFF differs.
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+}
+
+#[tokio::test]
+async fn rate_limit_xff_honored_from_a_configured_proxy_rightmost_untrusted() {
+    // With 127.0.0.1 configured as a trusted proxy, the test server's peer
+    // (loopback) is trusted and XFF is parsed: the rightmost entry that is
+    // not itself a trusted proxy is the client.
+    let state = grafeo_server::AppState::with_config(
+        grafeo_service::ServiceState::new_in_memory_with_rate_limit(
+            300,
+            2,
+            std::time::Duration::from_secs(60),
+        ),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+        vec!["127.0.0.1".parse().unwrap()],
         2_097_152,
         100,
     );
@@ -8597,10 +8637,38 @@ async fn rate_limit_xff_trusted_from_loopback() {
         assert_eq!(resp.status(), 200);
     }
 
-    // A request with a different XFF should still succeed (different IP bucket)
+    // A different XFF is a different bucket.
     let resp = client
         .get(format!("{base}/health"))
         .header("X-Forwarded-For", "10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A chain ending in the trusted proxy itself is not a client: the
+    // rightmost untrusted entry wins, so "spoofed, 10.0.0.3, 127.0.0.1"
+    // buckets as 10.0.0.3, not as the spoofed leftmost entry.
+    for _ in 0..2 {
+        let resp = client
+            .get(format!("{base}/health"))
+            .header("X-Forwarded-For", "1.2.3.4, 10.0.0.3, 127.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "1.2.3.4, 10.0.0.3, 127.0.0.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429, "third request for 10.0.0.3 is limited");
+    // The spoofed leftmost address never got its own bucket.
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("X-Forwarded-For", "1.2.3.4")
         .send()
         .await
         .unwrap();

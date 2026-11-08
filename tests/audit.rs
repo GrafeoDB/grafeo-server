@@ -16,7 +16,12 @@ const ROOT: &str = "root-token";
 /// Boots a server with a token store (bootstrap token `ROOT`) and the audit
 /// log written to a file. Returns the base URL, the audit log path and the
 /// tempdir keeping both alive.
-async fn spawn_audit(data_changes: bool) -> (String, PathBuf, tempfile::TempDir) {
+/// Boots a server with a token store (bootstrap token `ROOT`) and the audit
+/// log written to a file. Returns the base URL, the audit log path, the
+/// tempdir keeping both alive, and the state (to flush the audit writer).
+async fn spawn_audit(
+    data_changes: bool,
+) -> (String, PathBuf, tempfile::TempDir, grafeo_server::AppState) {
     let dir = tempfile::tempdir().unwrap();
     let audit_path = dir.path().join("audit.log");
     let store =
@@ -40,7 +45,7 @@ async fn spawn_audit(data_changes: bool) -> (String, PathBuf, tempfile::TempDir)
         vec![],
         grafeo_service::types::EnabledFeatures::default(),
     );
-    let app = grafeo_server::router(state);
+    let app = grafeo_server::router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -51,11 +56,13 @@ async fn spawn_audit(data_changes: bool) -> (String, PathBuf, tempfile::TempDir)
         .await
         .unwrap();
     });
-    (format!("http://{addr}"), audit_path, dir)
+    (format!("http://{addr}"), audit_path, dir, state)
 }
 
-/// Reads the audit log file as parsed JSON lines.
-fn audit_lines(path: &std::path::Path) -> Vec<Value> {
+/// Reads the audit log file as parsed JSON lines, after flushing the writer
+/// thread so every logged event is on disk.
+fn audit_lines(path: &std::path::Path, state: &grafeo_server::AppState) -> Vec<Value> {
+    state.audit().unwrap().flush();
     let content = std::fs::read_to_string(path).unwrap_or_default();
     content
         .lines()
@@ -72,7 +79,7 @@ fn bearer(client: &Client, base: &str, path: &str, token: &str) -> reqwest::Requ
 
 #[tokio::test]
 async fn auth_failure_is_logged_with_source_ip() {
-    let (base, audit_path, _dir) = spawn_audit(false).await;
+    let (base, audit_path, _dir, state) = spawn_audit(false).await;
     let client = Client::new();
 
     let resp = bearer(&client, &base, "/db", "wrong-token")
@@ -81,7 +88,7 @@ async fn auth_failure_is_logged_with_source_ip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-    let lines = audit_lines(&audit_path);
+    let lines = audit_lines(&audit_path, &state);
     let event = lines
         .iter()
         .find(|l| l["event"] == "auth_failure")
@@ -94,7 +101,7 @@ async fn auth_failure_is_logged_with_source_ip() {
 
 #[tokio::test]
 async fn access_denied_is_logged_with_actor() {
-    let (base, audit_path, _dir) = spawn_audit(false).await;
+    let (base, audit_path, _dir, state) = spawn_audit(false).await;
     let client = Client::new();
 
     // A read-only token cannot create databases (#82): 403, audited.
@@ -120,7 +127,7 @@ async fn access_denied_is_logged_with_actor() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    let lines = audit_lines(&audit_path);
+    let lines = audit_lines(&audit_path, &state);
     let event = lines
         .iter()
         .find(|l| l["event"] == "access_denied")
@@ -132,7 +139,7 @@ async fn access_denied_is_logged_with_actor() {
 
 #[tokio::test]
 async fn token_lifecycle_is_logged_without_the_plaintext() {
-    let (base, audit_path, _dir) = spawn_audit(false).await;
+    let (base, audit_path, _dir, state) = spawn_audit(false).await;
     let client = Client::new();
 
     let resp = client
@@ -155,7 +162,7 @@ async fn token_lifecycle_is_logged_without_the_plaintext() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let lines = audit_lines(&audit_path);
+    let lines = audit_lines(&audit_path, &state);
     let created = lines
         .iter()
         .find(|l| l["event"] == "token_created")
@@ -176,7 +183,7 @@ async fn token_lifecycle_is_logged_without_the_plaintext() {
 
 #[tokio::test]
 async fn database_lifecycle_is_logged() {
-    let (base, audit_path, _dir) = spawn_audit(false).await;
+    let (base, audit_path, _dir, state) = spawn_audit(false).await;
     let client = Client::new();
 
     let resp = client
@@ -195,7 +202,7 @@ async fn database_lifecycle_is_logged() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let lines = audit_lines(&audit_path);
+    let lines = audit_lines(&audit_path, &state);
     let created = lines
         .iter()
         .find(|l| l["event"] == "database_created")
@@ -211,7 +218,7 @@ async fn database_lifecycle_is_logged() {
 
 #[tokio::test]
 async fn data_changes_are_logged_only_when_enabled() {
-    let (base, audit_path, _dir) = spawn_audit(true).await;
+    let (base, audit_path, _dir, state) = spawn_audit(true).await;
     let client = Client::new();
 
     let resp = client
@@ -223,7 +230,7 @@ async fn data_changes_are_logged_only_when_enabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let lines = audit_lines(&audit_path);
+    let lines = audit_lines(&audit_path, &state);
     let event = lines
         .iter()
         .find(|l| l["event"] == "data_change")
@@ -233,7 +240,7 @@ async fn data_changes_are_logged_only_when_enabled() {
     assert!(event["detail"].as_str().unwrap().contains("INSERT"));
 
     // With data changes off, a write is not audited.
-    let (base2, audit_path2, _dir2) = spawn_audit(false).await;
+    let (base2, audit_path2, _dir2, state2) = spawn_audit(false).await;
     let resp = client
         .post(format!("{base2}/query"))
         .header("Authorization", format!("Bearer {ROOT}"))
@@ -243,8 +250,137 @@ async fn data_changes_are_logged_only_when_enabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        !audit_lines(&audit_path2)
+        !audit_lines(&audit_path2, &state2)
             .iter()
             .any(|l| l["event"] == "data_change")
     );
+}
+
+#[tokio::test]
+async fn batch_writes_are_audited_one_line_per_statement() {
+    let (base, audit_path, _dir, state) = spawn_audit(true).await;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/batch"))
+        .header("Authorization", format!("Bearer {ROOT}"))
+        .json(&json!({"queries": [
+            {"query": "INSERT (:Person {name: 'A'})"},
+            {"query": "MATCH (n) RETURN n LIMIT 1"},
+            {"query": "INSERT (:Person {name: 'B'})"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "{}",
+        resp.text().await.unwrap()
+    );
+
+    let lines = audit_lines(&audit_path, &state);
+    let changes: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["event"] == "data_change")
+        .collect();
+    assert_eq!(
+        changes.len(),
+        2,
+        "one data_change per updating statement: {lines:?}"
+    );
+    assert!(changes[0]["detail"].as_str().unwrap().contains("'A'"));
+    assert!(changes[1]["detail"].as_str().unwrap().contains("'B'"));
+    assert!(
+        changes
+            .iter()
+            .all(|c| c["database"] == "default" && c["transport"] == "http")
+    );
+}
+
+#[tokio::test]
+async fn transaction_writes_are_audited_at_commit_not_at_rollback() {
+    let (base, audit_path, _dir, state) = spawn_audit(true).await;
+    let client = Client::new();
+    let auth = format!("Bearer {ROOT}");
+
+    // A rolled-back transaction logs nothing.
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let sid = resp.json::<Value>().await.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("Authorization", &auth)
+        .header("X-Session-Id", &sid)
+        .json(&json!({"query": "INSERT (:Person {name: 'RolledBack'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = client
+        .post(format!("{base}/tx/rollback"))
+        .header("Authorization", &auth)
+        .header("X-Session-Id", &sid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lines = audit_lines(&audit_path, &state);
+    assert!(
+        !lines.iter().any(|l| l["event"] == "data_change"),
+        "a rolled-back write must not be audited: {lines:?}"
+    );
+
+    // A committed transaction logs its writes at commit time.
+    let resp = client
+        .post(format!("{base}/tx/begin"))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let sid = resp.json::<Value>().await.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("Authorization", &auth)
+        .header("X-Session-Id", &sid)
+        .json(&json!({"query": "INSERT (:Person {name: 'Committed'})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Nothing logged yet: the statement ran, the commit has not.
+    let lines = audit_lines(&audit_path, &state);
+    assert!(
+        !lines.iter().any(|l| l["event"] == "data_change"),
+        "a write is audited at commit, not when it runs: {lines:?}"
+    );
+    let resp = client
+        .post(format!("{base}/tx/commit"))
+        .header("Authorization", &auth)
+        .header("X-Session-Id", &sid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lines = audit_lines(&audit_path, &state);
+    let changes: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["event"] == "data_change")
+        .collect();
+    assert_eq!(
+        changes.len(),
+        1,
+        "the committed write is logged once: {lines:?}"
+    );
+    assert!(changes[0]["detail"].as_str().unwrap().contains("Committed"));
 }

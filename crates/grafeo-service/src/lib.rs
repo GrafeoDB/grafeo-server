@@ -518,15 +518,15 @@ impl ServiceState {
         self.inner.audit.as_ref()
     }
 
-    /// A borrowed audit handle for the query path; `None` when auditing is off.
-    pub fn audit_ref<'a>(
-        &'a self,
-        transport: &'a str,
-        actor: Option<&'a str>,
-    ) -> Option<audit::AuditRef<'a>> {
+    /// An owned audit handle for the query path; `None` when auditing is off.
+    pub fn audit_ref(
+        &self,
+        transport: &'static str,
+        actor: Option<&str>,
+    ) -> Option<audit::AuditRef> {
         self.inner.audit.as_ref().map(|logger| audit::AuditRef {
-            logger,
-            actor,
+            logger: Arc::clone(logger),
+            actor: actor.map(str::to_string),
             transport,
         })
     }

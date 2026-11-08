@@ -50,7 +50,9 @@ impl QueryService {
     }
 
     /// As [`execute`](Self::execute), also auditing the statement when it
-    /// changed data (`audit` is `None` when the audit log is off).
+    /// changed data (`audit` is `None` when the audit log is off). The audit
+    /// write happens inside the blocking task, so a write that commits after
+    /// the caller's timeout still lands in the log.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_with_audit(
         databases: &DatabaseManager,
@@ -62,17 +64,30 @@ impl QueryService {
         timeout: Option<Duration>,
         read_only: bool,
         identity: Option<Identity>,
-        audit: Option<AuditRef<'_>>,
+        audit: Option<AuditRef>,
     ) -> Result<QueryResult, ServiceError> {
         let entry = databases.get_available(db_name)?;
 
         let lang = determine_language(language)?;
         let stmt = statement.to_owned();
+        let audit_db = db_name.to_owned();
 
         let result = run_with_timeout(timeout, move || {
             let db = entry.db();
             let session = remote_session(&db, identity, read_only);
-            dispatch_query(&session, &stmt, lang, params.as_ref())
+            let r = dispatch_query(&session, &stmt, lang, params.as_ref());
+            if let (Some(audit), Ok(qr)) = (&audit, &r)
+                && qr.counters.contains_updates()
+            {
+                audit.logger.data_change(
+                    audit.actor.as_deref(),
+                    &audit_db,
+                    audit.transport,
+                    &stmt,
+                    &qr.counters,
+                );
+            }
+            r
         })
         .await;
 
@@ -80,17 +95,6 @@ impl QueryService {
             Ok(qr) => {
                 let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
                 metrics.record_query(lang, dur_us);
-                if let Some(audit) = &audit
-                    && qr.counters.contains_updates()
-                {
-                    audit.logger.data_change(
-                        audit.actor,
-                        db_name,
-                        audit.transport,
-                        statement,
-                        &qr.counters,
-                    );
-                }
             }
             Err(_) => {
                 metrics.record_query_error(lang);
@@ -141,19 +145,31 @@ impl QueryService {
         params: Option<HashMap<String, grafeo_common::Value>>,
         timeout: Option<Duration>,
         caller_token_id: Option<&str>,
-        audit: Option<AuditRef<'_>>,
+        audit: Option<AuditRef>,
     ) -> Result<QueryResult, ServiceError> {
         let session_arc = sessions
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
-        let db_name = session_arc.lock().db_name.clone();
 
         let lang = determine_language(language)?;
         let stmt = statement.to_owned();
+        // Transaction writes are audited at commit time (see
+        // `commit_with_audit`), not here: a rollback or a failed commit must
+        // not leave a `data_change` line for writes that never persisted.
+        // While auditing is on, the statement and its counters are queued on
+        // the session for the commit to log.
+        let collect = audit.is_some();
 
         let result = run_with_timeout(timeout, move || {
-            let session = session_arc.lock();
-            dispatch_query(&session.engine_session, &stmt, lang, params.as_ref())
+            let mut session = session_arc.lock();
+            let r = dispatch_query(&session.engine_session, &stmt, lang, params.as_ref());
+            if collect
+                && let Ok(qr) = &r
+                && qr.counters.contains_updates()
+            {
+                session.pending_writes.push((stmt.clone(), qr.counters));
+            }
+            r
         })
         .await;
 
@@ -161,17 +177,6 @@ impl QueryService {
             Ok(qr) => {
                 let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
                 metrics.record_query(lang, dur_us);
-                if let Some(audit) = &audit
-                    && qr.counters.contains_updates()
-                {
-                    audit.logger.data_change(
-                        audit.actor,
-                        &db_name,
-                        audit.transport,
-                        statement,
-                        &qr.counters,
-                    );
-                }
             }
             Err(_) => {
                 metrics.record_query_error(lang);
@@ -223,9 +228,25 @@ impl QueryService {
         ttl_secs: u64,
         caller_token_id: Option<&str>,
     ) -> Result<(), ServiceError> {
+        Self::commit_with_audit(sessions, session_id, ttl_secs, caller_token_id, None).await
+    }
+
+    /// As [`commit`](Self::commit), auditing the transaction's write
+    /// statements when the commit succeeds (`audit` is `None` when the audit
+    /// log is off). Statements that ran in the transaction were queued on
+    /// the session by `tx_execute_with_audit`; a failed commit logs nothing,
+    /// since nothing persisted.
+    pub async fn commit_with_audit(
+        sessions: &SessionRegistry,
+        session_id: &str,
+        ttl_secs: u64,
+        caller_token_id: Option<&str>,
+        audit: Option<AuditRef>,
+    ) -> Result<(), ServiceError> {
         let session_arc = sessions
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
+        let audit_session = session_arc.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let mut session = session_arc.lock();
@@ -237,6 +258,27 @@ impl QueryService {
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))
         .and_then(|r| r);
+
+        if result.is_ok()
+            && let Some(audit) = audit
+        {
+            let (db_name, writes) = {
+                let mut session = audit_session.lock();
+                (
+                    session.db_name.clone(),
+                    std::mem::take(&mut session.pending_writes),
+                )
+            };
+            for (stmt, counters) in writes {
+                audit.logger.data_change(
+                    audit.actor.as_deref(),
+                    &db_name,
+                    audit.transport,
+                    &stmt,
+                    &counters,
+                );
+            }
+        }
 
         sessions.remove(session_id);
         result
@@ -297,7 +339,7 @@ impl QueryService {
         timeout: Option<Duration>,
         read_only: bool,
         identity: Option<Identity>,
-        audit: Option<AuditRef<'_>>,
+        audit: Option<AuditRef>,
     ) -> Result<Vec<QueryResult>, ServiceError> {
         if queries.is_empty() {
             return Ok(vec![]);
@@ -317,7 +359,10 @@ impl QueryService {
             })
             .collect::<Result<_, _>>()?;
         let batch_languages = languages.clone();
-        let audit_statements: Vec<String> = queries.iter().map(|q| q.statement.clone()).collect();
+        // Only clone the statements when auditing is on (the default is off).
+        let audit_statements: Option<Vec<String>> = audit
+            .as_ref()
+            .map(|_| queries.iter().map(|q| q.statement.clone()).collect());
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
@@ -353,18 +398,19 @@ impl QueryService {
         })
         .await?;
 
-        // Record metrics for all successful queries, audit the writes
+        // Record metrics for all successful queries, audit the writes. The
+        // batch committed above, so every logged write really persisted.
         for (idx, (lang, qr)) in languages.iter().zip(results.iter()).enumerate() {
             let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
             metrics.record_query(*lang, dur_us);
-            if let Some(audit) = &audit
+            if let (Some(audit), Some(statements)) = (&audit, &audit_statements)
                 && qr.counters.contains_updates()
             {
                 audit.logger.data_change(
-                    audit.actor,
+                    audit.actor.as_deref(),
                     db_name,
                     audit.transport,
-                    &audit_statements[idx],
+                    &statements[idx],
                     &qr.counters,
                 );
             }

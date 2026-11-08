@@ -25,6 +25,10 @@ pub struct ManagedSession {
     pub created_at: Instant,
     /// Last time the session was accessed.
     last_used: Instant,
+    /// Write statements that ran in this transaction with their counters,
+    /// queued while the audit log is on and logged by the commit (a rollback
+    /// or failed commit logs nothing). Empty when auditing is off.
+    pub pending_writes: Vec<(String, grafeo_engine::database::WriteCounters)>,
 }
 
 /// Thread-safe global registry of open transaction sessions.
@@ -75,6 +79,7 @@ impl SessionRegistry {
             owner_token_id,
             created_at: now,
             last_used: now,
+            pending_writes: Vec::new(),
         }));
         self.sessions.insert(id.clone(), session);
         id

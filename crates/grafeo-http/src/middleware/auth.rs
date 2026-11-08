@@ -92,7 +92,7 @@ pub async fn auth_middleware(
                 .actor(Some(&info.name))
                 .transport("http")
                 .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
-                .detail(format!("{} {}", req.method(), req.uri().path())),
+                .detail(format!("{} {}: {e}", req.method(), req.uri().path())),
         );
         return Err(e);
     }
