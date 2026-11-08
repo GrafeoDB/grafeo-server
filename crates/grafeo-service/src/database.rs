@@ -288,10 +288,8 @@ fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, 
 /// files); anything else is refused at open with
 /// `ForceDiskOnUnspillableSection`, which the server surfaces as a 400 here.
 fn section_can_spill(section: grafeo_common::storage::SectionType) -> bool {
-    matches!(
-        section,
-        grafeo_common::storage::SectionType::VectorStore
-    ) && cfg!(feature = "wal")
+    matches!(section, grafeo_common::storage::SectionType::VectorStore)
+        && cfg!(feature = "wal")
         && cfg!(feature = "vector-index")
 }
 
