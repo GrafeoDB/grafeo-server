@@ -6,6 +6,10 @@ All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GW
 
 Security release: a page on another site can no longer write through the HTTP API or open the WebSocket, a token reaches only the databases in its scope, and the server no longer starts exposed without credentials. Breaking: the default `--host` is `127.0.0.1`, and the Docker images (on `0.0.0.0`) refuse to start without `GRAFEO_AUTH_TOKEN`, Basic credentials or `GRAFEO_ALLOW_UNAUTHENTICATED=true`. A read-write token that created or deleted databases, and a database-scoped admin token that managed tokens, now gets a 403. Lockstep with grafeo 0.6.2.
 
+### Added
+
+- **An opt-in audit log** (#84): `--audit` (`GRAFEO_AUDIT=true`) writes one JSON line per security-relevant event — failed authentication with the source IP (`auth_failure`), refused requests (`access_denied`), token created/revoked and database created/deleted with the acting token's name, over HTTP, GWP and Bolt. `--audit-log-file` (`GRAFEO_AUDIT_LOG_FILE`) writes to a file instead of stdout and rotates at `--audit-max-size-mb` (default 100 MiB, keeping `--audit-keep` files, default 5). `--audit-data-changes` (`GRAFEO_AUDIT_DATA_CHANGES`) additionally records every write statement that changed data (`data_change` with the database, transport, actor and counters). Token plaintexts are never logged.
+
 ### Changed
 
 Requests that ran on 0.6.1 and now fail or answer differently.
