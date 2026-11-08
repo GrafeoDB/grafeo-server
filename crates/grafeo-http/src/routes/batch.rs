@@ -69,7 +69,7 @@ pub async fn batch_query(
 
     let identity = auth.identity(state.service().is_query_read_only());
 
-    let results = QueryService::batch_execute(
+    let results = QueryService::batch_execute_with_audit(
         state.databases(),
         state.metrics(),
         db_name,
@@ -77,6 +77,7 @@ pub async fn batch_query(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

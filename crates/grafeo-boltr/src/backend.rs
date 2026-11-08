@@ -351,6 +351,8 @@ impl BoltBackend for GrafeoBackend {
         let session_arc = self.get_session(session)?;
         let is_mutation = is_mutation_query(query);
         let statement = query.to_owned();
+        let audit_stmt = statement.clone();
+        let audit_session = session_arc.clone();
         let params = convert_params(parameters);
 
         // Grafeo extension: language selection via extra dict.
@@ -378,6 +380,21 @@ impl BoltBackend for GrafeoBackend {
         })
         .await
         .map_err(BoltError::backend)??;
+
+        if result.counters.contains_updates() {
+            let s = audit_session.lock();
+            #[cfg(feature = "auth")]
+            let actor = s.identity.as_ref().map(|i| i.user_id().to_string());
+            #[cfg(not(feature = "auth"))]
+            let actor: Option<String> = None;
+            self.state.audit_data_change(
+                actor.as_deref(),
+                &s.database,
+                "bolt",
+                &audit_stmt,
+                &result.counters,
+            );
+        }
 
         let columns = result.columns.clone();
         let records: Vec<BoltRecord> = result

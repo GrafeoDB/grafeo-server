@@ -13,6 +13,11 @@ use crate::error::ApiError;
 pub struct AuthContext(pub Option<grafeo_service::auth::TokenInfo>);
 
 impl AuthContext {
+    /// The authenticated token's name, for audit records. `None` when auth is off.
+    pub fn actor(&self) -> Option<&str> {
+        self.0.as_ref().map(|info| info.name.as_str())
+    }
+
     /// Check that the token can access the given database. No-op when auth is off.
     pub fn check_db_access(&self, db_name: &str) -> Result<(), ApiError> {
         if let Some(ref info) = self.0

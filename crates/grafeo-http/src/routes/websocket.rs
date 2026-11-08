@@ -363,7 +363,7 @@ async fn process_query(
     };
     let timeout = state.effective_timeout(req.timeout_ms);
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         db_name,
@@ -373,6 +373,7 @@ async fn process_query(
         timeout,
         state.service().is_query_read_only(),
         Some(identity.clone()),
+        state.audit_ref("http", Some(identity.user_id())),
     )
     .await;
 

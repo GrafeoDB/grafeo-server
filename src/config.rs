@@ -4,6 +4,7 @@ use clap::Parser;
 
 /// HTTP server for the Grafeo graph database.
 #[derive(Parser, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // every bool is an independent flag
 #[command(name = "grafeo-server", version, about)]
 pub struct Config {
     /// Bind address for every transport. Loopback by default; a non-loopback
@@ -170,6 +171,29 @@ pub struct Config {
     #[cfg(feature = "replication")]
     #[arg(long, env = "GRAFEO_PRIMARY_URL")]
     pub primary_url: Option<String>,
+
+    /// Enable the audit log: JSON lines with failed authentication attempts
+    /// (with source IP), token and database lifecycle events, and — with
+    /// --audit-data-changes — every write statement that changed data.
+    #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT")]
+    pub audit: bool,
+
+    /// Audit log file; rotates at --audit-max-size-mb. Default: stdout.
+    #[arg(long, env = "GRAFEO_AUDIT_LOG_FILE")]
+    pub audit_log_file: Option<String>,
+
+    /// Rotate the audit log file once it grows past this many MiB. 0 = never.
+    #[arg(long, default_value_t = 100, env = "GRAFEO_AUDIT_MAX_SIZE_MB")]
+    pub audit_max_size_mb: u64,
+
+    /// Number of rotated audit log files to keep.
+    #[arg(long, default_value_t = 5, env = "GRAFEO_AUDIT_KEEP")]
+    pub audit_keep: u32,
+
+    /// Also audit data changes (write statements), not just security events.
+    /// Verbose: off by default.
+    #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT_DATA_CHANGES")]
+    pub audit_data_changes: bool,
 }
 
 impl Config {

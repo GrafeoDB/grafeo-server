@@ -63,6 +63,12 @@ pub async fn create_database(
     let name = req.name.clone();
     let db_type = req.database_type;
     state.databases().create(&req)?;
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("database_created")
+            .actor(auth.actor())
+            .database(&name)
+            .transport("http"),
+    );
 
     let entry = state
         .databases()
@@ -105,6 +111,12 @@ pub async fn delete_database(
     // Clean up any transaction sessions belonging to this database
     state.sessions().remove_by_database(&name);
     state.databases().delete(&name)?;
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("database_deleted")
+            .actor(auth.actor())
+            .database(&name)
+            .transport("http"),
+    );
     Ok(Json(serde_json::json!({ "deleted": name })))
 }
 

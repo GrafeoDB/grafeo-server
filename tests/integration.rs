@@ -3593,6 +3593,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
             replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
             backup_dir: None,
             backup_retention: None,
+            audit: None,
         };
         grafeo_service::ServiceState::new(&config)
     };
@@ -4889,6 +4890,7 @@ fn sync_state() -> grafeo_server::AppState {
         replication_mode: grafeo_service::replication::ReplicationMode::Primary,
         backup_dir: None,
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     grafeo_server::AppState::new(
@@ -6194,6 +6196,7 @@ async fn spawn_server_with_backup() -> (String, TempDir, TempDir) {
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -6445,6 +6448,7 @@ async fn spawn_server_persistent_backup() -> (String, TempDir, TempDir) {
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: None,
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(
@@ -6479,6 +6483,7 @@ async fn spawn_server_persistent_backup_with_retention(keep: usize) -> (String, 
         replication_mode: grafeo_service::replication::ReplicationMode::Standalone,
         backup_dir: Some(backup_dir.path().to_str().unwrap().to_string()),
         backup_retention: Some(keep),
+        audit: None,
     };
     let service = grafeo_service::ServiceState::new(&config);
     let state = grafeo_server::AppState::new(

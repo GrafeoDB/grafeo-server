@@ -79,7 +79,7 @@ async fn execute_query(
 
     let identity = auth.identity(state.service().is_query_read_only());
 
-    let result = QueryService::execute(
+    let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
         db_name,
@@ -89,6 +89,7 @@ async fn execute_query(
         timeout,
         state.service().is_query_read_only(),
         Some(identity),
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

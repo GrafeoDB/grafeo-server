@@ -74,10 +74,28 @@ pub async fn auth_middleware(
                 name: "basic-auth".to_string(),
                 scope: grafeo_service::auth::TokenScope::default(),
             })
-        })
-        .ok_or_else(ApiError::unauthorized)?;
+        });
 
-    super::authorize::authorize(req.method(), req.uri().path(), &info)?;
+    let Some(info) = info else {
+        state.audit_event(
+            grafeo_service::audit::AuditEvent::new("auth_failure")
+                .transport("http")
+                .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
+                .detail(format!("{} {}", req.method(), req.uri().path())),
+        );
+        return Err(ApiError::unauthorized());
+    };
+
+    if let Err(e) = super::authorize::authorize(req.method(), req.uri().path(), &info) {
+        state.audit_event(
+            grafeo_service::audit::AuditEvent::new("access_denied")
+                .actor(Some(&info.name))
+                .transport("http")
+                .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
+                .detail(format!("{} {}", req.method(), req.uri().path())),
+        );
+        return Err(e);
+    }
     req.extensions_mut().insert(info);
     Ok(next.run(req).await)
 }

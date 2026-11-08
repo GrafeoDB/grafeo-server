@@ -11,6 +11,7 @@ use std::time::Duration;
 use grafeo_engine::auth::Identity;
 use grafeo_engine::database::QueryResult;
 
+use crate::audit::AuditRef;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 use crate::metrics::{Language, Metrics, determine_language};
@@ -41,6 +42,28 @@ impl QueryService {
         read_only: bool,
         identity: Option<Identity>,
     ) -> Result<QueryResult, ServiceError> {
+        Self::execute_with_audit(
+            databases, metrics, db_name, statement, language, params, timeout, read_only, identity,
+            None,
+        )
+        .await
+    }
+
+    /// As [`execute`](Self::execute), also auditing the statement when it
+    /// changed data (`audit` is `None` when the audit log is off).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_with_audit(
+        databases: &DatabaseManager,
+        metrics: &Metrics,
+        db_name: &str,
+        statement: &str,
+        language: Option<&str>,
+        params: Option<HashMap<String, grafeo_common::Value>>,
+        timeout: Option<Duration>,
+        read_only: bool,
+        identity: Option<Identity>,
+        audit: Option<AuditRef<'_>>,
+    ) -> Result<QueryResult, ServiceError> {
         let entry = databases.get_available(db_name)?;
 
         let lang = determine_language(language)?;
@@ -57,6 +80,17 @@ impl QueryService {
             Ok(qr) => {
                 let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
                 metrics.record_query(lang, dur_us);
+                if let Some(audit) = &audit
+                    && qr.counters.contains_updates()
+                {
+                    audit.logger.data_change(
+                        audit.actor,
+                        db_name,
+                        audit.transport,
+                        statement,
+                        &qr.counters,
+                    );
+                }
             }
             Err(_) => {
                 metrics.record_query_error(lang);
@@ -79,9 +113,40 @@ impl QueryService {
         timeout: Option<Duration>,
         caller_token_id: Option<&str>,
     ) -> Result<QueryResult, ServiceError> {
+        Self::tx_execute_with_audit(
+            sessions,
+            metrics,
+            session_id,
+            ttl_secs,
+            statement,
+            language,
+            params,
+            timeout,
+            caller_token_id,
+            None,
+        )
+        .await
+    }
+
+    /// As [`tx_execute`](Self::tx_execute), also auditing the statement when
+    /// it changed data (`audit` is `None` when the audit log is off).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn tx_execute_with_audit(
+        sessions: &SessionRegistry,
+        metrics: &Metrics,
+        session_id: &str,
+        ttl_secs: u64,
+        statement: &str,
+        language: Option<&str>,
+        params: Option<HashMap<String, grafeo_common::Value>>,
+        timeout: Option<Duration>,
+        caller_token_id: Option<&str>,
+        audit: Option<AuditRef<'_>>,
+    ) -> Result<QueryResult, ServiceError> {
         let session_arc = sessions
             .get(session_id, ttl_secs, caller_token_id)
             .ok_or(ServiceError::SessionNotFound)?;
+        let db_name = session_arc.lock().db_name.clone();
 
         let lang = determine_language(language)?;
         let stmt = statement.to_owned();
@@ -96,6 +161,17 @@ impl QueryService {
             Ok(qr) => {
                 let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
                 metrics.record_query(lang, dur_us);
+                if let Some(audit) = &audit
+                    && qr.counters.contains_updates()
+                {
+                    audit.logger.data_change(
+                        audit.actor,
+                        &db_name,
+                        audit.transport,
+                        statement,
+                        &qr.counters,
+                    );
+                }
             }
             Err(_) => {
                 metrics.record_query_error(lang);
@@ -204,6 +280,25 @@ impl QueryService {
         read_only: bool,
         identity: Option<Identity>,
     ) -> Result<Vec<QueryResult>, ServiceError> {
+        Self::batch_execute_with_audit(
+            databases, metrics, db_name, queries, timeout, read_only, identity, None,
+        )
+        .await
+    }
+
+    /// As [`batch_execute`](Self::batch_execute), also auditing every
+    /// statement that changed data (`audit` is `None` when auditing is off).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn batch_execute_with_audit(
+        databases: &DatabaseManager,
+        metrics: &Metrics,
+        db_name: &str,
+        queries: Vec<BatchQuery>,
+        timeout: Option<Duration>,
+        read_only: bool,
+        identity: Option<Identity>,
+        audit: Option<AuditRef<'_>>,
+    ) -> Result<Vec<QueryResult>, ServiceError> {
         if queries.is_empty() {
             return Ok(vec![]);
         }
@@ -222,6 +317,7 @@ impl QueryService {
             })
             .collect::<Result<_, _>>()?;
         let batch_languages = languages.clone();
+        let audit_statements: Vec<String> = queries.iter().map(|q| q.statement.clone()).collect();
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
@@ -257,10 +353,21 @@ impl QueryService {
         })
         .await?;
 
-        // Record metrics for all successful queries
-        for (lang, qr) in languages.iter().zip(results.iter()) {
+        // Record metrics for all successful queries, audit the writes
+        for (idx, (lang, qr)) in languages.iter().zip(results.iter()).enumerate() {
             let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
             metrics.record_query(*lang, dur_us);
+            if let Some(audit) = &audit
+                && qr.counters.contains_updates()
+            {
+                audit.logger.data_change(
+                    audit.actor,
+                    db_name,
+                    audit.transport,
+                    &audit_statements[idx],
+                    &qr.counters,
+                );
+            }
         }
 
         Ok(results)

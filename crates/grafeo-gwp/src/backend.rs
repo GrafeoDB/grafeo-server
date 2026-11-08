@@ -494,6 +494,8 @@ impl GqlBackend for GrafeoBackend {
     ) -> Result<Pin<Box<dyn ResultStream>>, GqlError> {
         let session_arc = self.get_session(session)?;
         let statement = statement.to_owned();
+        let audit_stmt = statement.clone();
+        let audit_session = session_arc.clone();
         let params = convert_params(parameters);
 
         let result = tokio::task::spawn_blocking(move || {
@@ -530,6 +532,21 @@ impl GqlBackend for GrafeoBackend {
                 GqlError::status(status::INVALID_SYNTAX, message)
             })
         })?;
+
+        if result.counters.contains_updates() {
+            let s = audit_session.lock();
+            #[cfg(feature = "auth")]
+            let actor = s.identity.as_ref().map(|i| i.user_id().to_string());
+            #[cfg(not(feature = "auth"))]
+            let actor: Option<String> = None;
+            self.state.audit_data_change(
+                actor.as_deref(),
+                &s.database,
+                "gwp",
+                &audit_stmt,
+                &result.counters,
+            );
+        }
 
         Ok(Box::pin(GrafeoResultStream::from_query_result(result)))
     }

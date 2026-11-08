@@ -44,6 +44,14 @@ pub async fn create_token(
     )
     .map_err(ApiError::from)?;
 
+    // The plaintext token is never audited, only the id and name.
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("token_created")
+            .actor(auth.actor())
+            .transport("http")
+            .detail(format!("token '{}' ({})", record.name, record.id)),
+    );
+
     Ok(Json(types::TokenResponse {
         id: record.id,
         name: record.name,
@@ -152,6 +160,13 @@ pub async fn delete_token(
 
     grafeo_service::token_service::TokenService::delete_token(store, &id)
         .map_err(ApiError::from)?;
+
+    state.audit_event(
+        grafeo_service::audit::AuditEvent::new("token_revoked")
+            .actor(auth.actor())
+            .transport("http")
+            .detail(format!("token id {id}")),
+    );
 
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

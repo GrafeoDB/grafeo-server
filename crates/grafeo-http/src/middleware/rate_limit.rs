@@ -18,7 +18,7 @@ use crate::state::AppState;
 /// X-Forwarded-For is only trusted when the TCP peer is a known trusted proxy
 /// (configured via `--trusted-proxies`). This prevents spoofing by arbitrary
 /// clients sending fake XFF headers to bypass rate limiting.
-fn extract_ip(req: &Request, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
+pub(crate) fn extract_ip(req: &Request, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
     let peer_ip = req
         .extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()

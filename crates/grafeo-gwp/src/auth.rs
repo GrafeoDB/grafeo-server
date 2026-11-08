@@ -25,11 +25,31 @@ pub(crate) type PendingAuth = Arc<DashMap<String, (TokenInfo, std::time::Instant
 pub(crate) struct GwpAuthValidator {
     provider: Arc<dyn AuthProviderTrait>,
     pub(crate) pending: PendingAuth,
+    audit: Option<Arc<grafeo_service::audit::AuditLogger>>,
 }
 
 impl GwpAuthValidator {
-    pub fn new(provider: Arc<dyn AuthProviderTrait>, pending: PendingAuth) -> Self {
-        Self { provider, pending }
+    pub fn new(
+        provider: Arc<dyn AuthProviderTrait>,
+        pending: PendingAuth,
+        audit: Option<Arc<grafeo_service::audit::AuditLogger>>,
+    ) -> Self {
+        Self {
+            provider,
+            pending,
+            audit,
+        }
+    }
+
+    fn fail(&self, message: &str) -> GqlError {
+        if let Some(audit) = &self.audit {
+            audit.log(
+                grafeo_service::audit::AuditEvent::new("auth_failure")
+                    .transport("gwp")
+                    .detail(message),
+            );
+        }
+        GqlError::Protocol(message.to_owned())
     }
 }
 
@@ -42,7 +62,7 @@ impl AuthValidator for GwpAuthValidator {
             Some(Method::BearerToken(token)) => self
                 .provider
                 .check_bearer(token)
-                .ok_or_else(|| GqlError::Protocol("invalid bearer token".to_owned()))?,
+                .ok_or_else(|| self.fail("invalid bearer token"))?,
             Some(Method::Basic(basic)) => {
                 if self.provider.check_basic(&basic.username, &basic.password) {
                     // Basic auth grants admin scope (matches HTTP behavior).
@@ -52,10 +72,10 @@ impl AuthValidator for GwpAuthValidator {
                         scope: grafeo_service::auth::TokenScope::default(),
                     }
                 } else {
-                    return Err(GqlError::Protocol("invalid credentials".to_owned()));
+                    return Err(self.fail("invalid credentials"));
                 }
             }
-            None => return Err(GqlError::Protocol("credentials required".to_owned())),
+            None => return Err(self.fail("credentials required")),
         };
 
         let nonce = Uuid::new_v4().to_string();

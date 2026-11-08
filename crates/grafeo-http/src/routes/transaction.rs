@@ -96,7 +96,7 @@ pub async fn tx_query(
     let params = convert_json_params(req.params.as_ref())?;
     let timeout = state.effective_timeout(req.timeout_ms);
 
-    let result = QueryService::tx_execute(
+    let result = QueryService::tx_execute_with_audit(
         state.sessions(),
         state.metrics(),
         &session_id,
@@ -106,6 +106,7 @@ pub async fn tx_query(
         params,
         timeout,
         caller_token_id,
+        state.audit_ref("http", auth.actor()),
     )
     .await?;
 

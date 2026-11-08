@@ -10,6 +10,7 @@
 //! **Zero transport dependencies** — no axum, no tonic, no wire-protocol code.
 
 pub mod admin;
+pub mod audit;
 pub mod auth;
 pub mod backup;
 #[cfg(feature = "push-changefeed")]
@@ -73,6 +74,8 @@ pub struct ServiceConfig {
     pub backup_dir: Option<String>,
     /// Number of backups to keep per database (retention policy).
     pub backup_retention: Option<usize>,
+    /// Audit log configuration; `None` disables auditing.
+    pub audit: Option<audit::AuditConfig>,
 }
 
 /// Shared service state, cloneable across all transport handlers.
@@ -103,6 +106,7 @@ struct Inner {
     replication_state: Arc<replication::ReplicationState>,
     backup_dir: Option<PathBuf>,
     backup_retention: Option<usize>,
+    audit: Option<Arc<audit::AuditLogger>>,
 }
 
 impl ServiceState {
@@ -196,6 +200,17 @@ impl ServiceState {
                 }),
                 backup_dir: config.backup_dir.as_ref().map(PathBuf::from),
                 backup_retention: config.backup_retention,
+                audit: config
+                    .audit
+                    .clone()
+                    .map(|cfg| {
+                        audit::AuditLogger::new(cfg).map(Arc::new).map_err(|e| {
+                            error::ServiceError::Internal(format!(
+                                "failed to open the audit log: {e}"
+                            ))
+                        })
+                    })
+                    .transpose()?,
             }),
         })
     }
@@ -222,6 +237,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -249,6 +265,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -276,6 +293,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -305,6 +323,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -334,6 +353,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -360,6 +380,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -390,6 +411,7 @@ impl ServiceState {
                 replication_state: Arc::new(replication::ReplicationState::new()),
                 backup_dir: None,
                 backup_retention: None,
+                audit: None,
             }),
         }
     }
@@ -484,6 +506,66 @@ impl ServiceState {
     /// Returns the backup retention count, if configured.
     pub fn backup_retention(&self) -> Option<usize> {
         self.inner.backup_retention
+    }
+
+    // --- Audit ---
+
+    /// The audit logger, when auditing is on (`--audit`).
+    pub fn audit(&self) -> Option<&Arc<audit::AuditLogger>> {
+        self.inner.audit.as_ref()
+    }
+
+    /// A borrowed audit handle for the query path; `None` when auditing is off.
+    pub fn audit_ref<'a>(
+        &'a self,
+        transport: &'a str,
+        actor: Option<&'a str>,
+    ) -> Option<audit::AuditRef<'a>> {
+        self.inner.audit.as_ref().map(|logger| audit::AuditRef {
+            logger,
+            actor,
+            transport,
+        })
+    }
+
+    /// Records one audit event; a no-op when auditing is off.
+    pub fn audit_event(&self, event: audit::AuditEvent) {
+        if let Some(audit) = &self.inner.audit {
+            audit.log(event);
+        }
+    }
+
+    /// Audits a write statement that changed data. A no-op unless auditing
+    /// is on and `--audit-data-changes` is set.
+    pub fn audit_data_change(
+        &self,
+        actor: Option<&str>,
+        database: &str,
+        transport: &str,
+        statement: &str,
+        counters: &grafeo_engine::database::WriteCounters,
+    ) {
+        if let Some(audit) = &self.inner.audit {
+            audit.data_change(actor, database, transport, statement, counters);
+        }
+    }
+
+    /// Enables the audit log on this state. Call it before the state is
+    /// shared (cloned into handlers).
+    pub fn with_audit(mut self, config: audit::AuditConfig) -> std::io::Result<Self> {
+        let logger = Arc::new(audit::AuditLogger::new(config)?);
+        Arc::get_mut(&mut self.inner)
+            .expect("with_audit is called before the state is shared")
+            .audit = Some(logger);
+        Ok(self)
+    }
+
+    /// Creates an in-memory state with the audit log enabled (for tests).
+    pub fn new_in_memory_with_audit(
+        session_ttl: u64,
+        config: audit::AuditConfig,
+    ) -> std::io::Result<Self> {
+        Self::new_in_memory(session_ttl).with_audit(config)
     }
 
     // --- Maintenance ---

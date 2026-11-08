@@ -64,6 +64,12 @@ async fn main() {
         replication_mode,
         backup_dir: config.backup_dir.clone(),
         backup_retention: config.backup_retention,
+        audit: config.audit.then(|| grafeo_service::audit::AuditConfig {
+            log_file: config.audit_log_file.as_ref().map(std::path::PathBuf::from),
+            max_size_bytes: config.audit_max_size_mb * 1024 * 1024,
+            keep: config.audit_keep,
+            data_changes: config.audit_data_changes,
+        }),
     };
 
     let service = match ServiceState::try_new(&service_config) {
@@ -91,6 +97,7 @@ async fn main() {
         version = env!("CARGO_PKG_VERSION"),
         persistent = config.data_dir.is_some(),
         read_only = config.read_only,
+        audit = config.audit,
         "Grafeo Server starting",
     );
 
@@ -421,8 +428,6 @@ fn detect_features() -> EnabledFeatures {
 /// Builds GWP server options from CLI config and service state.
 #[cfg(feature = "gwp")]
 fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::GwpOptions {
-    let _ = service; // used only when auth feature is enabled
-
     grafeo_gwp::GwpOptions {
         idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
         max_sessions: if config.gwp_max_sessions > 0 {
@@ -436,6 +441,7 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
         auth_provider: service.auth().map(std::sync::Arc::clone),
+        audit: service.audit().map(std::sync::Arc::clone),
         shutdown: None,
     }
 }
@@ -443,8 +449,6 @@ fn build_gwp_options(config: &Config, service: &ServiceState) -> grafeo_gwp::Gwp
 /// Builds BoltR server options from CLI config and service state.
 #[cfg(feature = "bolt")]
 fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::BoltrOptions {
-    let _ = service; // used only when auth feature is enabled
-
     grafeo_boltr::BoltrOptions {
         idle_timeout: Some(std::time::Duration::from_secs(config.session_ttl)),
         max_sessions: if config.bolt_max_sessions > 0 {
@@ -465,6 +469,7 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         tls_key: config.tls_key.clone(),
         #[cfg(feature = "auth")]
         auth_provider: service.auth().map(std::sync::Arc::clone),
+        audit: service.audit().map(std::sync::Arc::clone),
         shutdown: None,
     }
 }
