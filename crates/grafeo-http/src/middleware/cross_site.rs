@@ -56,15 +56,21 @@ pub async fn cross_site_middleware(
             origin = ?req.headers().get(ORIGIN),
             "refused a cross-site request"
         );
+        // The detail is truncated: a page can drive these refusals at high
+        // volume without credentials, and the bounded audit channel must not
+        // let them crowd out auth and token events.
         state.audit_event(
             grafeo_service::audit::AuditEvent::new("cross_site_refused")
                 .transport("http")
                 .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
-                .detail(format!(
-                    "{} {} origin {:?}",
-                    req.method(),
-                    req.uri().path(),
-                    req.headers().get(ORIGIN)
+                .detail(grafeo_service::audit::truncate(
+                    &format!(
+                        "{} {} origin {:?}",
+                        req.method(),
+                        req.uri().path(),
+                        req.headers().get(ORIGIN)
+                    ),
+                    500,
                 )),
         );
         let body = ErrorBody {

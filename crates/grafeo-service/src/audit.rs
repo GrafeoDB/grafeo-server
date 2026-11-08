@@ -371,7 +371,7 @@ fn rotated_path(path: &Path, i: u32) -> PathBuf {
 pub(crate) const MAX_PENDING_WRITES: usize = 1000;
 
 /// Truncates to `max` bytes, on a char boundary, with an ellipsis marker.
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

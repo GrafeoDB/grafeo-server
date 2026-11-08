@@ -157,8 +157,9 @@ mod tests {
                 "/admin/replication/stats",
                 Need::Admin(Some("replication")),
             ),
-            // The token routes, by method: GET/DELETE on /admin/tokens/{id}.
+            // The token routes, by method: GET/HEAD/DELETE on /admin/tokens/{id}.
             (Method::GET, "/admin/tokens/stats", Need::ServerAdmin),
+            (Method::HEAD, "/admin/tokens/tok-1", Need::ServerAdmin),
             (Method::DELETE, "/admin/tokens/tok-1", Need::ServerAdmin),
             // Other methods under /admin/tokens/... belong to a database
             // named `tokens`.
@@ -218,6 +219,7 @@ mod tests {
         assert!(authorize(&Method::POST, "/admin/tokens/backup", &admin_tokens).is_ok());
         assert!(authorize(&Method::GET, "/admin/tokens", &admin_tokens).is_err());
         assert!(authorize(&Method::DELETE, "/admin/tokens/tok-1", &admin_tokens).is_err());
+        assert!(authorize(&Method::HEAD, "/admin/tokens/tok-1", &admin_tokens).is_err());
         assert!(authorize(&Method::GET, "/admin/tokens/stats", &admin_tokens).is_err());
     }
 
