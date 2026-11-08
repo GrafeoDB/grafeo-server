@@ -3570,6 +3570,10 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
 /// them empty. So this checks what the server controls: the override is
 /// accepted, kept in `options.json`, and the database serves requests from
 /// a second manager on the same directory.
+// VectorStore `force_disk` needs the vector-index feature (engine 0.6.2
+// spills only the vector store, and only with `wal` + `vector-index`); the
+// default-feature CI run builds without it.
+#[cfg(all(feature = "wal", feature = "vector-index"))]
 #[tokio::test]
 async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
     let data_dir = TempDir::new().unwrap();

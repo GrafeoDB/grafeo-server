@@ -282,11 +282,22 @@ fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, 
     }
 }
 
-/// Rejects `force_disk` for sections the engine cannot spill. Only sections
-/// whose `SectionType::default_flags().mmap_able` is true (CompactStore,
-/// VectorStore, TextIndex, RdfRing, PropertyIndex in engine 0.5.44) can be
-/// kept on disk; for the others the engine silently ignores the override.
-/// Called from `create` only, so the reopen path never rejects a stored file.
+/// Whether the engine can spill a section of this type to disk in this build.
+/// Engine 0.6.2 allows `force_disk` only on the vector store, and only in a
+/// build with `wal` and `vector-index` (whose consumer writes the spill
+/// files); anything else is refused at open with
+/// `ForceDiskOnUnspillableSection`, which the server surfaces as a 400 here.
+fn section_can_spill(section: grafeo_common::storage::SectionType) -> bool {
+    matches!(
+        section,
+        grafeo_common::storage::SectionType::VectorStore
+    ) && cfg!(feature = "wal")
+        && cfg!(feature = "vector-index")
+}
+
+/// Rejects `force_disk` for sections the engine cannot spill in this build
+/// (see [`section_can_spill`]). Called from `create` only, so the reopen path
+/// never rejects a stored file.
 fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceError> {
     let Some(ref section_tiers) = options.section_tiers else {
         return Ok(());
@@ -296,11 +307,11 @@ fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceE
         if matches!(
             parse_tier_override(tier_str)?,
             grafeo_common::storage::TierOverride::ForceDisk
-        ) && !section.default_flags().mmap_able
+        ) && !section_can_spill(section)
         {
             return Err(ServiceError::BadRequest(format!(
-                "section '{section_name}' cannot be kept on disk: only CompactStore, \
-                 VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                "section '{section_name}' cannot be kept on disk: only the vector store \
+                 spills, and only in a server built with the 'vector-index' feature"
             )));
         }
     }
@@ -1585,6 +1596,9 @@ mod tests {
         entry.set_available();
     }
 
+    // VectorStore `force_disk` needs the vector-index feature (engine 0.6.2
+    // spills only the vector store, and only with `wal` + `vector-index`).
+    #[cfg(all(feature = "wal", feature = "vector-index"))]
     #[test]
     fn create_database_with_section_tier_overrides() {
         use std::collections::HashMap;
@@ -1929,6 +1943,35 @@ mod tests {
         assert!(!dir.path().join("b64").exists());
     }
 
+    // Engine 0.6.2 spills only the vector store, and only with `wal` +
+    // `vector-index`; on a build without the feature the create is a 400
+    // naming it, not a 500 from the engine at open.
+    #[cfg(not(feature = "vector-index"))]
+    #[test]
+    fn create_rejects_vector_store_force_disk_without_the_feature() {
+        let mgr = DatabaseManager::new(None, false);
+        let req = CreateDatabaseRequest {
+            name: "v".to_string(),
+            database_type: DatabaseType::Lpg,
+            storage_mode: StorageMode::InMemory,
+            options: DatabaseOptions {
+                section_tiers: Some(
+                    [("VectorStore".to_string(), "force_disk".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            schema_file: None,
+            schema_filename: None,
+        };
+        let err = mgr.create(&req).expect_err("force_disk must be rejected");
+        let ServiceError::BadRequest(msg) = err else {
+            panic!("expected BadRequest, got: {err}");
+        };
+        assert!(msg.contains("vector-index"), "{msg}");
+    }
+
     #[test]
     fn create_rejects_force_disk_for_sections_that_cannot_spill() {
         let dir = tempfile::tempdir().unwrap();
@@ -1948,8 +1991,8 @@ mod tests {
             assert_eq!(
                 msg,
                 format!(
-                    "section '{section}' cannot be kept on disk: only CompactStore, \
-                     VectorStore, TextIndex, RdfRing and PropertyIndex can spill"
+                    "section '{section}' cannot be kept on disk: only the vector store \
+                     spills, and only in a server built with the 'vector-index' feature"
                 )
             );
             assert!(mgr.get("nospill").is_none());
@@ -2262,6 +2305,7 @@ mod tests {
         assert!(mgr.reopen_config(&db_file).unwrap().0.cdc_enabled());
     }
 
+    #[cfg(all(feature = "wal", feature = "vector-index"))]
     #[test]
     fn section_tier_override_is_applied_on_reopen() {
         use grafeo_common::storage::{SectionType, TierOverride};
