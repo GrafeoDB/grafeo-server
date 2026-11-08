@@ -22,8 +22,8 @@ Pure Rust, single binary. Available in four tiers to match different deployment 
 # Standard - HTTP + Studio UI, all query languages
 docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
 
-# With persistent storage
-docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token -v grafeo-data:/data grafeo/grafeo-server --data-dir /data
+# With persistent storage (args replace the image CMD, so pass --host explicitly)
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token -v grafeo-data:/data grafeo/grafeo-server --host 0.0.0.0 --data-dir /data
 ```
 
 The images listen on `0.0.0.0`, so they refuse to start without credentials: set `GRAFEO_AUTH_TOKEN` (or `GRAFEO_AUTH_USER` and `GRAFEO_AUTH_PASSWORD`), or `GRAFEO_ALLOW_UNAUTHENTICATED=true` to accept unauthenticated access (for a trusted network only).
@@ -39,10 +39,10 @@ Four image tiers are available:
 
 ```bash
 # GWP - gRPC wire protocol, GQL only
-docker run -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:gwp --data-dir /data
+docker run -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:gwp --host 0.0.0.0 --data-dir /data
 
 # Bolt - Neo4j-compatible wire protocol, Cypher
-docker run -p 7687:7687 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:bolt --data-dir /data
+docker run -p 7687:7687 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:bolt --host 0.0.0.0 --data-dir /data
 
 # Full - everything including AI, auth, TLS, schemas
 docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:full
@@ -367,6 +367,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE` | `--bolt-max-unauthenticated-message-size` | `0` | Largest Bolt message before LOGON, in bytes (0 = the default, 64 KiB) |
 | `GRAFEO_BOLT_HANDSHAKE_TIMEOUT` | `--bolt-handshake-timeout` | `30` | Seconds a Bolt connection has to finish its handshake, HELLO and LOGON (0 = no limit) |
 | `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated origins whose pages may call the API, write and open the WebSocket (`*` for all) |
+| `GRAFEO_TRUSTED_HOSTS` | `--trusted-hosts` | loopback + `--host` | Additional host names the server answers on; `Sec-Fetch-Site: same-origin` is trusted only for these `Host` values (DNS-rebinding protection). Add the public name when a proxy rewrites `Host` |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
 | `GRAFEO_RATE_LIMIT` | `--rate-limit` | `0` | Max requests per window per IP (0 = disabled) |
