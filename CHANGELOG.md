@@ -25,6 +25,10 @@ Requests that ran on 0.6.1 and now fail or answer differently.
 
 - **`--read-only` on a data directory without a database exits cleanly** (#83): it panicked with exit code 101. It now says to start once without `--read-only` (or to point `--data-dir` at a directory with a database) and exits with code 2, creating nothing.
 - **`--features owl-schema` builds on its own**: the OWL and RDFS loaders need SPARQL, which the feature now enables.
+- **A refused cross-site request carries its `X-Request-Id`**: the request-id layer now wraps the cross-site check, so the 403 response has the header and the refusal log the `request_id`.
+- **The CORS layer allows `PUT` and `PATCH`**, which the Graph Store and the cross-site rule already cover, so a listed origin's preflight no longer blocks them.
+- **The replication test cluster publishes its ports on loopback only** (`127.0.0.1:17474:7474` etc.); the tests connect via localhost, and the services run unauthenticated.
+- **`docker compose` forwards the Basic-auth pair too**: `GRAFEO_AUTH_USER`/`GRAFEO_AUTH_PASSWORD` are passed alongside `GRAFEO_AUTH_TOKEN` (unset values forward empty, which is not a credential); the README Docker examples that pass arguments now include `--host 0.0.0.0`, since arguments replace the image's `CMD`.
 
 ### Security
 
