@@ -182,9 +182,9 @@ pub struct Config {
     pub primary_url: Option<String>,
 
     /// Enable the audit log: JSON lines with failed authentication attempts
-    /// (with source IP), refused requests, token and database lifecycle
-    /// events, and — with --audit-data-changes — every write statement that
-    /// changed data.
+    /// (with source IP), refused requests and cross-site writes, token and
+    /// database lifecycle events, and — with --audit-data-changes — every
+    /// write statement that changed data.
     #[arg(long, default_value_t = false, env = "GRAFEO_AUDIT")]
     pub audit: bool,
 

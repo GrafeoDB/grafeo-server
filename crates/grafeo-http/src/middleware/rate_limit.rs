@@ -20,8 +20,8 @@ use crate::state::AppState;
 /// trusted, since any local process can be a proxy and a forged header would
 /// otherwise choose the rate-limit bucket and the audit log's `source_ip`.
 /// From the chain, the rightmost address that is not itself a trusted proxy
-/// is the client: each trusted proxy appends the address it saw, so entries
-/// to its right are attacker-controlled.
+/// is the client: each trusted proxy appends the address it saw to the right,
+/// so attacker-supplied entries sit to the left of the selected address.
 pub(crate) fn extract_ip(req: &Request, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
     let peer_ip = req
         .extensions()

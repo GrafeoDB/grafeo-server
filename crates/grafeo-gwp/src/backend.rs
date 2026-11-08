@@ -221,9 +221,10 @@ impl GrafeoBackend {
     }
 
     /// Refuses a schema create/drop the calling session may not make: the
-    /// database must be in its token's scope, and its identity must have the
-    /// write role (capped to read-only on a read-only server), as the HTTP
-    /// schema routes check (`check_db_access` + `check_write`).
+    /// database must be in its token's scope, the server must accept writes
+    /// (read-only server or replica, as the HTTP replica guard refuses), and
+    /// the identity must have the write role, as the HTTP schema routes check
+    /// (`check_db_access` + `check_write`).
     #[allow(clippy::result_large_err)]
     fn authorize_schema_write(
         &self,
@@ -231,17 +232,23 @@ impl GrafeoBackend {
         target: &CatalogTarget,
     ) -> Result<(), GqlError> {
         self.authorize_call(ctx, &target.database, false)?;
+        if self.state.is_replica() {
+            return Err(GqlError::Grpc(tonic::Status::permission_denied(
+                "replica mode: writes are refused locally",
+            )));
+        }
+        if self.state.is_read_only() {
+            return Err(GqlError::Grpc(tonic::Status::permission_denied(
+                "server is in read-only mode",
+            )));
+        }
         #[cfg(feature = "auth")]
-        if let Some(identity) = &target.identity {
-            let identity = grafeo_service::auth::cap_identity_read_only(
-                identity.clone(),
-                self.state.is_read_only(),
-            );
-            if !identity.can_write() {
-                return Err(GqlError::Grpc(tonic::Status::permission_denied(
-                    "write access required",
-                )));
-            }
+        if let Some(identity) = &target.identity
+            && !identity.can_write()
+        {
+            return Err(GqlError::Grpc(tonic::Status::permission_denied(
+                "write access required",
+            )));
         }
         #[cfg(not(feature = "auth"))]
         let _ = target;

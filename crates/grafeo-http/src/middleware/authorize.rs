@@ -7,8 +7,8 @@
 //!
 //! | Route | Needs |
 //! | --- | --- |
-//! | `/admin/tokens...`, `/admin/replication`, `/backups...` | an admin token with no database list |
-//! | `/admin/{db}/...` | admin, `{db}` in scope |
+//! | `/admin/tokens`, `GET`/`HEAD`/`DELETE /admin/tokens/{id}`, `/admin/replication`, `/backups...` | an admin token with no database list |
+//! | other methods under `/admin/tokens/...`, `/admin/{db}/...` | admin, `{db}` in scope |
 //! | `POST /db` | admin (the handler checks the new name against the scope) |
 //! | `DELETE /db/{name}` | admin, `{name}` in scope |
 //! | `/db/{name}/sparql` | `{name}` in scope (the engine session refuses writes for read-only tokens) |
@@ -47,7 +47,8 @@ fn need<'a>(method: &Method, path: &'a str) -> Need<'a> {
     // database-scoped routes of a database named `tokens`.
     let is_token_route = match segments.as_slice() {
         ["admin", "tokens"] => true,
-        ["admin", "tokens", _] => matches!(*method, Method::GET | Method::DELETE),
+        // Axum serves HEAD through the GET handler, so HEAD counts here too.
+        ["admin", "tokens", _] => matches!(*method, Method::GET | Method::HEAD | Method::DELETE),
         _ => false,
     };
     match segments.as_slice() {

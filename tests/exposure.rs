@@ -153,12 +153,18 @@ fn read_only_without_a_database_refuses_to_start_cleanly() {
 #[test]
 #[allow(unsafe_code)] // see config(): the lock makes the mutation safe here
 fn in_process_parse_ignores_grafeo_env_vars() {
-    // SAFETY: config() strips and restores the GRAFEO_* variables under its
-    // lock while parsing, so no in-process parse ever sees them; the variable
-    // is removed again right after.
-    unsafe { std::env::set_var("GRAFEO_HOST", "0.0.0.0") };
+    // SAFETY: every mutation happens under env_lock(), and config() takes the
+    // same lock while it strips and restores the variables, so no parse ever
+    // sees GRAFEO_HOST and no restore can interleave with the removal.
+    {
+        let _guard = env_lock().lock().unwrap();
+        unsafe { std::env::set_var("GRAFEO_HOST", "0.0.0.0") };
+    }
     let c = config(&[]);
-    unsafe { std::env::remove_var("GRAFEO_HOST") };
+    {
+        let _guard = env_lock().lock().unwrap();
+        unsafe { std::env::remove_var("GRAFEO_HOST") };
+    }
     assert_eq!(c.host, "127.0.0.1");
 }
 

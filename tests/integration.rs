@@ -3570,10 +3570,10 @@ async fn create_database_rejects_force_disk_for_unspillable_section() {
 /// them empty. So this checks what the server controls: the override is
 /// accepted, kept in `options.json`, and the database serves requests from
 /// a second manager on the same directory.
-// VectorStore `force_disk` needs the vector-index feature (engine 0.6.2
-// spills only the vector store, and only with `wal` + `vector-index`); the
-// default-feature CI run builds without it.
-#[cfg(all(feature = "wal", feature = "vector-index"))]
+// Uses `force_ram` (not `force_disk`): engine 0.6.2 spills only the vector
+// store with `wal` + `vector-index`, and the default-feature CI build has
+// neither, while `force_ram` is accepted in every build — so this restart
+// survival test runs in every CI job.
 #[tokio::test]
 async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
     let data_dir = TempDir::new().unwrap();
@@ -3638,7 +3638,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
         serde_json::from_str(&std::fs::read_to_string(&options_file).unwrap()).unwrap();
     assert_eq!(
         stored["options"]["section_tiers"]["VectorStore"],
-        "force_disk"
+        "force_ram"
     );
 
     // Release the first manager's files, then open a second manager on the

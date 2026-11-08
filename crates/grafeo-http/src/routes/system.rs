@@ -136,7 +136,7 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoRespons
     let edges_total: usize = db_list.iter().map(|d| d.edge_count).sum();
     let engine_metrics = dbs.engine_prometheus_metrics();
 
-    let body = state.metrics().render(
+    let mut body = state.metrics().render(
         db_list.len(),
         nodes_total,
         edges_total,
@@ -144,6 +144,16 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoRespons
         state.uptime_secs(),
         engine_metrics.as_deref(),
     );
+    if let Some(audit) = state.audit() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            body,
+            "# HELP grafeo_audit_events_dropped_total Audit events dropped because the audit writer was behind.\n\
+             # TYPE grafeo_audit_events_dropped_total counter\n\
+             grafeo_audit_events_dropped_total {}\n",
+            audit.dropped_events()
+        );
+    }
 
     (
         StatusCode::OK,

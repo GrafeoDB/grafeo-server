@@ -56,6 +56,17 @@ pub async fn cross_site_middleware(
             origin = ?req.headers().get(ORIGIN),
             "refused a cross-site request"
         );
+        state.audit_event(
+            grafeo_service::audit::AuditEvent::new("cross_site_refused")
+                .transport("http")
+                .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
+                .detail(format!(
+                    "{} {} origin {:?}",
+                    req.method(),
+                    req.uri().path(),
+                    req.headers().get(ORIGIN)
+                )),
+        );
         let body = ErrorBody {
             error: "cross_site_request".to_string(),
             detail: Some(

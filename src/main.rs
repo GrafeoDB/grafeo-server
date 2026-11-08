@@ -171,6 +171,7 @@ async fn main() {
         #[cfg(feature = "bolt")]
         bolt_handle.await.ok();
 
+        shutdown_audit(&service);
         tracing::info!("Grafeo Server shut down");
         return;
     }
@@ -301,6 +302,7 @@ async fn main() {
             #[cfg(feature = "bolt")]
             bolt_handle.await.ok();
 
+            shutdown_audit(&service);
             tracing::info!("Grafeo Server shut down");
             return;
         }
@@ -317,6 +319,7 @@ async fn main() {
         #[cfg(feature = "bolt")]
         bolt_handle.await.ok();
 
+        shutdown_audit(&service);
         tracing::info!("Grafeo Server shut down");
     }
 
@@ -486,6 +489,14 @@ fn build_bolt_options(config: &Config, service: &ServiceState) -> grafeo_boltr::
         auth_provider: service.auth().map(std::sync::Arc::clone),
         audit: service.audit().map(std::sync::Arc::clone),
         shutdown: None,
+    }
+}
+
+/// Flushes and stops the audit log writer, so a graceful shutdown does not
+/// abandon queued audit events.
+fn shutdown_audit(service: &ServiceState) {
+    if let Some(audit) = service.audit() {
+        audit.shutdown();
     }
 }
 

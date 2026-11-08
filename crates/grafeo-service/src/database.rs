@@ -286,7 +286,7 @@ fn parse_tier_override(s: &str) -> Result<grafeo_common::storage::TierOverride, 
 /// Engine 0.6.2 allows `force_disk` only on the vector store, and only in a
 /// build with `wal` and `vector-index` (whose consumer writes the spill
 /// files); anything else is refused at open with
-/// `ForceDiskOnUnspillableSection`, which the server surfaces as a 400 here.
+/// `ForceDiskOnUnspillableSection`.
 fn section_can_spill(section: grafeo_common::storage::SectionType) -> bool {
     matches!(section, grafeo_common::storage::SectionType::VectorStore)
         && cfg!(feature = "wal")
@@ -294,8 +294,9 @@ fn section_can_spill(section: grafeo_common::storage::SectionType) -> bool {
 }
 
 /// Rejects `force_disk` for sections the engine cannot spill in this build
-/// (see [`section_can_spill`]). Called from `create` only, so the reopen path
-/// never rejects a stored file.
+/// (see [`section_can_spill`]), before the engine opens the database and
+/// fails with `ForceDiskOnUnspillableSection`. Called from `create` only; the
+/// reopen path sanitizes stored tiers instead (see [`sanitize_stored_tiers`]).
 fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceError> {
     let Some(ref section_tiers) = options.section_tiers else {
         return Ok(());
@@ -309,11 +310,34 @@ fn validate_spillable_sections(options: &DatabaseOptions) -> Result<(), ServiceE
         {
             return Err(ServiceError::BadRequest(format!(
                 "section '{section_name}' cannot be kept on disk: only the vector store \
-                 spills, and only in a server built with the 'vector-index' feature"
+                 spills, and only in a server built with the 'wal' and 'vector-index' features"
             )));
         }
     }
     Ok(())
+}
+
+/// Maps stored `force_disk` tiers the engine cannot spill in this build back
+/// to `auto`, so a database created on an older server (or a build with
+/// different features) still opens after the upgrade; the data is kept and
+/// only the tier override is dropped. Called on the reopen path only.
+fn sanitize_stored_tiers(options: &mut DatabaseOptions, options_path: &Path) {
+    let Some(tiers) = options.section_tiers.as_mut() else {
+        return;
+    };
+    for (name, tier) in tiers.iter_mut() {
+        if tier == "force_disk"
+            && let Ok(section) = parse_section_type(name)
+            && !section_can_spill(section)
+        {
+            tracing::warn!(
+                path = %options_path.display(),
+                section = %name,
+                "dropping stored force_disk tier: this build cannot spill that section (engine 0.6.2 spills only the vector store, with 'wal' and 'vector-index')"
+            );
+            *tier = "auto".to_string();
+        }
+    }
 }
 
 /// Creation-time metadata stored alongside each database.
@@ -734,6 +758,8 @@ impl DatabaseManager {
         // file's sections depend on it: opening an RDF file as a property
         // graph would rewrite it without its RDF data at the next checkpoint.
         // Any other validation error keeps the database closed.
+        let mut stored = stored;
+        sanitize_stored_tiers(&mut stored.options, &options_path);
         let configured = match configure(base.clone(), stored.database_type, &stored.options) {
             Ok(config) => config,
             Err(e) => {
@@ -1942,9 +1968,9 @@ mod tests {
     }
 
     // Engine 0.6.2 spills only the vector store, and only with `wal` +
-    // `vector-index`; on a build without the feature the create is a 400
-    // naming it, not a 500 from the engine at open.
-    #[cfg(not(feature = "vector-index"))]
+    // `vector-index`; on a build missing either, the create is a 400 naming
+    // them, not a 500 from the engine at open.
+    #[cfg(not(all(feature = "wal", feature = "vector-index")))]
     #[test]
     fn create_rejects_vector_store_force_disk_without_the_feature() {
         let mgr = DatabaseManager::new(None, false);
@@ -1967,7 +1993,7 @@ mod tests {
         let ServiceError::BadRequest(msg) = err else {
             panic!("expected BadRequest, got: {err}");
         };
-        assert!(msg.contains("vector-index"), "{msg}");
+        assert!(msg.contains("wal") && msg.contains("vector-index"), "{msg}");
     }
 
     #[test]
@@ -1990,7 +2016,7 @@ mod tests {
                 msg,
                 format!(
                     "section '{section}' cannot be kept on disk: only the vector store \
-                     spills, and only in a server built with the 'vector-index' feature"
+                     spills, and only in a server built with the 'wal' and 'vector-index' features"
                 )
             );
             assert!(mgr.get("nospill").is_none());

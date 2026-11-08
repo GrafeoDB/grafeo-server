@@ -53,8 +53,9 @@ impl Default for AuditConfig {
 pub struct AuditEvent {
     /// RFC 3339 UTC timestamp.
     pub ts: String,
-    /// Event name: `auth_failure`, `access_denied`, `token_created`,
-    /// `token_revoked`, `database_created`, `database_deleted`, `data_change`.
+    /// Event name: `auth_failure`, `access_denied`, `cross_site_refused`,
+    /// `token_created`, `token_revoked`, `database_created`, `database_deleted`,
+    /// `data_change`.
     pub event: String,
     /// Who acted: the token name (or `basic-auth` user), when known.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,31 +127,62 @@ enum Msg {
     Line(String),
     /// Flush the sink and acknowledge, so a test can read the file.
     Flush(mpsc::Sender<()>),
+    /// Stop the writer after flushing; `shutdown` joins the thread.
+    Shutdown(mpsc::Sender<()>),
+}
+
+enum Sink {
+    Stdout,
+    File {
+        file: std::fs::File,
+        path: PathBuf,
+        size: u64,
+    },
 }
 
 /// The audit log writer. `log` only enqueues the line; a dedicated thread
 /// does the file I/O and rotation.
 pub struct AuditLogger {
     tx: mpsc::SyncSender<Msg>,
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     dropped: Arc<AtomicU64>,
     data_changes: bool,
 }
 
 impl AuditLogger {
-    /// Starts the writer thread and opens the configured sink. Fails when the
-    /// log file cannot be created.
+    /// Opens the configured sink (failing when the log file cannot be created
+    /// or opened, so audit data is never silently redirected) and starts the
+    /// writer thread.
     pub fn new(config: AuditConfig) -> std::io::Result<Self> {
         let data_changes = config.data_changes;
+        let sink = match &config.log_file {
+            None => Sink::Stdout,
+            Some(path) => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let file = open_audit_file(path)?;
+                let size = file.metadata().map_or(0, |m| m.len());
+                Sink::File {
+                    file,
+                    path: path.clone(),
+                    size,
+                }
+            }
+        };
         let (tx, rx) = mpsc::sync_channel::<Msg>(1024);
         let dropped = Arc::new(AtomicU64::new(0));
-        {
+        let handle = {
             let dropped = Arc::clone(&dropped);
             std::thread::Builder::new()
                 .name("grafeo-audit".to_string())
-                .spawn(move || writer_loop(config, rx, dropped))?;
-        }
+                .spawn(move || writer_loop(config, sink, rx, dropped))?
+        };
         Ok(Self {
             tx,
+            handle: std::sync::Mutex::new(Some(handle)),
             dropped,
             data_changes,
         })
@@ -198,6 +230,22 @@ impl AuditLogger {
         }
     }
 
+    /// How many events were dropped because the writer thread was behind.
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Flushes queued events and stops the writer thread, so a graceful
+    /// shutdown does not abandon audit events still in the channel.
+    pub fn shutdown(&self) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let _ = self.tx.send(Msg::Shutdown(ack_tx));
+        let _ = ack_rx.recv();
+        if let Some(handle) = self.handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = handle.join();
+        }
+    }
+
     /// Audits a write statement that changed data (`result.counters` says so).
     pub fn data_change(
         &self,
@@ -233,40 +281,18 @@ fn open_audit_file(path: &Path) -> std::io::Result<std::fs::File> {
     opts.open(path)
 }
 
-enum Sink {
-    Stdout,
-    File {
-        file: std::fs::File,
-        path: PathBuf,
-        size: u64,
-    },
-}
-
-fn writer_loop(config: AuditConfig, rx: mpsc::Receiver<Msg>, dropped: Arc<AtomicU64>) {
+fn writer_loop(
+    config: AuditConfig,
+    mut sink: Sink,
+    rx: mpsc::Receiver<Msg>,
+    _dropped: Arc<AtomicU64>,
+) {
     use std::io::Write as _;
-    let mut sink = match &config.log_file {
-        None => Sink::Stdout,
-        Some(path) => {
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match open_audit_file(path) {
-                Ok(file) => Sink::File {
-                    size: file.metadata().map_or(0, |m| m.len()),
-                    file,
-                    path: path.clone(),
-                },
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), "cannot open the audit log: {e}");
-                    Sink::Stdout
-                }
-            }
-        }
-    };
-
-    while let Ok(msg) = rx.recv() {
+    loop {
+        let msg = match rx.recv() {
+            Ok(msg) => msg,
+            Err(_) => break, // all senders dropped
+        };
         match msg {
             Msg::Line(line) => {
                 if let Sink::File { file, path, size } = &mut sink {
@@ -291,7 +317,10 @@ fn writer_loop(config: AuditConfig, rx: mpsc::Receiver<Msg>, dropped: Arc<Atomic
                     }
                     let _ = file.flush();
                 } else {
-                    let _ = std::io::stdout().write_all(line.as_bytes());
+                    match std::io::stdout().write_all(line.as_bytes()) {
+                        Ok(()) => {}
+                        Err(e) => tracing::warn!("audit log write to stdout failed: {e}"),
+                    }
                 }
             }
             Msg::Flush(ack) => {
@@ -300,9 +329,15 @@ fn writer_loop(config: AuditConfig, rx: mpsc::Receiver<Msg>, dropped: Arc<Atomic
                 }
                 let _ = ack.send(());
             }
+            Msg::Shutdown(ack) => {
+                if let Sink::File { file, .. } = &mut sink {
+                    let _ = file.flush();
+                }
+                let _ = ack.send(());
+                break;
+            }
         }
     }
-    let _ = dropped;
 }
 
 /// Rotates the log file: with `keep > 0`, shifts `path.1`..`path.keep` one up
@@ -331,8 +366,12 @@ fn rotated_path(path: &Path, i: u32) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// How many write statements a transaction session queues for the commit-time
+/// audit before further ones are only counted as dropped.
+pub(crate) const MAX_PENDING_WRITES: usize = 1000;
+
 /// Truncates to `max` bytes, on a char boundary, with an ellipsis marker.
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

@@ -275,7 +275,7 @@ async fn schema_create_and_drop_need_the_write_role() {
     let channel = spawn().await;
     let mut catalog = proto::catalog_service_client::CatalogServiceClient::new(channel.clone());
 
-    // A read-only token can list schemas but must not create or drop them.
+    // A read-only token must not create or drop schemas.
     let ro = session(&channel, RO).await;
     let err = catalog
         .create_schema(proto::CreateSchemaRequest {
@@ -296,12 +296,20 @@ async fn schema_create_and_drop_need_the_write_role() {
         .unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err}");
 
-    // A read-write token may.
+    // A read-write token may create and drop them.
     let rw = session(&channel, RW).await;
     catalog
         .create_schema(proto::CreateSchemaRequest {
             name: "s1".into(),
             if_not_exists: true,
+            session_id: rw.clone(),
+        })
+        .await
+        .unwrap();
+    catalog
+        .drop_schema(proto::DropSchemaRequest {
+            name: "s1".into(),
+            if_exists: true,
             session_id: rw.clone(),
         })
         .await

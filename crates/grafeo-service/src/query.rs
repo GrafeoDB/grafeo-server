@@ -156,9 +156,11 @@ impl QueryService {
         // Transaction writes are audited at commit time (see
         // `commit_with_audit`), not here: a rollback or a failed commit must
         // not leave a `data_change` line for writes that never persisted.
-        // While auditing is on, the statement and its counters are queued on
-        // the session for the commit to log.
-        let collect = audit.is_some();
+        // While data-change auditing is on, the (truncated) statement and its
+        // counters are queued on the session, capped, for the commit to log.
+        let collect = audit
+            .as_ref()
+            .is_some_and(|a| a.logger.data_changes_enabled());
 
         let result = run_with_timeout(timeout, move || {
             let mut session = session_arc.lock();
@@ -167,7 +169,13 @@ impl QueryService {
                 && let Ok(qr) = &r
                 && qr.counters.contains_updates()
             {
-                session.pending_writes.push((stmt.clone(), qr.counters));
+                if session.pending_writes.len() < crate::audit::MAX_PENDING_WRITES {
+                    session
+                        .pending_writes
+                        .push((crate::audit::truncate(&stmt, 500), qr.counters));
+                } else {
+                    session.pending_writes_dropped += 1;
+                }
             }
             r
         })
@@ -262,11 +270,12 @@ impl QueryService {
         if result.is_ok()
             && let Some(audit) = audit
         {
-            let (db_name, writes) = {
+            let (db_name, writes, dropped) = {
                 let mut session = audit_session.lock();
                 (
                     session.db_name.clone(),
                     std::mem::take(&mut session.pending_writes),
+                    std::mem::take(&mut session.pending_writes_dropped),
                 )
             };
             for (stmt, counters) in writes {
@@ -276,6 +285,17 @@ impl QueryService {
                     audit.transport,
                     &stmt,
                     &counters,
+                );
+            }
+            if dropped > 0 {
+                audit.logger.log(
+                    crate::audit::AuditEvent::new("data_change")
+                        .actor(audit.actor.as_deref())
+                        .database(&db_name)
+                        .transport(audit.transport)
+                        .detail(format!(
+                            "{dropped} further transaction writes not recorded (queue cap)"
+                        )),
                 );
             }
         }
@@ -359,10 +379,14 @@ impl QueryService {
             })
             .collect::<Result<_, _>>()?;
         let batch_languages = languages.clone();
-        // Only clone the statements when auditing is on (the default is off).
-        let audit_statements: Option<Vec<String>> = audit
-            .as_ref()
-            .map(|_| queries.iter().map(|q| q.statement.clone()).collect());
+        // Only clone the statements when data-change auditing is on (the
+        // default is off).
+        let audit_statements: Option<Vec<String>> = audit.as_ref().and_then(|a| {
+            a.logger
+                .data_changes_enabled()
+                .then(|| queries.iter().map(|q| q.statement.clone()).collect())
+        });
+        let audit_db = db_name.to_owned();
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
@@ -394,26 +418,31 @@ impl QueryService {
 
             session.commit().map_err(ServiceError::from_engine)?;
 
+            // Audit the writes inside the blocking task, after the commit: a
+            // batch that commits after the caller's timeout is still logged,
+            // and a rolled-back one never is.
+            if let (Some(audit), Some(statements)) = (&audit, &audit_statements) {
+                for (idx, qr) in results.iter().enumerate() {
+                    if qr.counters.contains_updates() {
+                        audit.logger.data_change(
+                            audit.actor.as_deref(),
+                            &audit_db,
+                            audit.transport,
+                            &statements[idx],
+                            &qr.counters,
+                        );
+                    }
+                }
+            }
+
             Ok(results)
         })
         .await?;
 
-        // Record metrics for all successful queries, audit the writes. The
-        // batch committed above, so every logged write really persisted.
-        for (idx, (lang, qr)) in languages.iter().zip(results.iter()).enumerate() {
+        // Record metrics for all successful queries.
+        for (lang, qr) in languages.iter().zip(results.iter()) {
             let dur_us = qr.execution_time_ms.map_or(0, |ms| (ms * 1000.0) as u64);
             metrics.record_query(*lang, dur_us);
-            if let (Some(audit), Some(statements)) = (&audit, &audit_statements)
-                && qr.counters.contains_updates()
-            {
-                audit.logger.data_change(
-                    audit.actor.as_deref(),
-                    db_name,
-                    audit.transport,
-                    &statements[idx],
-                    &qr.counters,
-                );
-            }
         }
 
         Ok(results)

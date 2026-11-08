@@ -466,8 +466,8 @@ async fn a_percent_encoded_path_is_authorized_as_the_decoded_database() {
         resp.text().await.unwrap()
     );
 
-    // The other direction stays closed: a read-only token scoped to `a`
-    // cannot use the encoding to reach another database.
+    // The other direction stays closed: ADMIN_A, scoped to `a`, cannot use
+    // the encoding to reach another database.
     let resp = client
         .get(format!("{base}/admin/%62/stats"))
         .header("Authorization", format!("Bearer {ADMIN_A}"))
