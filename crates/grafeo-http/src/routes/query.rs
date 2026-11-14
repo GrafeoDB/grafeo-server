@@ -87,7 +87,7 @@ async fn execute_query(
         language,
         params,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

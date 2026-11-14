@@ -48,6 +48,7 @@ async fn main() {
     let service_config = ServiceConfig {
         data_dir: config.data_dir.clone(),
         read_only: config.read_only,
+        allow_external_access: config.allow_external_access,
         session_ttl: config.session_ttl,
         query_timeout: config.query_timeout,
         rate_limit: config.rate_limit,

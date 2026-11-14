@@ -8,6 +8,7 @@ use crate::database::DatabaseEntry;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 use crate::metrics::Metrics;
+use crate::remote::RemotePolicy;
 use crate::types;
 
 /// Convert a `StorageTier` to its string representation.
@@ -458,7 +459,7 @@ impl AdminService {
             Some("gql"),
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await?;
@@ -499,7 +500,7 @@ impl AdminService {
             Some("gql"),
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await;
@@ -534,7 +535,7 @@ impl AdminService {
             Some("gql"),
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await;

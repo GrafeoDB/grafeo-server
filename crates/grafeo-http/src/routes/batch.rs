@@ -75,7 +75,7 @@ pub async fn batch_query(
         db_name,
         batch_queries,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

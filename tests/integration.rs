@@ -3581,6 +3581,7 @@ async fn database_with_a_tier_override_reopens_after_a_manager_restart() {
         let config = grafeo_service::ServiceConfig {
             data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
             read_only: false,
+            allow_external_access: false,
             session_ttl: 300,
             query_timeout: 30,
             rate_limit: 0,
@@ -4878,6 +4879,7 @@ fn sync_state() -> grafeo_server::AppState {
     let config = grafeo_service::ServiceConfig {
         data_dir: None,
         read_only: false,
+        allow_external_access: false,
         session_ttl: 300,
         query_timeout: 30,
         rate_limit: 0,
@@ -6184,6 +6186,7 @@ async fn spawn_server_with_backup() -> (String, TempDir, TempDir) {
     let config = grafeo_service::ServiceConfig {
         data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
         read_only: false,
+        allow_external_access: false,
         session_ttl: 300,
         query_timeout: 30,
         rate_limit: 0,
@@ -6436,6 +6439,7 @@ async fn spawn_server_persistent_backup() -> (String, TempDir, TempDir) {
     let config = grafeo_service::ServiceConfig {
         data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
         read_only: false,
+        allow_external_access: false,
         session_ttl: 300,
         query_timeout: 30,
         rate_limit: 0,
@@ -6471,6 +6475,7 @@ async fn spawn_server_persistent_backup_with_retention(keep: usize) -> (String, 
     let config = grafeo_service::ServiceConfig {
         data_dir: Some(data_dir.path().to_str().unwrap().to_string()),
         read_only: false,
+        allow_external_access: false,
         session_ttl: 300,
         query_timeout: 30,
         rate_limit: 0,

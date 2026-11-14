@@ -121,4 +121,84 @@ impl ServiceError {
             _ => Self::Internal(error.to_string()),
         }
     }
+
+    /// The error of the batch statement at `index`: the same kind, so a
+    /// refused statement is still a 403 and a conflict still retryable, with
+    /// the statement's position in front of the message.
+    #[must_use]
+    pub fn in_batch(self, index: usize) -> Self {
+        let at = |message: String| format!("query at index {index} failed: {message}");
+        match self {
+            Self::BadRequest(m) => Self::BadRequest(at(m)),
+            Self::NotFound(m) => Self::NotFound(at(m)),
+            Self::Conflict(m) => Self::Conflict(at(m)),
+            Self::TransactionConflict(m) => Self::TransactionConflict(at(m)),
+            Self::Forbidden(m) => Self::Forbidden(at(m)),
+            Self::Unavailable(m) => Self::Unavailable(at(m)),
+            Self::Internal(m) => Self::Internal(at(m)),
+            // Kinds with a fixed message keep it; the status says enough.
+            other @ (Self::SessionNotFound
+            | Self::Timeout
+            | Self::Unauthorized
+            | Self::TooManyRequests
+            | Self::ReadOnly) => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_error_keeps_its_kind_and_names_the_statement() {
+        let forbidden = ServiceError::Forbidden("no external access".into()).in_batch(2);
+        assert!(matches!(&forbidden, ServiceError::Forbidden(_)));
+        assert_eq!(
+            forbidden.to_string(),
+            "query at index 2 failed: no external access"
+        );
+
+        for (error, same_kind) in [
+            (
+                ServiceError::BadRequest("x".into()),
+                (|e: &ServiceError| matches!(e, ServiceError::BadRequest(_)))
+                    as fn(&ServiceError) -> bool,
+            ),
+            (ServiceError::NotFound("x".into()), |e| {
+                matches!(e, ServiceError::NotFound(_))
+            }),
+            (ServiceError::Conflict("x".into()), |e| {
+                matches!(e, ServiceError::Conflict(_))
+            }),
+            (ServiceError::TransactionConflict("x".into()), |e| {
+                matches!(e, ServiceError::TransactionConflict(_))
+            }),
+            (ServiceError::Unavailable("x".into()), |e| {
+                matches!(e, ServiceError::Unavailable(_))
+            }),
+            (ServiceError::Internal("x".into()), |e| {
+                matches!(e, ServiceError::Internal(_))
+            }),
+            (ServiceError::Timeout, |e| {
+                matches!(e, ServiceError::Timeout)
+            }),
+            (ServiceError::ReadOnly, |e| {
+                matches!(e, ServiceError::ReadOnly)
+            }),
+        ] {
+            let before = error.to_string();
+            let fixed_message = matches!(error, ServiceError::Timeout | ServiceError::ReadOnly);
+            let after = error.in_batch(0);
+            assert!(same_kind(&after), "{before} kept its kind: {after:?}");
+            if fixed_message {
+                assert_eq!(after.to_string(), before);
+            } else {
+                assert!(
+                    after.to_string().contains("query at index 0 failed: x"),
+                    "{after}"
+                );
+            }
+        }
+    }
 }

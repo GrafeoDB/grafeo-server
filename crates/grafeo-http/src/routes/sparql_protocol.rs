@@ -83,7 +83,7 @@ pub async fn sparql_get(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -124,6 +124,7 @@ pub async fn sparql_post(
         .trim();
 
     let read_only = state.service().is_query_read_only();
+    let policy = state.service().remote_policy();
     let identity = auth.identity(read_only);
 
     let statement = match base_ct {
@@ -156,7 +157,7 @@ pub async fn sparql_post(
                 Some("sparql"),
                 params,
                 timeout,
-                read_only,
+                policy,
                 Some(identity),
                 state.audit_ref("http", auth.actor()),
             )
@@ -183,7 +184,7 @@ pub async fn sparql_post(
         Some("sparql"),
         None,
         timeout,
-        read_only,
+        policy,
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

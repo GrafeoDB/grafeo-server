@@ -29,6 +29,13 @@ pub struct Config {
     #[arg(long, default_value_t = false, env = "GRAFEO_READ_ONLY")]
     pub read_only: bool,
 
+    /// Let admin clients' statements read and write files on the server
+    /// (`LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export
+    /// procedures). Off by default: remote statements cannot reach outside
+    /// the database, admins included; read-only and read-write tokens never can.
+    #[arg(long, default_value_t = false, env = "GRAFEO_ALLOW_EXTERNAL_ACCESS")]
+    pub allow_external_access: bool,
+
     /// Transaction session timeout in seconds.
     #[arg(long, default_value_t = 300, env = "GRAFEO_SESSION_TTL")]
     pub session_ttl: u64,

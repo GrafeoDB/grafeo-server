@@ -108,11 +108,6 @@ impl GrafeoBackend {
         self
     }
 
-    /// Returns `true` if client-facing queries should be read-only.
-    fn query_read_only(&self) -> bool {
-        self.state.is_query_read_only()
-    }
-
     /// Looks up an internal session by handle.
     #[allow(clippy::result_large_err)]
     fn get_session(&self, handle: &SessionHandle) -> Result<Arc<Mutex<GrafeoSession>>, GqlError> {
@@ -134,11 +129,11 @@ impl GrafeoBackend {
             .databases()
             .get_available(name)
             .map_err(|e| GqlError::Session(e.to_string()))?;
-        let ro = self.query_read_only();
+        let policy = self.state.remote_policy();
         #[cfg(not(feature = "auth"))]
         let identity = None;
         tokio::task::spawn_blocking(move || {
-            grafeo_service::remote::remote_session(&entry.db(), identity, ro)
+            grafeo_service::remote::remote_session(&entry.db(), identity, policy)
         })
         .await
         .map_err(GqlError::backend)
@@ -1315,10 +1310,11 @@ impl ResultStream for GrafeoResultStream {
 /// concurrent one and was rolled back; the client can run it again.
 const SERIALIZATION_FAILURE: &str = "40001";
 
-/// Maps a service error to a GWP error: a conflict with a concurrent
-/// transaction is GQLSTATUS 40001 (serialization failure), which clients
-/// retry; anything else gets `other`, with the message (42001 for a statement,
-/// a transaction error for a commit, as before).
+/// GQLSTATUS 42501, insufficient privilege: the session may not do this (a
+/// role's refusal, or a statement reaching outside the database without
+/// external access), as the engine reports it.
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
+
 /// Where a catalog call works: a database and the identity to act as.
 struct CatalogTarget {
     database: String,
@@ -1363,11 +1359,17 @@ fn refuse_database_options(config: &CreateGraphConfig) -> Result<(), GqlError> {
     Ok(())
 }
 
+/// Maps a service error to a GWP error: a conflict with a concurrent
+/// transaction is GQLSTATUS 40001 (serialization failure), which clients
+/// retry; a refused one is 42501 (insufficient privilege), not a mistake in
+/// the statement; anything else gets `other`, with the message (42001 for a
+/// statement, a transaction error for a commit).
 fn gql_error(error: ServiceError, other: impl FnOnce(String) -> GqlError) -> GqlError {
     match error {
         ServiceError::TransactionConflict(message) => {
             GqlError::status(SERIALIZATION_FAILURE, message)
         }
+        ServiceError::Forbidden(message) => GqlError::status(INSUFFICIENT_PRIVILEGE, message),
         error => other(error.to_string()),
     }
 }

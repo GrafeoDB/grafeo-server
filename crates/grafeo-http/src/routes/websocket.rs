@@ -370,7 +370,7 @@ async fn process_query(
         req.language.as_deref(),
         params,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity.clone()),
         state.audit_ref("http", Some(identity.user_id())),
     )

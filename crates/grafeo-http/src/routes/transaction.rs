@@ -56,7 +56,7 @@ pub async fn tx_begin(
         state.databases(),
         state.sessions(),
         db_name,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         owner_token_id,
     )

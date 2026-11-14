@@ -99,7 +99,7 @@ pub async fn graph_store_get(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -159,7 +159,7 @@ pub async fn graph_store_head(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -219,6 +219,7 @@ pub async fn graph_store_put(
 
     let timeout = state.effective_timeout(None);
     let read_only = state.service().is_query_read_only();
+    let policy = state.service().remote_policy();
     let identity = auth.identity(read_only);
 
     QueryService::execute_with_audit(
@@ -229,7 +230,7 @@ pub async fn graph_store_put(
         Some("sparql"),
         None,
         timeout,
-        read_only,
+        policy,
         Some(identity.clone()),
         state.audit_ref("http", auth.actor()),
     )
@@ -246,7 +247,7 @@ pub async fn graph_store_put(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity),
             state.audit_ref("http", auth.actor()),
         )
@@ -275,6 +276,7 @@ pub async fn graph_store_post(
     auth.check_db_access(&db_name)?;
     let parsed = parse_body_to_ntriples(&headers, &body)?;
     let read_only = state.service().is_query_read_only();
+    let policy = state.service().remote_policy();
     let identity = auth.identity(read_only);
 
     // No target params: create a new named graph.
@@ -291,7 +293,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity.clone()),
             state.audit_ref("http", auth.actor()),
         )
@@ -308,7 +310,7 @@ pub async fn graph_store_post(
                 Some("sparql"),
                 None,
                 timeout,
-                read_only,
+                policy,
                 Some(identity),
                 state.audit_ref("http", auth.actor()),
             )
@@ -338,7 +340,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity),
             state.audit_ref("http", auth.actor()),
         )
@@ -378,7 +380,7 @@ pub async fn graph_store_delete(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
