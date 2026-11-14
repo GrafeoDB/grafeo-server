@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: grafeo-server/Dockerfile
-    image: grafeodb/grafeo-server:latest
+    image: grafeo/grafeo-server:latest
     ports:
       - "7474:7474"
     volumes:
