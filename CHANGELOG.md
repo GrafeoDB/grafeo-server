@@ -2,17 +2,24 @@
 
 All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
-## [0.6.3] - Unreleased
+## [0.6.3] - 2026-11-15
 
 Listener release: next to HTTP, GWP and Bolt open only when asked for. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both.
 
 ### Changed
 
 - **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
+- **Minimum Rust 1.100**: building from source needs Rust 1.100.0 (was 1.99.0); the Docker images build on `rust:1.100-slim`.
 
 ### Fixed
 
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
+- **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
+
+### Dependencies
+
+- **boltr 0.3.1** (from 0.3.0): the `TCP_NODELAY` fix above.
+- **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
 ## [0.6.2] - 2026-11-08
 
