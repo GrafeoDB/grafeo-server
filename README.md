@@ -32,7 +32,7 @@ Four image tiers are available. Sizes are the compressed download for amd64 (0.6
 | ------------ | ---------------------- | ----------------- | --------- | ----------- | ------ | ------------------------- |
 | **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7688)  | GQL       | No          | No     | ~37 MB  |
 | **bolt**     | `grafeo-server:bolt`   | Bolt v5 (:7687)   | Cypher    | No          | No     | ~37 MB  |
-| **standard** | `grafeo-server:latest` | HTTP (:7474)      | All 6     | No          | Studio | ~48 MB  |
+| **standard** | `grafeo-server:latest` | HTTP (:7474); GWP with `--gwp` | All 6 | No   | Studio | ~48 MB  |
 | **full**     | `grafeo-server:full`   | HTTP + GWP + Bolt | All 6     | Yes + embed | Studio | ~53 MB  |
 
 ```bash
@@ -302,7 +302,7 @@ The `id` field is optional and echoed back for request/response correlation.
 
 ### GQL Wire Protocol (GWP)
 
-The gwp and full builds include a gRPC-based binary wire protocol on port 7688, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) (0.4) Rust client or any gRPC client.
+The gwp, standard and full builds include a gRPC-based binary wire protocol on port 7688, fully aligned with the GQL type system (ISO/IEC 39075). The gwp image always serves it; next to HTTP it opens only with `--gwp` (`GRAFEO_GWP=true`), which the full image passes. Use the [`gwp`](https://crates.io/crates/gwp) (0.4) Rust client or any gRPC client.
 
 ```rust
 use gwp::client::GqlConnection;
@@ -326,7 +326,7 @@ Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 
 ### Bolt v5.x (BoltR)
 
-The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.3) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. The bolt image always serves it; next to HTTP it opens only with `--bolt` (`GRAFEO_BOLT=true`), which the full image passes. Use the [`boltr`](https://crates.io/crates/boltr) (0.3) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
 
 Write statements return Neo4j's `stats` in the PULL summary, which drivers expose as `summary.counters`.
 
@@ -357,8 +357,10 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_READ_ONLY` | `--read-only` | `false` | Open all databases in read-only mode |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
+| `GRAFEO_GWP` | `--gwp` | `false` | Serve GWP next to HTTP (a build without HTTP always serves it) |
 | `GRAFEO_GWP_PORT` | `--gwp-port` | `7688` | GQL Wire Protocol (gRPC) port |
 | `GRAFEO_GWP_MAX_SESSIONS` | `--gwp-max-sessions` | `1000` | Max concurrent GWP sessions (0 = unlimited) |
+| `GRAFEO_BOLT` | `--bolt` | `false` | Serve Bolt next to HTTP (a build without HTTP always serves it) |
 | `GRAFEO_BOLT_PORT` | `--bolt-port` | `7687` | Bolt v5.x wire protocol port |
 | `GRAFEO_BOLT_MAX_SESSIONS` | `--bolt-max-sessions` | `1000` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
@@ -439,7 +441,7 @@ Grafeo Server uses Cargo feature flags to control which capabilities are compile
 |------|--------------|-----------|--------------|
 | **GWP** | `--no-default-features --features gwp` | GWP (gRPC) | GQL + storage, ~7 MB |
 | **Bolt** | `--no-default-features --features bolt` | Bolt v5 | Cypher + storage, ~8 MB |
-| **Standard** | _(default)_ | HTTP | All languages, Studio UI, algos, ~21 MB |
+| **Standard** | _(default)_ | HTTP; GWP with `--gwp` | All languages, Studio UI, algos, ~21 MB |
 | **Full** | `--features full` | HTTP + GWP + Bolt | Everything including AI, auth, TLS, ~25 MB |
 
 ```bash
@@ -506,7 +508,7 @@ Start with `--no-default-features` and pick what you need. The matrix below show
 **Compatibility notes**:
 - `studio` requires `http` (no standalone Studio)
 - `sparql` implies `rdf` (RDF store is always created)
-- `gwp` uses port 7688 and `bolt` uses port 7687 by default, configurable via `--gwp-port` / `--bolt-port`
+- `gwp` uses port 7688 and `bolt` uses port 7687 by default, configurable via `--gwp-port` / `--bolt-port`; next to `http` they open only with `--gwp` / `--bolt`
 - `auth` and `tls` apply to whichever transports are enabled
 - All features compose freely otherwise
 
