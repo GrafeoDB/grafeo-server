@@ -71,7 +71,7 @@ cargo run -- --data-dir ./data
 cargo run
 ```
 
-Building needs Rust 1.99.0 or newer. From source the server listens on `127.0.0.1` only. To serve other machines, pass `--host 0.0.0.0` with credentials (see [Authentication](#authentication)).
+Building needs Rust 1.100.0 or newer. From source the server listens on `127.0.0.1` only. To serve other machines, pass `--host 0.0.0.0` with credentials (see [Authentication](#authentication)).
 
 ## API
 
