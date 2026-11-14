@@ -26,14 +26,14 @@ docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token -v grafeo-data:/dat
 
 The images listen on `0.0.0.0`, so they refuse to start without credentials: set `GRAFEO_AUTH_TOKEN` (or `GRAFEO_AUTH_USER` and `GRAFEO_AUTH_PASSWORD`), or `GRAFEO_ALLOW_UNAUTHENTICATED=true` to accept unauthenticated access (for a trusted network only).
 
-Four image tiers are available:
+Four image tiers are available. Sizes are the compressed download for amd64 (0.6.2).
 
-| Tier         | Tag                    | Transport         | Languages | AI/Search   | Web UI | Binary  |
-| ------------ | ---------------------- | ----------------- | --------- | ----------- | ------ | ------- |
-| **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7688)  | GQL       | No          | No     | ~7 MB   |
-| **bolt**     | `grafeo-server:bolt`   | Bolt v5 (:7687)   | Cypher    | No          | No     | ~8 MB   |
-| **standard** | `grafeo-server:latest` | HTTP (:7474)      | All 6     | No          | Studio | ~21 MB  |
-| **full**     | `grafeo-server:full`   | HTTP + GWP + Bolt | All 6     | Yes + embed | Studio | ~25 MB  |
+| Tier         | Tag                    | Transport         | Languages | AI/Search   | Web UI | Image (incl. Debian slim) |
+| ------------ | ---------------------- | ----------------- | --------- | ----------- | ------ | ------------------------- |
+| **gwp**      | `grafeo-server:gwp`    | GWP (gRPC :7688)  | GQL       | No          | No     | ~37 MB  |
+| **bolt**     | `grafeo-server:bolt`   | Bolt v5 (:7687)   | Cypher    | No          | No     | ~37 MB  |
+| **standard** | `grafeo-server:latest` | HTTP (:7474)      | All 6     | No          | Studio | ~48 MB  |
+| **full**     | `grafeo-server:full`   | HTTP + GWP + Bolt | All 6     | Yes + embed | Studio | ~53 MB  |
 
 ```bash
 # GWP - gRPC wire protocol, GQL only
