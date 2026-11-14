@@ -2,6 +2,18 @@
 
 All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
+## [0.6.3] - Unreleased
+
+Listener release: next to HTTP, GWP and Bolt open only when asked for. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both.
+
+### Changed
+
+- **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
+
+### Fixed
+
+- **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
+
 ## [0.6.2] - 2026-11-08
 
 Security release: a page on another site can no longer write through the HTTP API or open the WebSocket, a token reaches only the databases in its scope, and the server no longer starts exposed without credentials. Breaking: the default `--host` is `127.0.0.1`, and the Docker images (on `0.0.0.0`) refuse to start without `GRAFEO_AUTH_TOKEN`, Basic credentials or `GRAFEO_ALLOW_UNAUTHENTICATED=true`. A read-write token that created or deleted databases, and a database-scoped admin token that managed tokens, now gets a 403. Lockstep with grafeo 0.6.2.
