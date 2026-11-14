@@ -12,8 +12,6 @@ Graph database server for the [Grafeo](https://github.com/GrafeoDB/grafeo) engin
 
 Pure Rust, single binary. Available in four tiers to match different deployment needs.
 
-[![Grafeo Studio](assets/studio.png)](http://localhost:7474/studio/)
-
 ## Quick Start
 
 ### Docker Hub
@@ -48,7 +46,7 @@ docker run -p 7687:7687 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-serve
 docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:full
 ```
 
-Versioned tags: `grafeo-server:0.4.8`, `grafeo-server:0.4.8-gwp`, `grafeo-server:0.4.8-bolt`, `grafeo-server:0.4.8-full`.
+Versioned tags: `grafeo-server:0.6.2`, `grafeo-server:0.6.2-gwp`, `grafeo-server:0.6.2-bolt`, `grafeo-server:0.6.2-full`.
 
 See [grafeo/grafeo-server on Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server) for all available tags.
 
@@ -73,7 +71,7 @@ cargo run -- --data-dir ./data
 cargo run
 ```
 
-From source the server listens on `127.0.0.1` only. To serve other machines, pass `--host 0.0.0.0` with credentials (see [Authentication](#authentication)).
+Building needs Rust 1.99.0 or newer. From source the server listens on `127.0.0.1` only. To serve other machines, pass `--host 0.0.0.0` with credentials (see [Authentication](#authentication)).
 
 ## API
 
@@ -119,7 +117,7 @@ curl -X POST http://localhost:7474/sparql \
   -d '{"query": "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?name WHERE { ?p a foaf:Person . ?p foaf:name ?name }"}'
 ```
 
-`/query`, `/batch` and the WebSocket take a `language` field: `gql` (the default), `cypher`, `graphql`, `gremlin`, `sparql` or `sql-pgq` (also `sql`), in any case. Any other name is a 400 that lists these; before 0.6 it ran as GQL. Bolt (the `language` key of RUN's extra) and GWP (the `language` session parameter) refuse it the same way.
+`/query`, `/batch` and the WebSocket take a `language` field: `gql` (the default), `cypher`, `graphql`, `gremlin`, `sparql` or `sql-pgq` (also `sql`), in any case. Any other name is a 400 that lists these. Bolt (the `language` key of RUN's extra) and GWP (the `language` session parameter) refuse it the same way.
 
 A write that conflicts with a concurrent transaction is a 409 `conflict` with the reason, on the statement or on `/tx/commit`; nothing of the transaction took effect, so run it again. A failed commit ends the transaction.
 
@@ -194,7 +192,7 @@ curl -X POST http://localhost:7474/admin/default/compact
 # {"compacted": true, "checkpointed": true, "versions_collected": 12, "duration_ms": 3}
 ```
 
-Compaction needs the database to itself (409 while a transaction or another request holds it). Since 0.6 it keeps the database as it is (one store that takes writes, with every write logged), and it works in every build.
+Compaction needs the database to itself (409 while a transaction or another request holds it). It keeps the database as it is (one store that takes writes, with every write logged) and works in every build.
 
 `POST /admin/{db}/reload-eligible` (bring spilled sections back into RAM) takes an optional body, `{"target_fraction": 0.7}`; without one the fraction defaults to 0.7.
 
@@ -304,7 +302,7 @@ The `id` field is optional and echoed back for request/response correlation.
 
 ### GQL Wire Protocol (GWP)
 
-The gwp and full builds include a gRPC-based binary wire protocol on port 7688, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) (0.3) Rust client or any gRPC client.
+The gwp and full builds include a gRPC-based binary wire protocol on port 7688, fully aligned with the GQL type system (ISO/IEC 39075). Use the [`gwp`](https://crates.io/crates/gwp) (0.4) Rust client or any gRPC client.
 
 ```rust
 use gwp::client::GqlConnection;
@@ -328,7 +326,7 @@ Configure the port with `--gwp-port` or `GRAFEO_GWP_PORT` (default: 7688).
 
 ### Bolt v5.x (BoltR)
 
-The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.2) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Use the [`boltr`](https://crates.io/crates/boltr) (0.3) Rust client or any Bolt v5 driver (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
 
 Write statements return Neo4j's `stats` in the PULL summary, which drivers expose as `summary.counters`.
 
@@ -559,20 +557,7 @@ The `/health` endpoint reports which features are compiled into the running serv
 
 ## Upgrading to 0.6
 
-grafeo-server 0.6 runs grafeo 0.6, which stores every database as a single file in a new format. Read this before you point a 0.6 server at a data directory written by 0.5.x.
-
-1. **Back up first.** Stop the 0.5.x server and copy the whole data directory (and the backup directory) somewhere safe. Taking a backup through the API (`POST /admin/{db}/backup`) before the upgrade also works; 0.6 restores 0.5.x backups.
-2. **Start 0.6 on the data directory.** The first read-write open of each database migrates it: `{name}/data.grafeo` becomes a 0.6 file, the commits a 0.5.x WAL still held are replayed into it, and the old files are kept next to it, unchanged, as `data.grafeo.pre-0.6` (and `data.grafeo.pre-0.6.wal`, `data.grafeo.pre-0.6/` for a WAL-directory database such as the old `grafeo.db` layout, which the server renames to `data.grafeo` first). Nothing else needs to be done; `options.json` is read as before.
-3. **There is no way back for the migrated file.** grafeo-server 0.5.x cannot open a migrated database. To go back, stop the 0.6 server and move each `data.grafeo.pre-0.6` (and its `.wal`) back to `data.grafeo`; writes made under 0.6 are lost. Keep the `.pre-0.6` copies until you are sure, then delete them: they take as much space as the old database, and `GET /admin/{db}/stats` counts them in `disk_bytes`.
-4. **Do not run 0.5.x and 0.6 on the same directory**, and stop every 0.5.x process before 0.6 opens it.
-
-What else to know:
-
-- A `--read-only` server reads a 0.5.x directory without migrating it; the first read-write start migrates it.
-- A database directory that holds only a `data.grafeo.pre-0.6` copy is skipped at startup, and creating a database of that name is refused (409): the copy may be the only one. Move it back to `data.grafeo` or delete it.
-- After the upgrade, take a full backup before the next incremental one; 0.6 still restores the full and incremental backups of 0.5.x, and restoring from a backup file leaves the file as it was.
-- Engine 0.6 changes some query results: exact decimals (`1.50` is a decimal, sent as `{"$decimal": "1.50"}` in JSON), nulls sort last in GQL `ORDER BY`, integer overflow and division by zero fail the statement, and a lone GQL `INSERT` returns no rows. See the engine's [0.6.0 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) and [Upgrading to 0.6](https://grafeo.dev/upgrading/0.6/).
-- Building from source needs Rust 1.99.0 or newer.
+A 0.6 server migrates a 0.5.x data directory on its first read-write start and 0.5.x can't open the result, so back up first; the steps, the way back and the changed query results are in [Upgrading to 0.6](https://docs.grafeo.dev/get-started/upgrading/0.6/).
 
 ## Development
 
