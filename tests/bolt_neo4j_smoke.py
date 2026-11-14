@@ -6,7 +6,8 @@ Validates the three Bolt fixes in 0.5.38:
   3. is_mutation_query() heuristic
 
 Requires: neo4j Python driver 5.x (`pip install neo4j`)
-Expects:  grafeo-server running on bolt://localhost:7687
+Expects:  grafeo-server running on bolt://localhost:7687 (a build with HTTP
+          serves Bolt only with --bolt, e.g. `cargo run --features full -- --bolt`)
 """
 
 import sys

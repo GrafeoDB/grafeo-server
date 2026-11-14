@@ -94,7 +94,8 @@ EXPOSE 7474 7687 7688
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:7474/health || exit 1
 ENTRYPOINT ["grafeo-server"]
-CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data"]
+# Next to HTTP, GWP and Bolt open only when asked for
+CMD ["--host", "0.0.0.0", "--port", "7474", "--data-dir", "/data", "--gwp", "--bolt"]
 
 # --- Final: gwp ---
 FROM runtime-gwp AS gwp

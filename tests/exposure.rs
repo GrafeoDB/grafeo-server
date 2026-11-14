@@ -111,6 +111,22 @@ fn bolt_sessions_are_limited_by_default() {
     assert_eq!(config(&["--bolt-max-sessions", "0"]).bolt_max_sessions, 0);
 }
 
+/// Next to HTTP, the GWP and Bolt listeners open only when asked for, so the
+/// standard build serves only its HTTP port unless `--gwp` or `--bolt` is given.
+#[cfg(all(feature = "http", feature = "gwp"))]
+#[test]
+fn gwp_opens_next_to_http_only_when_asked() {
+    assert!(!config(&[]).serves_gwp());
+    assert!(config(&["--gwp"]).serves_gwp());
+}
+
+#[cfg(all(feature = "http", feature = "bolt"))]
+#[test]
+fn bolt_opens_next_to_http_only_when_asked() {
+    assert!(!config(&[]).serves_bolt());
+    assert!(config(&["--bolt"]).serves_bolt());
+}
+
 /// #83: `--read-only` on a data directory without a database refuses to start
 /// with a clear error and exit code 2 (it panicked with 101), and creates
 /// nothing there.
