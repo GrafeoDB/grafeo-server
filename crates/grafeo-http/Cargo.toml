@@ -13,7 +13,7 @@ grafeo-common = { workspace = true }
 
 # Web framework
 axum = { version = "0.8", features = ["json", "query", "ws"] }
-async-stream = "0.3"
+async-stream = { version = "0.3", optional = true }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["compression-gzip", "cors", "fs", "set-header", "trace"] }
 
@@ -54,7 +54,7 @@ reqwest = { version = "0.13", features = ["json"], optional = true }
 default = []
 auth = ["grafeo-service/auth"]
 sync = ["grafeo-service/sync"]
-push-changefeed = ["grafeo-service/push-changefeed", "sync"]
+push-changefeed = ["grafeo-service/push-changefeed", "sync", "dep:async-stream"]
 replication = ["grafeo-service/replication", "dep:reqwest", "sync"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:hyper", "dep:hyper-util"]
 arrow-export = ["grafeo-service/arrow-export"]

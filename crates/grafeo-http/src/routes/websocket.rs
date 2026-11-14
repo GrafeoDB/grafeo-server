@@ -58,8 +58,7 @@ pub async fn ws_handler(
     let db_scope = auth
         .0
         .as_ref()
-        .map(|info| info.scope.databases.clone())
-        .unwrap_or_default();
+        .map_or_default(|info| info.scope.databases.clone());
     ws.on_upgrade(move |socket| handle_socket(socket, state, identity, db_scope))
 }
 

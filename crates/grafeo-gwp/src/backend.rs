@@ -774,8 +774,7 @@ impl GqlBackend for GrafeoBackend {
                 .state
                 .databases()
                 .get(&target.database)
-                .map(|e| e.metadata.database_type.clone())
-                .unwrap_or_default();
+                .map_or_default(|e| e.metadata.database_type.clone());
             let model = if database_model.contains("rdf") || database_model.contains("owl") {
                 "rdf"
             } else {

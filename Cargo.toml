@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.package]
 version = "0.6.2"
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.100.0"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo-server"
 
@@ -51,6 +51,10 @@ url = "2"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
+
+[workspace.lints.cargo]
+# Needs a build with all features to see every use (CI builds them all).
+unused_dependencies = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

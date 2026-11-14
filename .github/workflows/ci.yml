@@ -22,7 +22,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
 
@@ -55,7 +55,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   msrv:
-    name: MSRV (1.99.0)
+    name: MSRV (1.100.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -64,16 +64,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       # Create empty client/dist so rust-embed compiles
       - run: mkdir -p client/dist
 
       - name: Check on the MSRV
-        run: cargo +1.99.0 check --workspace
+        run: cargo +1.100.0 check --workspace
 
       - name: Check on the MSRV (all features, all targets)
-        run: cargo +1.99.0 check --workspace --all-features --all-targets
+        run: cargo +1.100.0 check --workspace --all-features --all-targets
 
   # Per-crate unit tests (fast, no integration deps)
   crate-tests:
@@ -90,7 +90,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -137,7 +137,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -172,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run security audit
@@ -229,7 +229,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -265,7 +265,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
 
@@ -301,7 +301,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
