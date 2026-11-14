@@ -4,7 +4,7 @@ All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GW
 
 ## [0.6.3] - 2026-11-15
 
-Listener release: next to HTTP, GWP and Bolt open only when asked for. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both.
+Listener and security release: next to HTTP, GWP and Bolt open only when asked for, and remote statements no longer read or write files on the server. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both. A deployment that loads files by query (`LOAD CSV`, `grafeo.load_nodes_csv`) passes `--allow-external-access` and runs those statements as an admin.
 
 ### Changed
 
@@ -15,6 +15,12 @@ Listener release: next to HTTP, GWP and Bolt open only when asked for. Anyone wh
 
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
 - **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
+- **A statement refused in `/batch` is a 403**: a batch statement that failed for lack of permission, a missing resource, a conflict or a timeout came back as a 400 with its message. The batch now answers with that statement's own status, still naming its index.
+- **GWP reports a permission refusal as GQLSTATUS 42501**: it was 42001 (syntax error), so a client could not tell a refused statement from a mistake in it.
+
+### Security
+
+- **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again; read-only and read-write tokens never can.
 
 ### Dependencies
 
