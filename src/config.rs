@@ -70,6 +70,12 @@ pub struct Config {
     #[arg(long, env = "GRAFEO_TOKEN_STORE_PATH")]
     pub token_store_path: Option<String>,
 
+    /// Serve the GQL Wire Protocol (gRPC) next to HTTP, on --gwp-port. A build
+    /// without HTTP always serves it.
+    #[cfg(feature = "gwp")]
+    #[arg(long, default_value_t = false, env = "GRAFEO_GWP")]
+    pub gwp: bool,
+
     /// GQL Wire Protocol (gRPC) port.
     #[cfg(feature = "gwp")]
     #[arg(long, default_value_t = 7688, env = "GRAFEO_GWP_PORT")]
@@ -79,6 +85,12 @@ pub struct Config {
     #[cfg(feature = "gwp")]
     #[arg(long, default_value_t = 1000, env = "GRAFEO_GWP_MAX_SESSIONS")]
     pub gwp_max_sessions: usize,
+
+    /// Serve Bolt v5 next to HTTP, on --bolt-port. A build without HTTP always
+    /// serves it.
+    #[cfg(feature = "bolt")]
+    #[arg(long, default_value_t = false, env = "GRAFEO_BOLT")]
+    pub bolt: bool,
 
     /// Bolt v5 protocol port.
     #[cfg(feature = "bolt")]
@@ -220,6 +232,20 @@ impl Config {
     /// Returns true if TLS is configured.
     pub fn tls_enabled(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Whether to open the GWP listener: always in a build without HTTP,
+    /// next to HTTP only with `--gwp` (`GRAFEO_GWP=true`).
+    #[cfg(feature = "gwp")]
+    pub fn serves_gwp(&self) -> bool {
+        !cfg!(feature = "http") || self.gwp
+    }
+
+    /// Whether to open the Bolt listener: always in a build without HTTP,
+    /// next to HTTP only with `--bolt` (`GRAFEO_BOLT=true`).
+    #[cfg(feature = "bolt")]
+    pub fn serves_bolt(&self) -> bool {
+        !cfg!(feature = "http") || self.bolt
     }
 
     /// Whether the server may start on `--host`: a loopback address always,

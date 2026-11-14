@@ -248,9 +248,9 @@ async fn main() {
             .await
             .expect("failed to bind");
 
-        // Spawn GWP alongside HTTP if both features are enabled
+        // GWP alongside HTTP, when asked for with --gwp
         #[cfg(feature = "gwp")]
-        let gwp_handle = {
+        let gwp_handle = config.serves_gwp().then(|| {
             let gwp_state = service.clone();
             let mut gwp_options = build_gwp_options(&config, &service);
             let gwp_addr = std::net::SocketAddr::new(addr.ip(), config.gwp_port);
@@ -264,11 +264,11 @@ async fn main() {
                     tracing::error!("GWP server error: {e}");
                 }
             })
-        };
+        });
 
-        // Spawn BoltR alongside HTTP if both features are enabled
+        // BoltR alongside HTTP, when asked for with --bolt
         #[cfg(feature = "bolt")]
-        let bolt_handle = {
+        let bolt_handle = config.serves_bolt().then(|| {
             let bolt_state = service.clone();
             let mut bolt_options = build_bolt_options(&config, &service);
             let bolt_addr = std::net::SocketAddr::new(addr.ip(), config.bolt_port);
@@ -283,7 +283,7 @@ async fn main() {
                     tracing::error!("BoltR server error: {e}");
                 }
             })
-        };
+        });
 
         #[cfg(feature = "tls")]
         if config.tls_enabled() {
@@ -298,9 +298,13 @@ async fn main() {
             grafeo_http::tls::serve_tls(listener, tls_config, app, shutdown_signal()).await;
 
             #[cfg(feature = "gwp")]
-            gwp_handle.await.ok();
+            if let Some(handle) = gwp_handle {
+                handle.await.ok();
+            }
             #[cfg(feature = "bolt")]
-            bolt_handle.await.ok();
+            if let Some(handle) = bolt_handle {
+                handle.await.ok();
+            }
 
             shutdown_audit(&service);
             tracing::info!("Grafeo Server shut down");
@@ -315,9 +319,13 @@ async fn main() {
         drain_sessions(&service, config.shutdown_timeout).await;
 
         #[cfg(feature = "gwp")]
-        gwp_handle.await.ok();
+        if let Some(handle) = gwp_handle {
+            handle.await.ok();
+        }
         #[cfg(feature = "bolt")]
-        bolt_handle.await.ok();
+        if let Some(handle) = bolt_handle {
+            handle.await.ok();
+        }
 
         shutdown_audit(&service);
         tracing::info!("Grafeo Server shut down");
