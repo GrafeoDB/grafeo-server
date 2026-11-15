@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api } from "../api/client";
+import { api, GrafeoApiError } from "../api/client";
 import type { RefusedKind } from "../api/client";
-import { settle } from "../hooks/useLoaded";
-import type { DatabaseSchemaResponse, DatabaseSummary, HealthResponse } from "../types/api";
+import { settle, useLoaded } from "../hooks/useLoaded";
+import type { DatabaseSchemaResponse, DatabaseSummary, HealthResponse, TokenResponse } from "../types/api";
 import { readStored, writeStored } from "../storage";
 
 const DB_KEY = "grafeo-current-database";
@@ -28,8 +28,21 @@ export interface ServerContextValue {
   activeModel: string;
   schema: Loaded<DatabaseSchemaResponse>;
   refreshSchema(): void;
-  /** The server checks credentials, so token management applies. */
-  authEnabled: boolean;
+  /**
+   * The managed API tokens: `null` when the server keeps none (no credentials, or no --data-dir or
+   * --token-store-path), so token management does not apply.
+   */
+  tokens: Loaded<TokenResponse[] | null>;
+  refreshTokens(): void;
+}
+
+/** The token list, or null when the server answers that token management is not configured. */
+function listTokens(): Promise<TokenResponse[] | null> {
+  return api.tokens.list().catch((err: unknown) => {
+    if (err instanceof GrafeoApiError && err.status === 400 && err.detail.includes("token management not configured"))
+      return null;
+    throw err;
+  });
 }
 
 const ServerContext = createContext<ServerContextValue | null>(null);
@@ -115,7 +128,9 @@ ${schemaTick}`;
     return type.toLowerCase();
   }, [databases, activeDatabase]);
 
-  const authEnabled = health?.features?.server?.includes("auth") ?? false;
+  // Builds without the auth feature have no token routes at all.
+  const authBuild = health?.features?.server?.includes("auth") ?? false;
+  const [tokens, refreshTokens] = useLoaded(() => (authBuild ? listTokens() : Promise.resolve(null)), [authBuild]);
 
   const value = useMemo<ServerContextValue>(
     () => ({
@@ -128,9 +143,10 @@ ${schemaTick}`;
       activeModel,
       schema,
       refreshSchema,
-      authEnabled,
+      tokens,
+      refreshTokens,
     }),
-    [health, reachable, databases, refreshDatabases, activeDatabase, selectDatabase, activeModel, schema, refreshSchema, authEnabled],
+    [health, reachable, databases, refreshDatabases, activeDatabase, selectDatabase, activeModel, schema, refreshSchema, tokens, refreshTokens],
   );
   return <ServerContext.Provider value={value}>{children}</ServerContext.Provider>;
 }

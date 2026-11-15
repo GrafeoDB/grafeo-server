@@ -3,7 +3,6 @@ import { Button, DataTable, Dialog, FORBIDDEN_NOTE, Page, UNAUTHENTICATED_NOTE, 
 import { api, GrafeoApiError, refusedKind } from "../api/client";
 import type { TokenResponse } from "../types/api";
 import { useServer } from "../context/ServerContext";
-import { useLoaded } from "../hooks/useLoaded";
 import { formatDate } from "../shell/format";
 import { ActionError, Chip, useAsk } from "./common";
 
@@ -20,18 +19,9 @@ function message(err: unknown): string {
 }
 
 export default function TokensPage() {
-  const { databases } = useServer();
+  const { databases, tokens, refreshTokens: reload } = useServer();
   const ask = useAsk();
-  // A server without a token store (no --data-dir or --token-store) answers 400 "token management not configured".
-  const [tokens, reload] = useLoaded(
-    () =>
-      api.tokens.list().catch((err: unknown) => {
-        if (err instanceof GrafeoApiError && err.status === 400 && err.detail.includes("token management not configured"))
-          return null;
-        throw err;
-      }),
-    [],
-  );
+
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<TokenResponse | null>(null);
   const [copied, setCopied] = useState(false);
@@ -149,8 +139,8 @@ export default function TokensPage() {
       <div className="st-after-reveal">
         {unconfigured ? (
           <p className="st-hint" role="status">
-            Token management is not configured on this server. It keeps tokens when it runs with --data-dir or
-            --token-store.
+            Token management is not configured on this server. It keeps tokens when it checks credentials and runs
+            with --data-dir or --token-store-path.
           </p>
         ) : tokens.state === "failed" ? (
           <p className="st-error" role="alert">

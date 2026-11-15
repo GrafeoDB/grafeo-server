@@ -83,8 +83,7 @@ export function resultLine(result: QueryResult): string {
   return result.timeMs === undefined ? size : `${size} · ${formatMs(result.timeMs)}`;
 }
 
+/** The results panel's own format, so the two never disagree: `1 ms`, `1,234 ms`. */
 function formatMs(ms: number): string {
-  if (ms < 10) return `${ms.toFixed(1)} ms`;
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(2)} s`;
+  return `${Math.round(ms).toLocaleString("en")} ms`;
 }

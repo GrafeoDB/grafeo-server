@@ -122,7 +122,8 @@ export function MainArea() {
   } else if (mainView === "table") {
     body = <ResultsTable result={result} onSelect={wb.setSelectedId} />;
   } else if (mainView === "json") {
-    body = <JsonView value={{ columns: result.columns, rows: result.rows }} total={result.rows.length} />;
+    // The rows as the server sent them, not the graph shape the parts draw
+    body = <JsonView value={{ columns: result.columns, rows: wb.rawRows ?? result.rows }} total={result.rows.length} />;
   } else {
     body = <PlanView plan={result.plan} />;
   }

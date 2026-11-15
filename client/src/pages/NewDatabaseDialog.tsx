@@ -198,7 +198,7 @@ function OpenNewDatabaseDialog({ onClose, onCreated }: Props) {
             <legend>Storage</legend>
             <div className="st-fields">
               <div className="gu-field">
-                <label htmlFor="st-db-storage">Storage</label>
+                <label htmlFor="st-db-storage">Mode</label>
                 <select
                   id="st-db-storage"
                   className="gu-input"

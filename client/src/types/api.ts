@@ -12,6 +12,8 @@ export interface QueryResponse {
   rows: unknown[][];
   execution_time_ms?: number;
   rows_scanned?: number;
+  /** What a write changed; only on statements that write. */
+  counters?: Record<string, number>;
 }
 
 export interface TransactionResponse {

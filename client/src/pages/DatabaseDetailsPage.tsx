@@ -16,7 +16,7 @@ import { useServer } from "../context/ServerContext";
 import { useLoaded } from "../hooks/useLoaded";
 import { forgetLabelStyles } from "../labelStyles";
 import { bytesText, fmt, formatDate, modelName } from "../shell/format";
-import { ActionError, Chip, Stats, bytesStat, useAsk } from "./common";
+import { ActionError, Chip, Stats, bytesStat, useAsk, type StatItem } from "./common";
 import { BackupDialog, RestoreDialog } from "./BackupDialogs";
 
 function message(err: unknown): string {
@@ -30,6 +30,11 @@ function backupName(b: BackupEntry): string {
   if (b.label) return b.label;
   const match = b.filename.match(/_(\d+)\.grafeo$/);
   return match ? `#${match[1]}` : b.filename.replace(/\.grafeo$/, "");
+}
+
+/** A figure not there yet: still loading, or unknown when its request failed (said above the sections). */
+function pending(loaded: { state: string }): string {
+  return loaded.state === "loading" ? "…" : "unknown";
 }
 
 const TIER: Record<SectionTierInfo["tier"], { tone: "ram" | "disk" | "none"; name: string }> = {
@@ -56,7 +61,7 @@ export default function DatabaseDetailsPage() {
 
   const summary = server.databases.state === "ready" ? server.databases.data.find((d) => d.name === name) : undefined;
   const [info] = useLoaded(() => api.db.info(name), [name, tick]);
-  const [stats] = useLoaded(() => api.admin.stats(name), [name, tick]);
+  const [stats] = useLoaded(() => api.db.stats(name), [name, tick]);
   const [wal] = useLoaded(() => api.admin.walStatus(name), [name, tick]);
   const [backups, reloadBackups] = useLoaded(
     () =>
@@ -78,8 +83,10 @@ export default function DatabaseDetailsPage() {
   const [restoring, setRestoring] = useState<BackupEntry | null>(null);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
-  const [epochText, setEpochText] = useState("");
+  // Untouched, the field holds the latest backup's epoch.
+  const [epochInput, setEpochInput] = useState<string | null>(null);
   const [reloading, setReloading] = useState(false);
+  const [epochBusy, setEpochBusy] = useState(false);
 
   const done = (text: string) => {
     setActionError(null);
@@ -90,7 +97,9 @@ export default function DatabaseDetailsPage() {
     setActionError(message(err));
   };
 
-  if (server.databases.state === "ready" && !summary) {
+  // Not found only when the list lacks it and the database itself does not answer: a database just created is on
+  // the server before the refreshed list arrives.
+  if (server.databases.state === "ready" && !summary && (info.state === "failed" || info.state === "refused")) {
     return (
       <Page
         breadcrumb={<DatabasesCrumb name={name} />}
@@ -108,8 +117,18 @@ export default function DatabaseDetailsPage() {
   const currentEpoch = wal.state === "ready" ? wal.data.current_epoch : undefined;
   const fullBackups = (backupList ?? []).slice().sort((a, b) => a.end_epoch - b.end_epoch);
   const reach = fullBackups.reduce((m, b) => Math.max(m, b.end_epoch), 0);
+  const epochText = epochInput ?? (reach > 0 ? String(reach) : "");
   const epoch = Number(epochText);
-  const epochValid = epochText.trim() !== "" && Number.isInteger(epoch) && epoch >= 0;
+  // Restoring to the epoch the database is already at changes nothing.
+  const epochValid =
+    epochText.trim() !== "" && Number.isInteger(epoch) && epoch >= 0 && epoch <= reach && epoch !== currentEpoch;
+
+  // What did not load is said, never shown as empty figures or a WAL that is off.
+  const loadFailures = [
+    info.state === "failed" ? `the database (${info.message})` : null,
+    stats.state === "failed" ? `its counts and sizes (${stats.message})` : null,
+    wal.state === "failed" ? `its write-ahead log (${wal.message})` : null,
+  ].filter((f): f is string => f !== null);
 
   let meta: string | undefined;
   if (info.state === "ready") {
@@ -251,6 +270,16 @@ export default function DatabaseDetailsPage() {
         </p>
       ) : null}
       <ActionError message={actionError} />
+      {loadFailures.length ? (
+        <div className="st-field-row">
+          <p className="st-error" role="alert">
+            Some details did not load: {loadFailures.join("; ")}.
+          </p>
+          <Button size="sm" onClick={refresh}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
 
       <PageSection title="Overview" description="Counts and sizes as the engine reports them now.">
         {stats.state === "refused" || refused ? (
@@ -258,33 +287,41 @@ export default function DatabaseDetailsPage() {
         ) : (
           <>
             <Stats
-              items={
-                stats.state === "ready"
-                  ? [
-                      ["Nodes", fmt(stats.data.node_count)],
-                      ["Edges", fmt(stats.data.edge_count)],
-                      ["Labels", fmt(stats.data.label_count)],
-                      ["Edge types", fmt(stats.data.edge_type_count)],
-                      ["Property keys", fmt(stats.data.property_key_count)],
-                      ["Indexes", fmt(stats.data.index_count)],
-                    ]
-                  : [["Nodes", "…"], ["Edges", "…"], ["Labels", "…"], ["Edge types", "…"], ["Property keys", "…"], ["Indexes", "…"]]
-              }
+              items={(
+                [
+                  ["Nodes", "node_count"],
+                  ["Edges", "edge_count"],
+                  ["Labels", "label_count"],
+                  ["Edge types", "edge_type_count"],
+                  ["Property keys", "property_key_count"],
+                  ["Indexes", "index_count"],
+                ] as const
+              ).map(([label, key]): StatItem => [label, stats.state === "ready" ? fmt(stats.data[key]) : pending(stats)])}
             />
             <Stats
               items={[
-                bytesStat("Memory", stats.state === "ready" ? stats.data.memory_bytes : undefined),
-                stats.state === "ready" && stats.data.disk_bytes == null
-                  ? ["Disk", "none"]
-                  : bytesStat("Disk", stats.state === "ready" ? stats.data.disk_bytes : undefined),
-                wal.state === "ready" && wal.data.enabled ? bytesStat("WAL size", wal.data.size_bytes) : ["WAL", "off"],
-                wal.state === "ready" && wal.data.enabled
-                  ? ["WAL pending", fmt(wal.data.record_count), wal.data.record_count === 1 ? "record" : "records"]
-                  : ["WAL pending", "none"],
-                ["Epoch", currentEpoch !== undefined ? fmt(currentEpoch) : "…"],
+                stats.state === "ready" ? bytesStat("Memory", stats.data.memory_bytes) : ["Memory", pending(stats)],
+                stats.state !== "ready"
+                  ? ["Disk", pending(stats)]
+                  : stats.data.disk_bytes == null
+                    ? ["Disk", "none"]
+                    : bytesStat("Disk", stats.data.disk_bytes),
+                wal.state !== "ready"
+                  ? ["WAL", pending(wal)]
+                  : wal.data.enabled
+                    ? bytesStat("WAL size", wal.data.size_bytes)
+                    : ["WAL", "off"],
+                wal.state !== "ready"
+                  ? ["WAL pending", pending(wal)]
+                  : wal.data.enabled
+                    ? ["WAL pending", fmt(wal.data.record_count), wal.data.record_count === 1 ? "record" : "records"]
+                    : ["WAL pending", "none"],
+                ["Epoch", currentEpoch !== undefined ? fmt(currentEpoch) : pending(wal)],
                 [
                   "Last checkpoint",
-                  wal.state === "ready" && wal.data.last_checkpoint != null ? (
+                  wal.state !== "ready" ? (
+                    pending(wal)
+                  ) : wal.data.last_checkpoint != null ? (
                     <span className="st-stat-date" key="d">
                       {formatDate(new Date(wal.data.last_checkpoint * 1000).toISOString())}
                     </span>
@@ -341,7 +378,13 @@ export default function DatabaseDetailsPage() {
               rows={tierRows}
               rowKey={(t) => t.section}
               refused={tiers.state === "refused" ? tiers.refused : undefined}
-              empty={tiers.state === "loading" ? undefined : "No sections loaded yet."}
+              empty={
+                tiers.state === "loading"
+                  ? undefined
+                  : tiers.state === "failed"
+                    ? `The storage tiers did not load: ${tiers.message}`
+                    : "No sections loaded yet."
+              }
             />
           </div>
         </PageSection>
@@ -401,12 +444,11 @@ export default function DatabaseDetailsPage() {
                 type="number"
                 min={0}
                 max={reach}
-                placeholder={String(reach)}
                 value={epochText}
-                onChange={(e) => setEpochText(e.target.value)}
+                onChange={(e) => setEpochInput(e.target.value)}
               />
               <Button
-                disabled={!epochValid}
+                disabled={!epochValid || epochBusy}
                 onClick={() =>
                   ask.open({
                     title: `Restore ${name} to epoch ${fmt(epoch)}?`,
@@ -418,7 +460,8 @@ export default function DatabaseDetailsPage() {
                         after it are lost.
                       </>
                     ),
-                    onConfirm: () =>
+                    onConfirm: () => {
+                      setEpochBusy(true);
                       api.backup
                         .restoreToEpoch(name, epoch)
                         .then(() => {
@@ -427,11 +470,13 @@ export default function DatabaseDetailsPage() {
                           server.refreshSchema();
                           refresh();
                         })
-                        .catch(failed),
+                        .catch(failed)
+                        .finally(() => setEpochBusy(false));
+                    },
                   })
                 }
               >
-                {epochValid ? `Restore to epoch ${fmt(epoch)}` : "Restore to epoch"}
+                {epochBusy ? "Restoring…" : epochValid ? `Restore to epoch ${fmt(epoch)}` : "Restore to epoch"}
               </Button>
             </div>
             <span className="st-hint">
@@ -450,8 +495,9 @@ export default function DatabaseDetailsPage() {
                 <button
                   type="button"
                   key={b.filename}
-                  className={epochValid && b.end_epoch === epoch ? "st-pick st-pick-on" : "st-pick"}
-                  onClick={() => setEpochText(String(b.end_epoch))}
+                  className={b.end_epoch === epoch ? "st-pick st-pick-on" : "st-pick"}
+                  aria-pressed={b.end_epoch === epoch}
+                  onClick={() => setEpochInput(String(b.end_epoch))}
                 >
                   <b>{backupName(b)}</b>
                   {b.kind} · e{fmt(b.end_epoch)}
@@ -467,11 +513,14 @@ export default function DatabaseDetailsPage() {
           <p>
             <strong>Delete database.</strong>{" "}
             <span className="st-muted">
-              Deletes {name} and every node, edge and index in it. Backups stay on the server. This can't be undone.
+              {name === "default"
+                ? "The default database cannot be deleted; the server always keeps it."
+                : `Deletes ${name} and every node, edge and index in it. Backups stay on the server. This can't be undone.`}
             </span>
           </p>
           <Button
             variant="danger"
+            disabled={name === "default"}
             onClick={() =>
               ask.open({
                 title: `Delete ${name}?`,

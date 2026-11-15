@@ -71,7 +71,8 @@ body {
 }
 
 /* History rows show the query as written: mono, no ligatures (an arrow stays "->") */
-.st-history {
+.st-history,
+.st-databases {
   display: contents;
 }
 
@@ -79,6 +80,13 @@ body {
   font-family: var(--gu-font-mono);
   font-size: 12px;
   font-variant-ligatures: none;
+}
+
+/* Phone width: the status bar keeps state, counts and timing; the host is on the Databases page */
+@media (max-width: 600px) {
+  .gu-statusbar-end .gu-status-item:last-child {
+    display: none;
+  }
 }
 
 .st-note {
@@ -110,6 +118,11 @@ body {
 .st-link-button:focus-visible {
   outline: var(--gu-focus-width) solid var(--gu-ring);
   outline-offset: var(--gu-focus-offset);
+}
+
+.st-link-text {
+  color: var(--gu-link);
+  font-weight: 500;
 }
 
 .st-strong {

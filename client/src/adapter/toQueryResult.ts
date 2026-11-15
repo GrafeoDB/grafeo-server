@@ -8,7 +8,7 @@ import type { QueryResponse } from "../types/api";
  *
  * - a node is `{_id, _labels, ...properties}`;
  * - an edge is `{_id, _type, _source, _target, ...properties}`;
- * - a path is `{nodes: [...], edges: [...]}`, and a list may hold any of these.
+ * - a path is `{nodes: [...], edges: [...]}`, and a list or a map may hold any of these.
  *
  * Row cells that are a node or an edge are replaced by the same object the
  * graph gets, so the table draws them as a node or an edge.
@@ -30,6 +30,8 @@ export function toQueryResult(response: QueryResponse): QueryResult {
     } else if (isPathCell(value)) {
       visit(value.nodes, depth + 1);
       visit(value.edges, depth + 1);
+    } else if (isObject(value)) {
+      for (const item of Object.values(value)) visit(item, depth + 1);
     }
   };
   for (const row of response.rows) for (const cell of row) visit(cell, 0);
@@ -59,7 +61,7 @@ export function toPlan(response: QueryResponse): string | undefined {
   return typeof cell === "string" ? cell : undefined;
 }
 
-/** Nested lists deeper than this are data, not graph. */
+/** Nested lists and maps deeper than this are data, not graph. */
 const MAX_DEPTH = 4;
 
 type Cell = Record<string, unknown>;

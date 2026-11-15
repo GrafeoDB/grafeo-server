@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test, expect, type Page } from "@playwright/test";
 import { startServer, type RunningServer } from "./server";
 
@@ -8,10 +11,6 @@ import { startServer, type RunningServer } from "./server";
 
 let server: RunningServer | undefined;
 
-test.beforeEach(async () => {
-  server = await startServer({ kind: "none" });
-});
-
 test.afterEach(async () => {
   await server?.stop();
   server = undefined;
@@ -20,8 +19,10 @@ test.afterEach(async () => {
 const SEED =
   "INSERT (:Person {name: 'Richard Hendricks'})-[:KNOWS {since: 2014}]->(:Person {name: 'Jared Dunn'})";
 
+/** Opens the Studio, on a server without authentication unless the test started its own. */
 async function open(page: Page, path = "/studio/") {
-  await page.goto(server!.base + path);
+  server ??= await startServer({ kind: "none" });
+  await page.goto(server.base + path);
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 }
 
@@ -155,4 +156,112 @@ test("old addresses lead to the new pages", async ({ page }) => {
   await expect(page).toHaveURL(/\/studio\/tokens$/);
   await open(page, "/studio/admin/backups");
   await expect(page).toHaveURL(/\/studio\/databases$/);
+});
+
+test("a server without credentials has no token management to show", async ({ page }) => {
+  await open(page);
+  await expect(page.getByRole("list", { name: "Studio" }).getByRole("button", { name: "API tokens" })).toHaveCount(0);
+});
+
+test("creates a token, shows it once, counts it, and revokes it", async ({ browser }) => {
+  const dir = mkdtempSync(join(tmpdir(), "grafeo-e2e-"));
+  server = await startServer({ kind: "basic", user: "admin", password: "secret" }, ["--data-dir", dir]);
+  const context = await browser.newContext({ httpCredentials: { username: "admin", password: "secret" } });
+  const page = await context.newPage();
+  await open(page);
+  const entry = page.getByRole("list", { name: "Studio" }).getByRole("button", { name: "API tokens" });
+  await entry.click();
+  await expect(page.getByText("No tokens yet. New token creates one and shows it once.")).toBeVisible();
+
+  await page.getByRole("button", { name: "New token" }).click();
+  const dialog = page.getByRole("dialog", { name: "New token" });
+  await dialog.getByLabel("Name").fill("ci-pipeline");
+  await dialog.getByLabel("Role").selectOption("read-write");
+  await dialog.getByRole("button", { name: "Create token" }).click();
+
+  const reveal = page.getByRole("region", { name: "New token" });
+  await expect(reveal.getByText("Copy the token now. It is shown only this once.")).toBeVisible();
+  const table = page.getByRole("table", { name: "API tokens" });
+  await expect(table.getByText("ci-pipeline")).toBeVisible();
+  await expect(entry).toHaveAccessibleDescription("1");
+
+  await reveal.getByRole("button", { name: "Done" }).click();
+  await expect(reveal).toHaveCount(0);
+
+  await table.getByRole("button", { name: "Revoke" }).click();
+  await page.getByRole("dialog", { name: "Revoke ci-pipeline?" }).getByRole("button", { name: "Revoke token" }).click();
+  await expect(page.getByText("No tokens yet. New token creates one and shows it once.")).toBeVisible();
+  await expect(entry).toHaveAccessibleDescription("0");
+  await context.close();
+});
+
+test("Ctrl+Up and Ctrl+Down step through the history and give the draft back", async ({ page }) => {
+  await open(page);
+  await run(page, "MATCH (n) RETURN n LIMIT 1");
+  await run(page, "MATCH (n) RETURN n LIMIT 2");
+  const box = editor(page);
+  await box.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Delete");
+  await box.pressSequentially("draft in progress");
+
+  await page.keyboard.press("Control+ArrowUp");
+  await expect(box).toContainText("LIMIT 2");
+  await page.keyboard.press("Control+ArrowUp");
+  await expect(box).toContainText("LIMIT 1");
+  await page.keyboard.press("Control+ArrowDown");
+  await expect(box).toContainText("LIMIT 2");
+  await page.keyboard.press("Control+ArrowDown");
+  await expect(box).toContainText("draft in progress");
+});
+
+test("a write shows in the sidebar's schema without a reload", async ({ page }) => {
+  await open(page);
+  const schema = page.getByRole("region", { name: "Schema · default" });
+  await expect(schema.getByText("Person")).toHaveCount(0);
+  await run(page, SEED);
+  await expect(schema.getByText("Person")).toBeVisible();
+  await expect(schema.getByText("KNOWS")).toBeVisible();
+});
+
+test("the default database cannot be deleted", async ({ page }) => {
+  await open(page, "/studio/databases/default");
+  await expect(page.getByText("The default database cannot be deleted; the server always keeps it.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete database" })).toBeDisabled();
+});
+
+test("an answer for the database left behind is not shown under the new one", async ({ page }) => {
+  await open(page);
+  await page.request.post(`${server!.base}/db`, { data: { name: "hooli" } });
+  await page.reload();
+  await run(page, SEED);
+  await expect(page.getByText("2 nodes · 1 edge", { exact: false })).toHaveCount(0);
+
+  // The next query answers slowly; the database changes while it runs.
+  await page.route("**/query", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+  const box = editor(page);
+  await box.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Delete");
+  await box.pressSequentially("MATCH (a)-[r]->(b) RETURN a, r, b");
+  await page.getByRole("button", { name: "Run" }).click();
+  await page.getByRole("list", { name: "Databases" }).getByRole("button", { name: "hooli", exact: true }).click();
+  await expect(page.getByText("database: hooli")).toBeVisible();
+  await page.waitForTimeout(2500);
+  await expect(page.getByText("2 nodes · 1 edge", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("table", { name: "Results" })).toHaveCount(0);
+});
+
+test("picking a database by keyboard keeps the focus on it", async ({ page }) => {
+  await open(page);
+  await page.request.post(`${server!.base}/db`, { data: { name: "hooli" } });
+  await page.reload();
+  const list = page.getByRole("list", { name: "Databases" });
+  await list.getByRole("button", { name: "hooli", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("database: hooli")).toBeVisible();
+  await expect(list.getByRole("button", { name: "hooli", exact: true })).toBeFocused();
 });

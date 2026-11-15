@@ -24,7 +24,7 @@ export default function DatabasesPage() {
     if (!names) return new Map<string, DatabaseStatsResponse>();
     const entries = await Promise.all(
       names.split("\n").map((name) =>
-        api.admin
+        api.db
           .stats(name)
           .then((s) => [name, s] as const)
           .catch(() => null),
@@ -46,11 +46,8 @@ export default function DatabasesPage() {
     {
       key: "name",
       header: "Name",
-      render: (d) => (
-        <button type="button" className="st-link-button" onClick={() => open(d.name)}>
-          {d.name}
-        </button>
-      ),
+      // The row opens the database (click or Enter), so the name is text, not a second control
+      render: (d) => <span className="st-link-text">{d.name}</span>,
     },
     { key: "type", header: "Type", render: (d) => <Chip>{modelName(d.database_type)}</Chip> },
     { key: "nodes", header: "Nodes", align: "end", render: (d) => fmt(d.stats?.node_count ?? d.node_count) },
@@ -60,7 +57,12 @@ export default function DatabasesPage() {
       key: "memory",
       header: "Memory",
       align: "end",
-      render: (d) => (d.stats ? bytesText(d.stats.memory_bytes) : <span className="st-muted">…</span>),
+      render: (d) =>
+        d.stats ? (
+          bytesText(d.stats.memory_bytes)
+        ) : (
+          <span className="st-muted">{stats.state === "loading" ? "…" : "unknown"}</span>
+        ),
     },
     {
       key: "disk",

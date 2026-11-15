@@ -1,7 +1,7 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { LanguageId, MainView, QueryResult, QueryTab, Refusal } from "@grafeo-db/ui";
 import { api, GrafeoApiError, refusedKind } from "../api/client";
-import type { QueryRequest } from "../types/api";
+import type { QueryRequest, QueryResponse } from "../types/api";
 import { toPlan, toQueryResult } from "../adapter/toQueryResult";
 import { isRdfModel, useServer } from "./ServerContext";
 import { readJson, readStored, removeStored, writeJson, writeStored } from "../storage";
@@ -39,6 +39,8 @@ export interface WorkbenchContextValue {
   explain: (() => void) | undefined;
   running: boolean;
   result: QueryResult | null;
+  /** The rows as the server sent them, for the JSON view. */
+  rawRows: unknown[][] | null;
   error: string | null;
   refused: Refusal | undefined;
   /** The database and language of the last run, for the status bar. */
@@ -122,7 +124,7 @@ function loadTabs(): TabState {
 const FIRST_QUERY = "MATCH (n) RETURN n LIMIT 25";
 
 export function WorkbenchProvider({ children }: { children: ReactNode }) {
-  const { activeDatabase, activeModel, health } = useServer();
+  const { activeDatabase, activeModel, health, refreshSchema, refreshDatabases } = useServer();
   const [tabState, setTabState] = useState<TabState>(loadTabs);
   const [texts, setTexts] = useState<Record<string, string>>(() => {
     const out: Record<string, string> = {};
@@ -132,6 +134,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   });
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [raw, setRaw] = useState<QueryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refused, setRefused] = useState<Refusal | undefined>();
   const [lastRun, setLastRun] = useState<WorkbenchContextValue["lastRun"]>(null);
@@ -141,20 +144,35 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<HistoryEntry[]>(() => readJson(HISTORY_KEY, [], isHistory));
   const [saved, setSaved] = useState<SavedQuery[]>(() => readJson(SAVED_KEY, [], isSavedList));
   const historyCursor = useRef(-1);
+  // The text before Ctrl+Up stepped into the history, given back when stepping past the newest entry.
+  const historyDraft = useRef("");
   // The run that may still answer; an older one finishing late is ignored.
   const runId = useRef(0);
+  // The database a late answer is checked against: one for another database is never shown.
+  const databaseRef = useRef(activeDatabase);
+  useEffect(() => {
+    databaseRef.current = activeDatabase;
+  }, [activeDatabase]);
 
   const activeTab = tabState.tabs.find((t) => t.id === tabState.activeTabId) ?? tabState.tabs[0];
   const text = texts[activeTab.id] ?? "";
 
   const persistTabs = useCallback((state: TabState) => writeJson(TABS_KEY, state), []);
 
-  const setText = useCallback(
+  const writeText = useCallback(
     (value: string) => {
       setTexts((prev) => ({ ...prev, [activeTab.id]: value }));
       writeStored(tabTextKey(activeTab.id), value, "session");
     },
     [activeTab.id],
+  );
+  // An edit by hand starts history stepping over from the newest entry.
+  const setText = useCallback(
+    (value: string) => {
+      historyCursor.current = -1;
+      writeText(value);
+    },
+    [writeText],
   );
 
   const updateTabs = useCallback(
@@ -169,7 +187,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   );
 
   const selectTab = useCallback(
-    (id: string) => updateTabs((prev) => (prev.activeTabId === id ? prev : { ...prev, activeTabId: id })),
+    (id: string) => {
+      historyCursor.current = -1;
+      updateTabs((prev) => (prev.activeTabId === id ? prev : { ...prev, activeTabId: id }));
+    },
     [updateTabs],
   );
 
@@ -244,6 +265,8 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       const statement = query.trim();
       if (!statement) return;
       const id = ++runId.current;
+      const database = activeDatabase;
+      const current = () => id === runId.current && databaseRef.current === database;
       setRunning(true);
       setError(null);
       setRefused(undefined);
@@ -251,30 +274,37 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (activeDatabase !== "default") body.database = activeDatabase;
       try {
         const response = await api.query(body);
-        if (id !== runId.current) return;
+        if (!current()) return;
         const next = toQueryResult(response);
         if (explain) next.plan = toPlan(response);
         setResult(next);
+        setRaw(response);
+        // A write changes the schema and the counts the sidebar shows.
+        if (Object.values(response.counters ?? {}).some((n) => n > 0)) {
+          refreshSchema();
+          refreshDatabases();
+        }
         setSelectedId(null);
         if (explain) setMainView("plan");
         else if (mainView === "plan") setMainView("graph");
       } catch (err) {
-        if (id !== runId.current) return;
+        if (!current()) return;
         // A failed or refused run drops the old result, so nothing stale stays on screen.
         setResult(null);
+        setRaw(null);
         setSelectedId(null);
         const kind = refusedKind(err);
         if (kind) setRefused(kind);
         else setError(err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err));
       } finally {
-        if (id === runId.current) {
+        if (current()) {
           setRunning(false);
-          setLastRun({ database: activeDatabase, language });
+          setLastRun({ database, language });
         }
       }
       if (!explain) addHistory(statement, language);
     },
-    [language, activeDatabase, addHistory, mainView],
+    [language, activeDatabase, addHistory, mainView, refreshSchema, refreshDatabases],
   );
 
   const run = useCallback(() => void execute(text, false), [execute, text]);
@@ -283,11 +313,14 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const historyStep = useCallback(
     (direction: 1 | -1) => {
       if (history.length === 0) return;
-      const next = Math.max(-1, Math.min(history.length - 1, historyCursor.current + direction));
+      const from = historyCursor.current;
+      const next = Math.max(-1, Math.min(history.length - 1, from + direction));
+      if (next === from) return;
+      if (from === -1) historyDraft.current = text;
       historyCursor.current = next;
-      if (next >= 0) setText(history[next].query);
+      writeText(next >= 0 ? history[next].query : historyDraft.current);
     },
-    [history, setText],
+    [history, text, writeText],
   );
 
   const saveQuery = useCallback(
@@ -313,8 +346,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   const openQuery = useCallback(
     (query: string, requested?: LanguageId) => {
-      // History from older Studio versions may name a language the tabs do not know.
-      const lang = isLanguage(requested) ? requested : undefined;
+      // A language the active database does not run (or an unknown one from an older Studio) is not taken over:
+      // the tab shows, and runs, the language it has.
+      const lang = isLanguage(requested) && languages.includes(requested) ? requested : undefined;
       if (!text.trim()) {
         setText(query);
         if (lang) setLanguage(lang);
@@ -322,7 +356,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         addTabWith(query, lang ?? language);
       }
     },
-    [text, setText, setLanguage, addTabWith, language],
+    [text, setText, setLanguage, addTabWith, language, languages],
   );
 
   // A new database is a new graph: the old result and selection do not belong to it. Adjusted while rendering,
@@ -330,7 +364,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [shownDatabase, setShownDatabase] = useState(activeDatabase);
   if (shownDatabase !== activeDatabase) {
     setShownDatabase(activeDatabase);
+    setRunning(false);
     setResult(null);
+    setRaw(null);
     setSelectedId(null);
     setError(null);
     setRefused(undefined);
@@ -352,6 +388,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       explain: EXPLAINABLE.has(language) ? explainFn : undefined,
       running,
       result,
+      rawRows: raw?.rows ?? null,
       error,
       refused,
       lastRun,
@@ -370,7 +407,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     }),
     [
       tabState.tabs, activeTab, text, setText, selectTab, addTab, closeTab, language, languages, setLanguage, run,
-      explainFn, running, result, error, refused, lastRun, selectedId, mainView, resultsCollapsed, history,
+      explainFn, running, result, raw, error, refused, lastRun, selectedId, mainView, resultsCollapsed, history,
       historyStep, saved, saveQuery, removeSaved, openQuery,
     ],
   );

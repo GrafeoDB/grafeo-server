@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { SchemaList, Sidebar, SidebarItem, SidebarSection, StatusItem, type LanguageId } from "@grafeo-db/ui";
 import { useServer } from "../context/ServerContext";
@@ -7,16 +7,27 @@ import { fmt, formatTimeAgo, formatUptime } from "./format";
 
 /** Queries to start from; the names are the button names. */
 const EXAMPLES: { name: string; query: string; language?: LanguageId }[] = [
-  { name: "All nodes", query: "MATCH (n) RETURN n LIMIT 25" },
-  { name: "All relationships", query: "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 25" },
-  { name: "Count nodes", query: "MATCH (n) RETURN count(n) AS nodes" },
-  { name: "Node labels", query: "MATCH (n) RETURN DISTINCT labels(n) AS labels" },
+  { name: "All nodes", query: "MATCH (n) RETURN n LIMIT 25", language: "gql" },
+  { name: "All relationships", query: "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 25", language: "gql" },
+  { name: "Count nodes", query: "MATCH (n) RETURN count(n) AS nodes", language: "gql" },
+  { name: "Node labels", query: "MATCH (n) RETURN DISTINCT labels(n) AS labels", language: "gql" },
   {
     name: "Insert two people",
     query: "INSERT (:Person {name: 'Richard Hendricks'})-[:KNOWS]->(:Person {name: 'Jared Dunn'})",
+    language: "gql",
   },
-  { name: "Find by name", query: "MATCH (p:Person {name: 'Richard Hendricks'})-[r]-(other) RETURN p, r, other" },
+  {
+    name: "Find by name",
+    query: "MATCH (p:Person {name: 'Richard Hendricks'})-[r]-(other) RETURN p, r, other",
+    language: "gql",
+  },
 ];
+
+/**
+ * Switching database gives the new database its own label styles, which remounts the Studio (the package's
+ * CategoryProvider loads styles on mount). The database picked by keyboard gets its focus back in the new sidebar.
+ */
+let focusAfterSwitch: string | null = null;
 const RDF_EXAMPLES: { name: string; query: string; language?: LanguageId }[] = [
   { name: "All triples", query: "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 25", language: "sparql" },
   { name: "Count triples", query: "SELECT (COUNT(*) AS ?triples) WHERE { ?s ?p ?o }", language: "sparql" },
@@ -68,6 +79,14 @@ export default function StudioSidebar() {
   const workbench = useWorkbench();
   const { databases, schema, activeDatabase, activeModel } = server;
 
+  useEffect(() => {
+    const name = focusAfterSwitch;
+    focusAfterSwitch = null;
+    if (!name) return;
+    const items = document.querySelectorAll<HTMLButtonElement>(".st-databases .gu-sidebar-item");
+    for (const item of items) if (item.getAttribute("aria-label") === name) item.focus();
+  }, []);
+
   const schemaEntries = useMemo(() => {
     if (schema.state !== "ready") return { labels: [], edgeTypes: [] };
     return { labels: schema.data.labels, edgeTypes: schema.data.edge_types };
@@ -99,8 +118,13 @@ export default function StudioSidebar() {
           active={pathname === "/saved-queries"}
           onClick={() => go("/saved-queries")}
         />
-        {server.authEnabled ? (
-          <SidebarItem label="API tokens" active={pathname === "/tokens"} onClick={() => go("/tokens")} />
+        {server.tokens.state === "refused" || (server.tokens.state === "ready" && server.tokens.data !== null) ? (
+          <SidebarItem
+            label="API tokens"
+            meta={server.tokens.state === "ready" && server.tokens.data ? fmt(server.tokens.data.length) : undefined}
+            active={pathname === "/tokens"}
+            onClick={() => go("/tokens")}
+          />
         ) : null}
       </SidebarSection>
 
@@ -108,27 +132,38 @@ export default function StudioSidebar() {
         <ServerRows />
       </SidebarSection>
 
-      <SidebarSection title="Databases" refused={databases.state === "refused" ? databases.refused : undefined}>
-        {databases.state === "ready"
-          ? databases.data.map((db) => (
-              <SidebarItem
-                key={db.name}
-                label={db.name}
-                meta={`${fmt(db.node_count)} n · ${fmt(db.edge_count)} e`}
-                active={db.name === activeDatabase}
-                onClick={() => server.selectDatabase(db.name)}
-              />
-            ))
-          : null}
-      </SidebarSection>
+      {/* The wrapper only names the section for the focus hand-over; it adds no box (display: contents) */}
+      <div className="st-databases">
+        <SidebarSection title="Databases" refused={databases.state === "refused" ? databases.refused : undefined}>
+          {databases.state === "ready"
+            ? databases.data.map((db) => (
+                <SidebarItem
+                  key={db.name}
+                  label={db.name}
+                  meta={`${fmt(db.node_count)} n · ${fmt(db.edge_count)} e`}
+                  active={db.name === activeDatabase}
+                  onClick={() => {
+                    if (db.name === activeDatabase) return;
+                    if (document.activeElement?.closest(".st-databases")) focusAfterSwitch = db.name;
+                    server.selectDatabase(db.name);
+                  }}
+                />
+              ))
+            : null}
+        </SidebarSection>
+      </div>
       {databases.state === "failed" ? <p className="st-note">The database list did not load.</p> : null}
 
       <SidebarSection title={`Schema · ${activeDatabase}`} plain>
-        <SchemaList
-          labels={schemaEntries.labels}
-          edgeTypes={schemaEntries.edgeTypes}
-          refused={schema.state === "refused" ? schema.refused : undefined}
-        />
+        {schema.state === "failed" ? (
+          <p className="st-note">The schema did not load.</p>
+        ) : schema.state === "loading" ? null : (
+          <SchemaList
+            labels={schemaEntries.labels}
+            edgeTypes={schemaEntries.edgeTypes}
+            refused={schema.state === "refused" ? schema.refused : undefined}
+          />
+        )}
       </SidebarSection>
 
       {workbench.history.length > 0 ? (
