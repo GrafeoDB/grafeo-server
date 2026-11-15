@@ -283,6 +283,26 @@ body {
 .st-stat-date {
   font-size: 13px;
   line-height: 20px;
+  /* A date is never cut: its time wraps onto a second line when the cell is narrow */
+  white-space: normal;
+}
+
+/* Phone width: two figures a row, so every label shows in full */
+@media (max-width: 480px) {
+  .st-stats,
+  .st-stats-wide .st-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-stat:nth-child(3n + 1) {
+    padding-left: 16px;
+    border-left: 1px solid var(--gu-border);
+  }
+
+  .st-stat:nth-child(2n + 1) {
+    padding-left: 0;
+    border-left: 0;
+  }
 }
 
 .st-narrow {
