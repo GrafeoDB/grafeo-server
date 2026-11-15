@@ -33,6 +33,7 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 ### Security
 
 - **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again, also on a read-only server or a replica (reads only); read-only and read-write tokens never can, and the refusal names the flag.
+- **A SPARQL update sent by GET is refused**: `GET /db/{name}/sparql?query=` ran updates too, so a page on any site could write through a browser that held the Studio's Basic login, with an image or a link; a GET now runs read-only and an update answers 403. Updates are sent with `POST /db/{name}/sparql`.
 
 ### Dependencies
 
