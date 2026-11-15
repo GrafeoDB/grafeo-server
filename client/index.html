@@ -4,7 +4,19 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/studio/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Grafeo</title>
+    <title>Grafeo Studio</title>
+    <script>
+      // Paint the stored theme from the first frame (the package's ThemeProvider takes over after).
+      (function () {
+        var theme = "dark";
+        try {
+          if (localStorage.getItem("grafeo-theme") === "light") theme = "light";
+        } catch (e) {
+          // Storage blocked: stay on the default
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

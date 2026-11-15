@@ -13,18 +13,10 @@
     "minimatch": "11.0.5"
   },
   "dependencies": {
-    "@codemirror/autocomplete": "^6.18.0",
-    "@codemirror/commands": "^6.11.1",
-    "@codemirror/language": "^6.10.0",
-    "@codemirror/state": "^6.5.0",
-    "@codemirror/theme-one-dark": "^6.1.0",
-    "@codemirror/view": "^6.36.0",
-    "graphology": "^0.26.0",
-    "graphology-layout-forceatlas2": "^0.10.1",
+    "@grafeo-db/ui": "^0.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.18.4",
-    "sigma": "^4.0.3"
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

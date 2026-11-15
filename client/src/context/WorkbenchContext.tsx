@@ -1,350 +1,384 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import { useQuery } from "../hooks/useQuery";
-import { useQueryHistory } from "../hooks/useQueryHistory";
-import type { HistoryEntry } from "../hooks/useQueryHistory";
-import type { QueryEditorHandle } from "../components/QueryEditor/QueryEditor";
-import type { Tab } from "../components/QueryEditor/TabBar";
-import { useApp } from "./AppContext";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import type { LanguageId, MainView, QueryResult, QueryTab, Refusal } from "@grafeo-db/ui";
+import { api, GrafeoApiError, refusedKind } from "../api/client";
+import type { QueryRequest } from "../types/api";
+import { toPlan, toQueryResult } from "../adapter/toQueryResult";
+import { isRdfModel, useServer } from "./ServerContext";
+import { readJson, readStored, removeStored, writeJson, writeStored } from "../storage";
 
 export interface SavedQuery {
   name: string;
   query: string;
+  language?: LanguageId;
 }
 
-interface TabState {
-  tabs: Tab[];
-  activeTabId: string;
+export interface HistoryEntry {
+  query: string;
+  language: string;
+  timestamp: number;
 }
 
 export interface WorkbenchContextValue {
-  // Editor ref, owned here so sidebar-triggered query selection can write to it.
-  editorRef: React.RefObject<QueryEditorHandle | null>;
+  tabs: QueryTab[];
+  activeTab: QueryTab;
+  /** The text of the active tab. */
+  text: string;
+  setText(text: string): void;
+  selectTab(id: string): void;
+  addTab(): void;
+  closeTab(id: string): void;
 
-  // Tab state
-  tabState: TabState;
-  activeLanguage: string;
-  onSelectTab: (id: string) => void;
-  onAddTab: () => void;
-  onCloseTab: (id: string) => void;
-  onRenameTab: (id: string, name: string) => void;
-  onLanguageChange: (lang: string) => void;
+  /** The active tab's language when the active database runs it, else that model's default. */
+  language: LanguageId;
+  /** The languages the active database runs, as the server offers them. */
+  languages: LanguageId[];
+  setLanguage(language: LanguageId): void;
 
-  // Query execution
-  result: ReturnType<typeof useQuery>["result"];
-  error: ReturnType<typeof useQuery>["error"];
-  isLoading: boolean;
-  onExecute: (query: string) => void;
+  run(): void;
+  /** Explain, when the language has a plan (GQL and Cypher). */
+  explain: (() => void) | undefined;
+  running: boolean;
+  result: QueryResult | null;
+  error: string | null;
+  refused: Refusal | undefined;
+  /** The database and language of the last run, for the status bar. */
+  lastRun: { database: string; language: LanguageId } | null;
 
-  // Query history
-  historyEntries: HistoryEntry[];
-  historyNavigateUp: () => HistoryEntry | null;
-  historyNavigateDown: () => HistoryEntry | null;
-  historyResetCursor: () => void;
+  selectedId: string | null;
+  setSelectedId(id: string | null): void;
+  mainView: MainView;
+  setMainView(view: MainView): void;
+  resultsCollapsed: boolean;
+  setResultsCollapsed(collapsed: boolean): void;
 
-  // Saved queries
-  savedQueries: SavedQuery[];
-  onSaveQuery: (query: string) => void;
-  onRemoveSaved: (index: number) => void;
-
-  // Cross-boundary action: sidebar clicks a saved query or history entry,
-  // this writes it into the active tab and executes it.
-  onQuerySelect: (query: string) => void;
-
-  // Results view mode
-  viewMode: "table" | "graph";
-  setViewMode: (mode: "table" | "graph") => void;
-
-  // Shortcut help modal
-  showHelp: boolean;
-  toggleHelp: () => void;
+  history: HistoryEntry[];
+  /** Ctrl+Up / Ctrl+Down: the previous or next history entry into the active tab. */
+  historyStep(direction: 1 | -1): void;
+  saved: SavedQuery[];
+  saveQuery(name: string): void;
+  removeSaved(index: number): void;
+  /** A query from history, the examples or saved queries: into the active tab when it is empty, else a new tab. */
+  openQuery(query: string, language?: LanguageId): void;
 }
 
 const WorkbenchContext = createContext<WorkbenchContextValue | null>(null);
 
-const SAVED_KEY = "grafeo-saved-queries";
 const TABS_KEY = "grafeo-editor-tabs";
+const SAVED_KEY = "grafeo-saved-queries";
+const HISTORY_KEY = "grafeo-query-history";
+const MAX_HISTORY = 50;
+const tabTextKey = (id: string) => `grafeo-editor-tab-${id}`;
 
-function generateId(): string {
-  return crypto.randomUUID();
+const ALL_LANGUAGES: LanguageId[] = ["gql", "cypher", "gremlin", "graphql", "sparql", "sql"];
+const LPG_LANGUAGES = new Set<LanguageId>(["gql", "cypher", "gremlin", "graphql", "sql"]);
+const RDF_LANGUAGES = new Set<LanguageId>(["gql", "sparql"]);
+const EXPLAINABLE = new Set<LanguageId>(["gql", "cypher"]);
+
+/** The server's feature names for the languages, where they differ from the editor's. */
+const FEATURE_NAME: Partial<Record<LanguageId, string>> = { sql: "sql-pgq" };
+
+interface TabState {
+  tabs: QueryTab[];
+  activeTabId: string;
 }
 
-function loadSaved(): SavedQuery[] {
-  try {
-    const raw = localStorage.getItem(SAVED_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+function isLanguage(value: unknown): value is LanguageId {
+  return typeof value === "string" && (ALL_LANGUAGES as string[]).includes(value);
 }
 
-function persistSaved(queries: SavedQuery[]) {
-  localStorage.setItem(SAVED_KEY, JSON.stringify(queries));
+function isTabState(value: unknown): value is TabState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as TabState;
+  return (
+    Array.isArray(v.tabs) &&
+    v.tabs.length > 0 &&
+    v.tabs.every((t) => typeof t?.id === "string" && typeof t.name === "string" && isLanguage(t.language)) &&
+    v.tabs.some((t) => t.id === v.activeTabId)
+  );
+}
+
+function isSavedList(value: unknown): value is SavedQuery[] {
+  return Array.isArray(value) && value.every((q) => typeof q?.name === "string" && typeof q.query === "string");
+}
+
+function isHistory(value: unknown): value is HistoryEntry[] {
+  return Array.isArray(value) && value.every((e) => typeof e?.query === "string" && typeof e.timestamp === "number");
+}
+
+function newTab(tabs: QueryTab[], language: LanguageId = "gql"): QueryTab {
+  const used = new Set(tabs.map((t) => t.name));
+  let n = tabs.length + 1;
+  while (used.has(`Query ${n}`)) n++;
+  return { id: crypto.randomUUID(), name: `Query ${n}`, language };
 }
 
 function loadTabs(): TabState {
-  try {
-    const raw = localStorage.getItem(TABS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as TabState;
-      if (parsed.tabs?.length > 0 && parsed.activeTabId) return parsed;
-    }
-  } catch {
-    /* use default */
-  }
-  const id = generateId();
-  return { tabs: [{ id, name: "Query 1", language: "gql" }], activeTabId: id };
+  const stored = readJson<TabState | null>(TABS_KEY, null, (v): v is TabState | null => isTabState(v));
+  if (stored) return stored;
+  const tab = newTab([]);
+  return { tabs: [tab], activeTabId: tab.id };
 }
 
-const RDF_LANGUAGES = new Set(["gql", "sparql"]);
-const LPG_LANGUAGES = new Set(["gql", "cypher", "graphql", "gremlin"]);
+const FIRST_QUERY = "MATCH (n) RETURN n LIMIT 25";
 
-function persistTabs(state: TabState) {
-  localStorage.setItem(TABS_KEY, JSON.stringify(state));
-}
-
-interface Props {
-  children: ReactNode;
-}
-
-export function WorkbenchProvider({ children }: Props) {
-  const { currentDatabase, databaseType } = useApp();
+export function WorkbenchProvider({ children }: { children: ReactNode }) {
+  const { activeDatabase, activeModel, health } = useServer();
   const [tabState, setTabState] = useState<TabState>(loadTabs);
-  const [viewMode, setViewMode] = useState<"table" | "graph">("graph");
-  const { result, error, isLoading, execute } = useQuery();
-  const history = useQueryHistory();
-  const [savedQueries, setSavedQueries] = useState<SavedQuery[]>(loadSaved);
-  const [showHelp, setShowHelp] = useState(false);
-  const editorRef = useRef<QueryEditorHandle>(null);
+  const [texts, setTexts] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const tab of tabState.tabs) out[tab.id] = readStored(tabTextKey(tab.id), "session") ?? "";
+    if (tabState.tabs.length === 1 && !out[tabState.activeTabId]) out[tabState.activeTabId] = FIRST_QUERY;
+    return out;
+  });
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<QueryResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refused, setRefused] = useState<Refusal | undefined>();
+  const [lastRun, setLastRun] = useState<WorkbenchContextValue["lastRun"]>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mainView, setMainView] = useState<MainView>("graph");
+  const [resultsCollapsed, setResultsCollapsed] = useState(false);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => readJson(HISTORY_KEY, [], isHistory));
+  const [saved, setSaved] = useState<SavedQuery[]>(() => readJson(SAVED_KEY, [], isSavedList));
+  const historyCursor = useRef(-1);
+  // The run that may still answer; an older one finishing late is ignored.
+  const runId = useRef(0);
 
-  const activeTab =
-    tabState.tabs.find((t) => t.id === tabState.activeTabId) ?? tabState.tabs[0];
-  // The tab's language when the current database's graph model runs it,
-  // otherwise that model's default (derived, so switching databases changes
-  // no state and the tab gets its language back on a compatible database).
-  const isRdf =
-    databaseType === "rdf" ||
-    databaseType === "owl-schema" ||
-    databaseType === "rdfs-schema";
-  const validLangs = isRdf ? RDF_LANGUAGES : LPG_LANGUAGES;
-  const activeLanguage = validLangs.has(activeTab.language)
-    ? activeTab.language
-    : isRdf
-      ? "sparql"
-      : "gql";
+  const activeTab = tabState.tabs.find((t) => t.id === tabState.activeTabId) ?? tabState.tabs[0];
+  const text = texts[activeTab.id] ?? "";
 
-  const onLanguageChange = useCallback((lang: string) => {
-    setTabState((prev) => {
-      const next = {
-        ...prev,
-        tabs: prev.tabs.map((t) =>
-          t.id === prev.activeTabId ? { ...t, language: lang } : t,
-        ),
-      };
-      persistTabs(next);
-      return next;
-    });
-  }, []);
+  const persistTabs = useCallback((state: TabState) => writeJson(TABS_KEY, state), []);
 
-  const onSelectTab = useCallback((id: string) => {
-    const content = editorRef.current?.getContent() ?? "";
-    setTabState((prev) => {
-      if (prev.activeTabId === id) return prev;
-      sessionStorage.setItem(`grafeo-editor-tab-${prev.activeTabId}`, content);
-      const next = { ...prev, activeTabId: id };
-      persistTabs(next);
-      return next;
-    });
-  }, []);
+  const setText = useCallback(
+    (value: string) => {
+      setTexts((prev) => ({ ...prev, [activeTab.id]: value }));
+      writeStored(tabTextKey(activeTab.id), value, "session");
+    },
+    [activeTab.id],
+  );
 
-  useEffect(() => {
-    const saved = sessionStorage.getItem(
-      `grafeo-editor-tab-${tabState.activeTabId}`,
+  const updateTabs = useCallback(
+    (update: (prev: TabState) => TabState) => {
+      setTabState((prev) => {
+        const next = update(prev);
+        if (next !== prev) persistTabs(next);
+        return next;
+      });
+    },
+    [persistTabs],
+  );
+
+  const selectTab = useCallback(
+    (id: string) => updateTabs((prev) => (prev.activeTabId === id ? prev : { ...prev, activeTabId: id })),
+    [updateTabs],
+  );
+
+  const addTabWith = useCallback(
+    (query: string, language?: LanguageId) => {
+      const tab = newTab(tabState.tabs, language ?? activeTab.language);
+      setTexts((prev) => ({ ...prev, [tab.id]: query }));
+      writeStored(tabTextKey(tab.id), query, "session");
+      updateTabs((prev) => ({ tabs: [...prev.tabs, tab], activeTabId: tab.id }));
+    },
+    [updateTabs, tabState.tabs, activeTab.language],
+  );
+
+  const addTab = useCallback(() => addTabWith(""), [addTabWith]);
+
+  const closeTab = useCallback(
+    (id: string) => {
+      removeStored(tabTextKey(id), "session");
+      setTexts((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      updateTabs((prev) => {
+        const index = prev.tabs.findIndex((t) => t.id === id);
+        if (index < 0) return prev;
+        const tabs = prev.tabs.filter((t) => t.id !== id);
+        // Closing the last tab leaves one empty tab, never none.
+        if (tabs.length === 0) {
+          const tab = newTab([]);
+          return { tabs: [tab], activeTabId: tab.id };
+        }
+        const activeTabId = id === prev.activeTabId ? tabs[Math.min(index, tabs.length - 1)].id : prev.activeTabId;
+        return { tabs, activeTabId };
+      });
+    },
+    [updateTabs],
+  );
+
+  const rdf = isRdfModel(activeModel);
+  const languages = useMemo(() => {
+    const valid = rdf ? RDF_LANGUAGES : LPG_LANGUAGES;
+    const offered = health?.features?.languages;
+    return ALL_LANGUAGES.filter(
+      (l) => valid.has(l) && (!offered || offered.includes(FEATURE_NAME[l] ?? l)),
     );
-    editorRef.current?.setContent(saved ?? "");
-  }, [tabState.activeTabId]);
+  }, [rdf, health]);
+  const fallback: LanguageId = rdf ? "sparql" : "gql";
+  const language = languages.includes(activeTab.language) ? activeTab.language : fallback;
 
-  const onAddTab = useCallback(() => {
-    const content = editorRef.current?.getContent() ?? "";
-    setTabState((prev) => {
-      sessionStorage.setItem(`grafeo-editor-tab-${prev.activeTabId}`, content);
-      const id = generateId();
-      const num = prev.tabs.length + 1;
-      const tab: Tab = { id, name: `Query ${num}`, language: "gql" };
-      const next = { tabs: [...prev.tabs, tab], activeTabId: id };
-      persistTabs(next);
-      return next;
-    });
-  }, []);
-
-  const onCloseTab = useCallback((id: string) => {
-    setTabState((prev) => {
-      if (prev.tabs.length <= 1) return prev;
-      const idx = prev.tabs.findIndex((t) => t.id === id);
-      const next = prev.tabs.filter((t) => t.id !== id);
-      sessionStorage.removeItem(`grafeo-editor-tab-${id}`);
-      let newActiveId = prev.activeTabId;
-      if (id === prev.activeTabId) {
-        newActiveId = next[Math.min(idx, next.length - 1)].id;
-      }
-      const state = { tabs: next, activeTabId: newActiveId };
-      persistTabs(state);
-      return state;
-    });
-  }, []);
-
-  const onRenameTab = useCallback((id: string, name: string) => {
-    setTabState((prev) => {
-      const next = {
+  const setLanguage = useCallback(
+    (lang: LanguageId) =>
+      updateTabs((prev) => ({
         ...prev,
-        tabs: prev.tabs.map((t) => (t.id === id ? { ...t, name } : t)),
-      };
-      persistTabs(next);
-      return next;
-    });
-  }, []);
-
-  const onExecute = useCallback(
-    (query: string) => {
-      execute(query, activeLanguage, currentDatabase);
-      history.add(query, activeLanguage);
-    },
-    [execute, activeLanguage, currentDatabase, history],
+        tabs: prev.tabs.map((t) => (t.id === prev.activeTabId ? { ...t, language: lang } : t)),
+      })),
+    [updateTabs],
   );
 
-  const onQuerySelect = useCallback(
-    (query: string) => {
-      editorRef.current?.setContent(query);
-      execute(query, activeLanguage, currentDatabase);
-      history.add(query, activeLanguage);
-    },
-    [execute, activeLanguage, currentDatabase, history],
-  );
-
-  const onSaveQuery = useCallback((query: string) => {
-    const name = window.prompt("Save query as:");
-    if (!name?.trim()) return;
-    setSavedQueries((prev) => {
-      const next = [...prev, { name: name.trim(), query }];
-      persistSaved(next);
+  const addHistory = useCallback((query: string, lang: LanguageId) => {
+    setHistory((prev) => {
+      if (prev[0]?.query === query && prev[0]?.language === lang) return prev;
+      const next = [{ query, language: lang, timestamp: Date.now() }, ...prev].slice(0, MAX_HISTORY);
+      writeJson(HISTORY_KEY, next);
       return next;
     });
+    historyCursor.current = -1;
   }, []);
 
-  const onRemoveSaved = useCallback((index: number) => {
-    setSavedQueries((prev) => {
+  const execute = useCallback(
+    async (query: string, explain: boolean) => {
+      const statement = query.trim();
+      if (!statement) return;
+      const id = ++runId.current;
+      setRunning(true);
+      setError(null);
+      setRefused(undefined);
+      const body: QueryRequest = { query: explain ? `EXPLAIN ${statement}` : statement, language };
+      if (activeDatabase !== "default") body.database = activeDatabase;
+      try {
+        const response = await api.query(body);
+        if (id !== runId.current) return;
+        const next = toQueryResult(response);
+        if (explain) next.plan = toPlan(response);
+        setResult(next);
+        setSelectedId(null);
+        if (explain) setMainView("plan");
+        else if (mainView === "plan") setMainView("graph");
+      } catch (err) {
+        if (id !== runId.current) return;
+        // A failed or refused run drops the old result, so nothing stale stays on screen.
+        setResult(null);
+        setSelectedId(null);
+        const kind = refusedKind(err);
+        if (kind) setRefused(kind);
+        else setError(err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err));
+      } finally {
+        if (id === runId.current) {
+          setRunning(false);
+          setLastRun({ database: activeDatabase, language });
+        }
+      }
+      if (!explain) addHistory(statement, language);
+    },
+    [language, activeDatabase, addHistory, mainView],
+  );
+
+  const run = useCallback(() => void execute(text, false), [execute, text]);
+  const explainFn = useCallback(() => void execute(text, true), [execute, text]);
+
+  const historyStep = useCallback(
+    (direction: 1 | -1) => {
+      if (history.length === 0) return;
+      const next = Math.max(-1, Math.min(history.length - 1, historyCursor.current + direction));
+      historyCursor.current = next;
+      if (next >= 0) setText(history[next].query);
+    },
+    [history, setText],
+  );
+
+  const saveQuery = useCallback(
+    (name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed || !text.trim()) return;
+      setSaved((prev) => {
+        const next = [...prev, { name: trimmed, query: text, language }];
+        writeJson(SAVED_KEY, next);
+        return next;
+      });
+    },
+    [text, language],
+  );
+
+  const removeSaved = useCallback((index: number) => {
+    setSaved((prev) => {
       const next = prev.filter((_, i) => i !== index);
-      persistSaved(next);
+      writeJson(SAVED_KEY, next);
       return next;
     });
   }, []);
 
-  const toggleHelp = useCallback(() => {
-    setShowHelp((prev) => !prev);
-  }, []);
+  const openQuery = useCallback(
+    (query: string, requested?: LanguageId) => {
+      // History from older Studio versions may name a language the tabs do not know.
+      const lang = isLanguage(requested) ? requested : undefined;
+      if (!text.trim()) {
+        setText(query);
+        if (lang) setLanguage(lang);
+      } else {
+        addTabWith(query, lang ?? language);
+      }
+    },
+    [text, setText, setLanguage, addTabWith, language],
+  );
 
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if ((e.target as HTMLElement).closest(".cm-editor")) return;
-      e.preventDefault();
-      setShowHelp((prev) => !prev);
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, []);
+  // A new database is a new graph: the old result and selection do not belong to it. Adjusted while rendering,
+  // so no frame shows the old database's result.
+  const [shownDatabase, setShownDatabase] = useState(activeDatabase);
+  if (shownDatabase !== activeDatabase) {
+    setShownDatabase(activeDatabase);
+    setResult(null);
+    setSelectedId(null);
+    setError(null);
+    setRefused(undefined);
+  }
 
   const value = useMemo<WorkbenchContextValue>(
     () => ({
-      editorRef,
-      tabState,
-      activeLanguage,
-      onSelectTab,
-      onAddTab,
-      onCloseTab,
-      onRenameTab,
-      onLanguageChange,
+      tabs: tabState.tabs,
+      activeTab,
+      text,
+      setText,
+      selectTab,
+      addTab,
+      closeTab,
+      language,
+      languages,
+      setLanguage,
+      run,
+      explain: EXPLAINABLE.has(language) ? explainFn : undefined,
+      running,
       result,
       error,
-      isLoading,
-      onExecute,
-      historyEntries: history.entries,
-      historyNavigateUp: history.navigateUp,
-      historyNavigateDown: history.navigateDown,
-      historyResetCursor: history.resetCursor,
-      savedQueries,
-      onSaveQuery,
-      onRemoveSaved,
-      onQuerySelect,
-      viewMode,
-      setViewMode,
-      showHelp,
-      toggleHelp,
+      refused,
+      lastRun,
+      selectedId,
+      setSelectedId,
+      mainView,
+      setMainView,
+      resultsCollapsed,
+      setResultsCollapsed,
+      history,
+      historyStep,
+      saved,
+      saveQuery,
+      removeSaved,
+      openQuery,
     }),
     [
-      tabState,
-      activeLanguage,
-      onSelectTab,
-      onAddTab,
-      onCloseTab,
-      onRenameTab,
-      onLanguageChange,
-      result,
-      error,
-      isLoading,
-      onExecute,
-      history.entries,
-      history.navigateUp,
-      history.navigateDown,
-      history.resetCursor,
-      savedQueries,
-      onSaveQuery,
-      onRemoveSaved,
-      onQuerySelect,
-      viewMode,
-      showHelp,
-      toggleHelp,
+      tabState.tabs, activeTab, text, setText, selectTab, addTab, closeTab, language, languages, setLanguage, run,
+      explainFn, running, result, error, refused, lastRun, selectedId, mainView, resultsCollapsed, history,
+      historyStep, saved, saveQuery, removeSaved, openQuery,
     ],
   );
-
-  return (
-    <WorkbenchContext.Provider value={value}>
-      {children}
-    </WorkbenchContext.Provider>
-  );
+  return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>;
 }
 
-/**
- * Returns the workbench context. Returns null on routes that aren't wrapped
- * in a WorkbenchProvider (e.g. the admin route), so consumers that only
- * render partial UI can gate on the null.
- */
-export function useWorkbench(): WorkbenchContextValue | null {
-  return useContext(WorkbenchContext);
-}
-
-/**
- * Returns the workbench context and throws if it isn't available. Use this
- * inside components that only ever render on the workbench route (like
- * WorkbenchView itself).
- */
-export function useWorkbenchRequired(): WorkbenchContextValue {
+export function useWorkbench(): WorkbenchContextValue {
   const ctx = useContext(WorkbenchContext);
-  if (!ctx) {
-    throw new Error(
-      "useWorkbenchRequired called outside a WorkbenchProvider. " +
-        "Wrap the route element in <WorkbenchProvider>.",
-    );
-  }
+  if (!ctx) throw new Error("useWorkbench must be used within WorkbenchProvider");
   return ctx;
 }

@@ -49,17 +49,14 @@ function recordApi(page: Page): string[] {
 }
 
 /**
- * The Studio loaded its data: connected, the default database listed (in the
- * workbench's database select, or as a card on the databases page), no refusal.
+ * The Studio loaded its data: connected, the default database in the
+ * sidebar's Databases list (on every page), no refusal.
  */
 async function expectStudioLoaded(page: Page) {
-  await expect(page.getByText(/Connected · v\d+\.\d+\.\d+/)).toBeVisible();
-  if (new URL(page.url()).pathname.startsWith("/studio/databases")) {
-    await expect(page.getByRole("link", { name: /^default\b/ })).toBeVisible();
-  } else {
-    const select = page.getByRole("combobox", { name: "Active database" });
-    await expect(select.locator("option", { hasText: "default" })).toHaveCount(1);
-  }
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Databases" }).getByRole("button", { name: "default", exact: true }),
+  ).toBeVisible();
   await expect(page.getByText(NOT_SIGNED_IN)).toHaveCount(0);
   await expect(page.getByText(NO_ACCESS)).toHaveCount(0);
 }
@@ -73,7 +70,7 @@ test.describe("Studio behind Basic auth (#90)", () => {
       const api = recordApi(page);
       await page.goto(base + entry);
       await expectStudioLoaded(page);
-      // The option above proves the database list was answered: a refused list
+      // The list entry above proves the database list was answered: a refused list
       // shows the refused note instead. (Firefox reports the challenge's 401 to
       // the page but not the silent retry, so response events cannot show it.)
       expect(api.some((r) => r.startsWith("GET /db "))).toBe(true);

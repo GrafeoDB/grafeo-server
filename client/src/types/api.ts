@@ -1,7 +1,8 @@
 export interface QueryRequest {
   query: string;
   params?: Record<string, unknown>;
-  language?: "gql" | "cypher" | "gremlin" | "graphql" | "sparql";
+  /** `sql` is SQL/PGQ (the server also takes `sql-pgq`). */
+  language?: "gql" | "cypher" | "gremlin" | "graphql" | "sparql" | "sql";
   database?: string;
   timeout_ms?: number;
 }

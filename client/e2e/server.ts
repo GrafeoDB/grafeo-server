@@ -52,16 +52,16 @@ function authArgs(auth: Auth): string[] {
 }
 
 /**
- * Starts the grafeo-server binary in memory on a free loopback port and
- * waits until `/health` answers.
+ * Starts the grafeo-server binary on a free loopback port (in memory unless
+ * `extraArgs` say otherwise) and waits until `/health` answers.
  */
-export async function startServer(auth: Auth): Promise<RunningServer> {
+export async function startServer(auth: Auth, extraArgs: string[] = []): Promise<RunningServer> {
   const bin = process.env.GRAFEO_SERVER_BIN;
   if (!bin) {
     throw new Error("set GRAFEO_SERVER_BIN to a grafeo-server binary built with the Studio");
   }
   const port = await freePort();
-  const child: ChildProcess = spawn(bin, ["--host", "127.0.0.1", "--port", String(port), ...authArgs(auth)], {
+  const child: ChildProcess = spawn(bin, ["--host", "127.0.0.1", "--port", String(port), ...authArgs(auth), ...extraArgs], {
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
