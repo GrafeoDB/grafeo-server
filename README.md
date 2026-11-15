@@ -355,7 +355,7 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_PORT` | `--port` | `7474` | HTTP bind port |
 | `GRAFEO_DATA_DIR` | `--data-dir` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_READ_ONLY` | `--read-only` | `false` | Open all databases in read-only mode |
-| `GRAFEO_ALLOW_EXTERNAL_ACCESS` | `--allow-external-access` | `false` | Let admin clients' statements read or write files on the server (`LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures), also on a read-only server. Without it every client is refused (HTTP 403, GWP 42501, Bolt `Forbidden`), admins included; read-only and read-write tokens are refused either way. On a server without authentication every client is the admin, so the flag opens the server's files to every client that can connect |
+| `GRAFEO_ALLOW_EXTERNAL_ACCESS` | `--allow-external-access` | `false` | Let admin clients' statements read or write files on the server (`LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures), also on a read-only server or a replica (reads only; writes stay refused). Without it every client is refused (HTTP 403, GWP 42501, Bolt `Forbidden`), admins included; read-only and read-write tokens are refused either way. On a server without authentication every client is the admin, so the flag opens the server's files to every client that can connect |
 | `GRAFEO_SESSION_TTL` | `--session-ttl` | `300` | Transaction session timeout (seconds) |
 | `GRAFEO_QUERY_TIMEOUT` | `--query-timeout` | `30` | Query execution timeout in seconds (0 = disabled) |
 | `GRAFEO_GWP` | `--gwp` | `false` | Serve GWP next to HTTP (a build without HTTP always serves it) |
