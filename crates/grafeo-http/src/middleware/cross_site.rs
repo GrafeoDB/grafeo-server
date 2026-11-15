@@ -147,6 +147,7 @@ pub async fn cross_site_middleware(
     let refusal = if is_guarded(req.method(), req.headers()) {
         check(
             req.headers(),
+            request_host(&req).as_deref(),
             state.cors_origins(),
             state.trusted_hosts(),
             state.scheme(),
@@ -227,10 +228,13 @@ fn is_guarded(method: &Method, headers: &HeaderMap) -> bool {
 }
 
 /// Whether a guarded request may go on, and if not why (see the module docs
-/// for the rule). `host_rule` says whether this server's own page also needs
-/// a trusted `Host` ([`host_rule_applies`]).
+/// for the rule). `host` is the request's host ([`request_host`]: its `Host`
+/// header, else an HTTP/2 request's `:authority`), as the untrusted-host gate
+/// and the login challenge read it. `host_rule` says whether this server's
+/// own page also needs a trusted host ([`host_rule_applies`]).
 fn check(
     headers: &HeaderMap,
+    host: Option<&str>,
     allowed_origins: &[String],
     trusted_hosts: &[String],
     scheme: &str,
@@ -247,7 +251,6 @@ fn check(
                 && credentials_checked
                 && explicit_credentials(headers))
     });
-    let host = headers.get(HOST).and_then(|v| v.to_str().ok());
     // This server's own page under the request's Host. Where the host rule
     // applies, that Host must be one this server answers on: a DNS-rebinding
     // page names its own host.
@@ -360,6 +363,7 @@ mod tests {
     ) -> bool {
         check(
             headers,
+            headers.get(HOST).and_then(|v| v.to_str().ok()),
             allowed_origins,
             trusted_hosts,
             scheme,
@@ -367,6 +371,67 @@ mod tests {
             host_rule_applies(credentials_checked, true, headers),
         )
         .is_ok()
+    }
+
+    /// An HTTP/2 request names its host in `:authority`, with no `Host`
+    /// header (an h2c proxy in front of the server sends these). The rule
+    /// reads the same host as the untrusted-host gate and the login
+    /// challenge, so the server's own page writes on a trusted name.
+    #[tokio::test]
+    async fn the_host_of_an_http2_request_is_its_authority() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        #[cfg(feature = "auth")]
+        let basic = Some((
+            "basic",
+            crate::state::AppState::new(
+                grafeo_service::ServiceState::new_in_memory_with_basic_auth(
+                    300,
+                    "admin".into(),
+                    "secret".into(),
+                ),
+                vec![],
+                grafeo_service::types::EnabledFeatures::default(),
+            ),
+        ));
+        #[cfg(not(feature = "auth"))]
+        let basic = None;
+        let states =
+            std::iter::once(("no credentials", crate::state::AppState::new_in_memory(300)))
+                .chain(basic);
+        for (server, state) in states {
+            let app = Router::new()
+                .route("/query", post(|| async { "ran" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    state,
+                    cross_site_middleware,
+                ));
+            for fetch_site in [None, Some("same-origin")] {
+                for (authority, allowed) in
+                    [("127.0.0.1:7474", true), ("rebound.example:7474", false)]
+                {
+                    let mut req = axum::http::Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("http://{authority}/query"))
+                        .header(ORIGIN, format!("http://{authority}"))
+                        .header(AUTHORIZATION, "Basic YWRtaW46c2VjcmV0");
+                    if let Some(site) = fetch_site {
+                        req = req.header("sec-fetch-site", site);
+                    }
+                    let req = req.body(Body::empty()).unwrap();
+                    assert!(req.headers().get(HOST).is_none());
+                    let status = app.clone().oneshot(req).await.unwrap().status();
+                    assert_eq!(
+                        status.is_success(),
+                        allowed,
+                        "{server}, {authority}, {fetch_site:?}: {status}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -382,11 +447,30 @@ mod tests {
             let h = headers(&pairs);
             // Token-only: no host rule, however the browser marks it.
             let token_only = host_rule_applies(true, false, &h);
-            assert_eq!(check(&h, &[], &trusted, "http", true, token_only), Ok(()));
+            assert_eq!(
+                check(
+                    &h,
+                    h.get(HOST).and_then(|v| v.to_str().ok()),
+                    &[],
+                    &trusted,
+                    "http",
+                    true,
+                    token_only
+                ),
+                Ok(())
+            );
             // A Basic server refuses it for its Host, which names the fix.
             let basic = host_rule_applies(true, true, &h);
             assert_eq!(
-                check(&h, &[], &trusted, "http", true, basic),
+                check(
+                    &h,
+                    h.get(HOST).and_then(|v| v.to_str().ok()),
+                    &[],
+                    &trusted,
+                    "http",
+                    true,
+                    basic
+                ),
                 Err(Refusal::UntrustedHost),
                 "{metadata:?}"
             );
@@ -404,7 +488,15 @@ mod tests {
             ("origin", "https://evil.example"),
         ]);
         assert_eq!(
-            check(&h, &[], &trusted, "http", true, true),
+            check(
+                &h,
+                h.get(HOST).and_then(|v| v.to_str().ok()),
+                &[],
+                &trusted,
+                "http",
+                true,
+                true
+            ),
             Err(Refusal::CrossSite)
         );
     }
