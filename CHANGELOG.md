@@ -44,7 +44,7 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 ### Dependencies
 
 - **boltr 0.3.1** (from 0.3.0): the `TCP_NODELAY` fix above.
-- **@grafeo-db/ui 0.1.0** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it). It brings the Instrument Sans and JetBrains Mono fonts (SIL OFL 1.1), served with the Studio with their licence texts under `/studio/licenses/`; the Studio requests nothing from other sites.
+- **@grafeo-db/ui 0.2.0** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it). It brings the Instrument Sans and JetBrains Mono fonts (SIL OFL 1.1), served with the Studio with their licence texts under `/studio/licenses/`; the Studio requests nothing from other sites.
 - **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
 ## [0.6.2] - 2026-11-08
