@@ -20,9 +20,9 @@ export function forgetLabelStyles(database: string): void {
 }
 
 /**
- * The label styles and colour slots of the active database. A style belongs to the label in its database, so each
- * database gets its own provider (the `key`): database B never inherits A's styles or slots. Unreadable stored
- * styles are the automatic ones.
+ * The label styles and colour slots of the active database. A style belongs to the label in its database, so the
+ * provider's scope is the database: switching loads B's styles into a fresh registry, without remounting the Studio,
+ * and B never inherits A's styles or slots. Unreadable stored styles are the automatic ones.
  */
 export function LabelStylesScope({ children }: { children: ReactNode }) {
   const { activeDatabase } = useServer();
@@ -30,7 +30,7 @@ export function LabelStylesScope({ children }: { children: ReactNode }) {
   const initial = useMemo(() => readJson<LabelStyles>(key, {}, isLabelStyles), [key]);
   const onStylesChange = useCallback((styles: LabelStyles) => writeJson(key, styles), [key]);
   return (
-    <CategoryProvider key={activeDatabase} initialStyles={initial} onStylesChange={onStylesChange}>
+    <CategoryProvider scope={activeDatabase} initialStyles={initial} onStylesChange={onStylesChange}>
       {children}
     </CategoryProvider>
   );

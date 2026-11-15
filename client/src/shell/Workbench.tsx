@@ -1,6 +1,7 @@
 import { useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Button,
+  CopyResults,
   Dialog,
   GraphView,
   Inspector,
@@ -11,6 +12,7 @@ import {
   ResultsTable,
   StateNote,
   ViewSwitch,
+  type QueryResult,
 } from "@grafeo-db/ui";
 import { useServer } from "../context/ServerContext";
 import { useWorkbench } from "../context/WorkbenchContext";
@@ -103,6 +105,11 @@ function SaveQueryDialog({ open, onClose, onSave }: { open: boolean; onClose(): 
   );
 }
 
+/** The JSON the views show and Copy JSON copies: the rows as the server sent them, not the graph shape. */
+function serverJson(result: QueryResult, rawRows: unknown[][] | null) {
+  return { columns: result.columns, rows: rawRows ?? result.rows };
+}
+
 /** The graph, or another view of the result, with the floating view switch. */
 export function MainArea() {
   const wb = useWorkbench();
@@ -120,10 +127,17 @@ export function MainArea() {
       />
     );
   } else if (mainView === "table") {
-    body = <ResultsTable result={result} onSelect={wb.setSelectedId} />;
+    // The results panel is hidden while the main area shows the table, so the copies come here
+    body = (
+      <>
+        <div className="st-main-copy">
+          <CopyResults result={result} json={serverJson(result, wb.rawRows)} />
+        </div>
+        <ResultsTable result={result} onSelect={wb.setSelectedId} />
+      </>
+    );
   } else if (mainView === "json") {
-    // The rows as the server sent them, not the graph shape the parts draw
-    body = <JsonView value={{ columns: result.columns, rows: wb.rawRows ?? result.rows }} total={result.rows.length} />;
+    body = <JsonView value={serverJson(result, wb.rawRows)} total={result.rows.length} />;
   } else {
     body = <PlanView plan={result.plan} />;
   }
@@ -161,6 +175,7 @@ export function ResultsArea() {
       onCollapsedChange={wb.setResultsCollapsed}
       // The main area shows the table itself; the panel then keeps only its warnings line
       hidden={wb.mainView === "table"}
+      json={serverJson(wb.result, wb.rawRows)}
       onSelect={wb.setSelectedId}
     />
   );

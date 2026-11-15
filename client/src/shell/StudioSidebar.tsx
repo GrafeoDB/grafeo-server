@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { SchemaList, Sidebar, SidebarItem, SidebarSection, StatusItem, type LanguageId } from "@grafeo-db/ui";
 import { useServer } from "../context/ServerContext";
@@ -23,11 +23,6 @@ const EXAMPLES: { name: string; query: string; language?: LanguageId }[] = [
   },
 ];
 
-/**
- * Switching database gives the new database its own label styles, which remounts the Studio (the package's
- * CategoryProvider loads styles on mount). The database picked by keyboard gets its focus back in the new sidebar.
- */
-let focusAfterSwitch: string | null = null;
 const RDF_EXAMPLES: { name: string; query: string; language?: LanguageId }[] = [
   { name: "All triples", query: "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 25", language: "sparql" },
   { name: "Count triples", query: "SELECT (COUNT(*) AS ?triples) WHERE { ?s ?p ?o }", language: "sparql" },
@@ -79,14 +74,6 @@ export default function StudioSidebar() {
   const workbench = useWorkbench();
   const { databases, schema, activeDatabase, activeModel } = server;
 
-  useEffect(() => {
-    const name = focusAfterSwitch;
-    focusAfterSwitch = null;
-    if (!name) return;
-    const items = document.querySelectorAll<HTMLButtonElement>(".st-databases .gu-sidebar-item");
-    for (const item of items) if (item.getAttribute("aria-label") === name) item.focus();
-  }, []);
-
   const schemaEntries = useMemo(() => {
     if (schema.state !== "ready") return { labels: [], edgeTypes: [] };
     return { labels: schema.data.labels, edgeTypes: schema.data.edge_types };
@@ -132,26 +119,19 @@ export default function StudioSidebar() {
         <ServerRows />
       </SidebarSection>
 
-      {/* The wrapper only names the section for the focus hand-over; it adds no box (display: contents) */}
-      <div className="st-databases">
-        <SidebarSection title="Databases" refused={databases.state === "refused" ? databases.refused : undefined}>
-          {databases.state === "ready"
-            ? databases.data.map((db) => (
-                <SidebarItem
-                  key={db.name}
-                  label={db.name}
-                  meta={`${fmt(db.node_count)} n · ${fmt(db.edge_count)} e`}
-                  active={db.name === activeDatabase}
-                  onClick={() => {
-                    if (db.name === activeDatabase) return;
-                    if (document.activeElement?.closest(".st-databases")) focusAfterSwitch = db.name;
-                    server.selectDatabase(db.name);
-                  }}
-                />
-              ))
-            : null}
-        </SidebarSection>
-      </div>
+      <SidebarSection title="Databases" refused={databases.state === "refused" ? databases.refused : undefined}>
+        {databases.state === "ready"
+          ? databases.data.map((db) => (
+              <SidebarItem
+                key={db.name}
+                label={db.name}
+                meta={`${fmt(db.node_count)} n · ${fmt(db.edge_count)} e`}
+                active={db.name === activeDatabase}
+                onClick={() => server.selectDatabase(db.name)}
+              />
+            ))
+          : null}
+      </SidebarSection>
       {databases.state === "failed" ? <p className="st-note">The database list did not load.</p> : null}
 
       <SidebarSection title={`Schema · ${activeDatabase}`} plain>

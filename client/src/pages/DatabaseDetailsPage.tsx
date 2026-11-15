@@ -188,6 +188,7 @@ export default function DatabaseDetailsPage() {
     {
       key: "actions",
       header: "",
+      label: "Actions",
       render: (b) => (
         <span className="st-row-actions">
           <a

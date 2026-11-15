@@ -66,7 +66,7 @@ function StudioStatus() {
 
 /**
  * The Studio's frame: the top bar, sidebar and status bar stay, and the work area is the workbench at `/` or a page
- * on every other route.
+ * on every other route, with the workbench kept behind it.
  */
 export default function StudioShell() {
   const { pathname } = useLocation();
@@ -88,6 +88,7 @@ export default function StudioShell() {
             if (!onWorkbench) navigate("/");
           }}
           onClose={wb.closeTab}
+          onRename={wb.renameTab}
           onAdd={() => {
             wb.addTab();
             if (!onWorkbench) navigate("/");
@@ -98,16 +99,14 @@ export default function StudioShell() {
     />
   );
 
-  if (!onWorkbench) {
-    return (
-      <AppShell variant="workbench" top={top} sidebar={<StudioSidebar />} status={<StudioStatus />} page={<Outlet />} />
-    );
-  }
+  // The workbench areas are always given: while a page shows they stay mounted and hidden, so the graph keeps its
+  // layout, zoom and selection, and the editor its text and undo history.
   return (
     <AppShell
       variant="workbench"
       top={top}
       sidebar={<StudioSidebar />}
+      page={onWorkbench ? undefined : <Outlet />}
       editor={<EditorArea />}
       main={<MainArea />}
       inspector={<InspectorArea />}

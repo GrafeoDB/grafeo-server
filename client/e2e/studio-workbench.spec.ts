@@ -217,7 +217,7 @@ test("Ctrl+Up and Ctrl+Down step through the history and give the draft back", a
 
 test("a write shows in the sidebar's schema without a reload", async ({ page }) => {
   await open(page);
-  const schema = page.getByRole("region", { name: "Schema · default" });
+  const schema = page.getByRole("group", { name: "Schema · default" });
   await expect(schema.getByText("Person")).toHaveCount(0);
   await run(page, SEED);
   await expect(schema.getByText("Person")).toBeVisible();
@@ -264,4 +264,65 @@ test("picking a database by keyboard keeps the focus on it", async ({ page }) =>
   await page.keyboard.press("Enter");
   await expect(page.getByText("database: hooli")).toBeVisible();
   await expect(list.getByRole("button", { name: "hooli", exact: true })).toBeFocused();
+});
+
+/** Marks a DOM node, to tell later whether it is still the same one (nothing remounted). */
+async function mark(page: Page, selector: string) {
+  await page.locator(selector).first().evaluate((el) => el.setAttribute("data-e2e-mark", "kept"));
+}
+
+test("a page visit keeps the graph as it was", async ({ page }) => {
+  await open(page);
+  await seed(page);
+  await mark(page, ".gu-graph canvas");
+  const studio = page.getByRole("list", { name: "Studio" });
+  await studio.getByRole("button", { name: "Databases", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Databases", level: 1 })).toBeVisible();
+  await studio.getByRole("button", { name: "Query", exact: true }).click();
+  // The same canvas: the graph was hidden, not drawn and laid out again.
+  await expect(page.locator('.gu-graph canvas[data-e2e-mark="kept"]')).toHaveCount(1);
+  await expect(page.getByText("2 nodes · 1 edge", { exact: false })).toBeVisible();
+});
+
+test("switching database keeps the workbench mounted", async ({ page }) => {
+  await open(page);
+  await page.request.post(`${server!.base}/db`, { data: { name: "hooli" } });
+  await page.reload();
+  await mark(page, ".gu-shell");
+  const list = page.getByRole("list", { name: "Databases" });
+  await list.getByRole("button", { name: "hooli", exact: true }).click();
+  await expect(page.getByText("database: hooli")).toBeVisible();
+  await expect(page.locator('.gu-shell[data-e2e-mark="kept"]')).toHaveCount(1);
+  await expect(page.getByRole("group", { name: "Schema · hooli" })).toBeVisible();
+});
+
+test("a query tab can be renamed, and keeps its name", async ({ page }) => {
+  await open(page);
+  const tab = page.getByRole("tablist").getByRole("tab").first();
+  await tab.dblclick();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("hooli growth");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("tablist").getByRole("tab", { name: /hooli growth/ })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("tablist").getByRole("tab", { name: /hooli growth/ })).toBeVisible();
+});
+
+test("results copy as JSON, as the server sent them, also from the table view", async ({ page, context, browserName }) => {
+  await open(page);
+  await seed(page);
+  const panel = page.locator(".gu-results");
+  await expect(panel.getByRole("button", { name: "Copy JSON" })).toBeVisible();
+  if (browserName === "chromium") {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await panel.getByRole("button", { name: "Copy JSON" }).click();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    // The server's own shape, not the graph shape the parts draw.
+    expect(copied).toContain("_labels");
+    expect(copied).toContain("Richard Hendricks");
+  }
+  // The main area showing the table hides the panel, and offers the copies itself.
+  await page.getByRole("radio", { name: "Table" }).click();
+  await expect(page.locator(".st-main-copy").getByRole("button", { name: "Copy JSON" })).toBeVisible();
+  await expect(page.locator(".st-main-copy").getByRole("button", { name: "Copy CSV" })).toBeVisible();
 });

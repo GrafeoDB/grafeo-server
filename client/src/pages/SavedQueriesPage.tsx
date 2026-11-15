@@ -42,6 +42,7 @@ export default function SavedQueriesPage() {
     {
       key: "actions",
       header: "",
+      label: "Actions",
       render: (q) => (
         <span className="st-row-actions">
           <Button size="sm" onClick={() => open(q)}>

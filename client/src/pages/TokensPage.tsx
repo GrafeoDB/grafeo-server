@@ -56,6 +56,7 @@ export default function TokensPage() {
     {
       key: "actions",
       header: "",
+      label: "Actions",
       render: (t) => (
         <span className="st-row-actions">
           <Button

@@ -27,6 +27,7 @@ export interface WorkbenchContextValue {
   selectTab(id: string): void;
   addTab(): void;
   closeTab(id: string): void;
+  renameTab(id: string, name: string): void;
 
   /** The active tab's language when the active database runs it, else that model's default. */
   language: LanguageId;
@@ -240,6 +241,15 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     [updateTabs],
   );
 
+  const renameTab = useCallback(
+    (id: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      updateTabs((prev) => ({ ...prev, tabs: prev.tabs.map((t) => (t.id === id ? { ...t, name: trimmed } : t)) }));
+    },
+    [updateTabs],
+  );
+
   const rdf = isRdfModel(activeModel);
   const languages = useMemo(() => {
     const valid = rdf ? RDF_LANGUAGES : LPG_LANGUAGES;
@@ -391,6 +401,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       selectTab,
       addTab,
       closeTab,
+      renameTab,
       language,
       languages,
       setLanguage,
@@ -416,7 +427,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       openQuery,
     }),
     [
-      tabState.tabs, activeTab, text, setText, selectTab, addTab, closeTab, language, languages, setLanguage, run,
+      tabState.tabs, activeTab, text, setText, selectTab, addTab, closeTab, renameTab, language, languages, setLanguage, run,
       explainFn, running, result, raw, error, refused, lastRun, selectedId, mainView, resultsCollapsed, history,
       historyStep, saved, saveQuery, removeSaved, openQuery,
     ],

@@ -37,6 +37,14 @@ body {
   overflow: auto;
 }
 
+/* Copy CSV / Copy JSON over the table in the main area, level with the view switch */
+.st-main-copy {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 1;
+}
+
 .st-editor {
   display: contents;
 }
@@ -71,8 +79,7 @@ body {
 }
 
 /* History rows show the query as written: mono, no ligatures (an arrow stays "->") */
-.st-history,
-.st-databases {
+.st-history {
   display: contents;
 }
 
