@@ -167,7 +167,10 @@ test.describe("Studio behind Basic auth (#90)", () => {
 test.describe("Studio on other authentication modes", () => {
   test("loads without authentication", async ({ page }) => {
     const base = await start({ kind: "none" });
-    await page.goto(`${base}/studio/`);
+    const response = await page.goto(`${base}/studio/`);
+    // No other site may frame the Studio (it would run with the browser's login under another page).
+    expect(response?.headers()["x-frame-options"]).toBe("DENY");
+    expect(response?.headers()["content-security-policy"]).toBe("frame-ancestors 'none'");
     await expectStudioLoaded(page);
   });
 

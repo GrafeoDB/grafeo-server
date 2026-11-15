@@ -49,6 +49,17 @@ fn resolve_target(params: &GraphStoreParams) -> Result<GraphTarget, ApiError> {
         if iri.is_empty() {
             return Err(ApiError::bad_request("?graph= parameter must not be empty"));
         }
+        // The IRI goes into the statement between angle brackets, so it may
+        // hold only what SPARQL's IRIREF allows: no spaces, controls or
+        // <>"{}|^`\, which could end the IRI and add statement text.
+        if iri
+            .chars()
+            .any(|c| c <= ' ' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\'))
+        {
+            return Err(ApiError::bad_request(
+                r#"?graph= must be an IRI without spaces or any of <>"{}|^`\"#,
+            ));
+        }
         Ok(GraphTarget::Named(iri.clone()))
     } else {
         Err(ApiError::bad_request(
@@ -99,7 +110,11 @@ pub async fn graph_store_get(
         Some("sparql"),
         None,
         timeout,
-        state.service().remote_policy(),
+        grafeo_service::remote::RemotePolicy {
+            // A read: never a write, whoever makes the browser send it.
+            read_only: true,
+            ..state.service().remote_policy()
+        },
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -159,7 +174,11 @@ pub async fn graph_store_head(
         Some("sparql"),
         None,
         timeout,
-        state.service().remote_policy(),
+        grafeo_service::remote::RemotePolicy {
+            // A read: never a write, whoever makes the browser send it.
+            read_only: true,
+            ..state.service().remote_policy()
+        },
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

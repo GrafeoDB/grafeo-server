@@ -20,7 +20,8 @@
 //! 2. Any other `Sec-Fetch-Site` (`same-site`, `cross-site`) passes only for
 //!    an `Origin` listed in `--cors-origins` (or `*`).
 //! 3. Without `Sec-Fetch-Site` (older browsers), an `Origin` passes when it
-//!    is listed or names the request's own `Host` on the effective scheme.
+//!    is listed, or names the request's own `Host` on the effective scheme
+//!    and that `Host` is trusted (the DNS-rebinding case of rule 1).
 //!
 //! Reads (GET, HEAD) other than WebSocket upgrades pass: CORS keeps a foreign
 //! page from reading their answers. Preflights (OPTIONS) are left to the CORS
@@ -118,9 +119,17 @@ fn is_allowed(
             host.is_some_and(|h| host_is_trusted(h, trusted_hosts))
         }
         Some(_) => listed,
+        // Without fetch metadata (browsers before it, or a non-browser
+        // client with an Origin) the Origin must name this request's Host,
+        // and that Host must be one this server answers on: a DNS-rebinding
+        // page names its own host in both.
         None => match origin {
             None => true,
-            Some(o) => listed || names_host(o, host, scheme),
+            Some(o) => {
+                listed
+                    || (names_host(o, host, scheme)
+                        && host.is_some_and(|h| host_is_trusted(h, trusted_hosts)))
+            }
         },
     }
 }

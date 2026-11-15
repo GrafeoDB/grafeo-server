@@ -430,3 +430,60 @@ async fn a_sparql_update_over_get_changes_nothing() {
     let status = sparql_get(&base, "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1", &[]).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_rebinding_page_without_fetch_metadata_is_refused() {
+    // A DNS-rebinding page names its own host in Origin and Host alike. With
+    // Sec-Fetch-Site the trusted-host check catches it; a browser without
+    // fetch metadata is caught the same way.
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap();
+    let host = format!("rebound.example:{port}");
+    let origin = format!("http://{host}");
+    let (status, body) = send(
+        &base,
+        Method::POST,
+        "/db",
+        &[("host", host.as_str()), ("origin", origin.as_str())],
+    )
+    .await;
+    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+}
+
+#[cfg(feature = "sparql")]
+#[tokio::test]
+async fn a_graph_iri_cannot_end_itself_and_add_statement_text() {
+    // The graph store writes the ?graph= IRI between angle brackets; anything
+    // that could close it is refused on every method before a statement runs.
+    let base = spawn_default().await;
+    for iri in [
+        "http://a> } ; DROP ALL ; INSERT DATA { <http://b",
+        "http://a b",
+        "http://a\"",
+        "http://a{",
+        "http://a\\",
+    ] {
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::DELETE,
+            Method::PUT,
+            Method::POST,
+        ] {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/db/default/graph-store"),
+                &[("graph", iri)],
+            )
+            .unwrap();
+            let status = Client::new()
+                .request(method.clone(), url)
+                .header("content-type", "application/n-triples")
+                .body("<http://s> <http://p> <http://o> .")
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {iri}");
+        }
+    }
+}
