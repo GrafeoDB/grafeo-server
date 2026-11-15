@@ -20,10 +20,12 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 
 ### Fixed
 
-- **The Studio behind Basic auth loads its data wherever it is opened** (#90): opened at `/studio/` (a bookmark, a restored tab), it showed no databases, because the browser's login covered only `/studio/` and the Studio's API calls got a 401 it could not answer. An API 401 now carries the Studio's Basic challenge for same-origin requests when Basic auth is configured, and a refused request shows "Not signed in" or "No access" instead of zeros.
+- **The Studio behind Basic auth loads its data wherever it is opened** (#90): opened at `/studio/` (a bookmark, a restored tab), it showed no databases, because the browser's login covered only `/studio/` and the Studio's API calls got a 401 it could not answer. An API 401 now carries the Studio's Basic challenge for the Studio's own requests when Basic auth is configured, also on a plain-HTTP address where browsers send no fetch metadata, and a refused request shows "Not signed in" or "No access" instead of zeros.
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
 - **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
 - **A schema name is always one name**: the schema routes (`POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}`) and GWP's schema calls wrote the name into the statement unquoted, so a name with a space or a backtick failed as a syntax error and a crafted one ended in a 500. Names are now quoted; spaces, backticks and keywords stay part of the name.
+- **The Studio opens on a plain-HTTP address other than localhost**: reached over HTTP by a LAN address or a host name, it showed a blank page.
+- **A token-only server no longer offers a Basic login on the Studio page**: the page still answers 401, now without a user name and password prompt that could never get through.
 - **The Studio draws paths and the graph inside lists and maps**: a returned path (`RETURN p`) or a `collect(n)` showed in the table only.
 - **The Studio keeps the active database's sidebar current**: a write shows in the schema and the node and edge counts without a reload.
 - **GWP reports a permission refusal as GQLSTATUS 42501**: it was 42001 (syntax error), so a client could not tell a refused statement from a mistake in it.
@@ -35,7 +37,7 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 ### Dependencies
 
 - **boltr 0.3.1** (from 0.3.0): the `TCP_NODELAY` fix above.
-- **@grafeo-db/ui 0.1.0** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it).
+- **@grafeo-db/ui 0.1.0** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it). It brings the Instrument Sans and JetBrains Mono fonts (SIL OFL 1.1), served with the Studio with their licence texts under `/studio/licenses/`; the Studio requests nothing from other sites.
 - **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
 ## [0.6.2] - 2026-11-08
