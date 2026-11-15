@@ -49,6 +49,17 @@ fn resolve_target(params: &GraphStoreParams) -> Result<GraphTarget, ApiError> {
         if iri.is_empty() {
             return Err(ApiError::bad_request("?graph= parameter must not be empty"));
         }
+        // The IRI goes into the statement between angle brackets, so it may
+        // hold only what SPARQL's IRIREF allows: no spaces, controls or
+        // <>"{}|^`\, which could end the IRI and add statement text.
+        if iri
+            .chars()
+            .any(|c| c <= ' ' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\'))
+        {
+            return Err(ApiError::bad_request(
+                r#"?graph= must be an IRI without spaces or any of <>"{}|^`\"#,
+            ));
+        }
         Ok(GraphTarget::Named(iri.clone()))
     } else {
         Err(ApiError::bad_request(
@@ -89,7 +100,7 @@ pub async fn graph_store_get(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let result = QueryService::execute_with_audit(
         state.databases(),
@@ -99,7 +110,11 @@ pub async fn graph_store_get(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        grafeo_service::remote::RemotePolicy {
+            // A read: never a write, whoever makes the browser send it.
+            read_only: true,
+            ..state.service().remote_policy()
+        },
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -148,7 +163,7 @@ pub async fn graph_store_head(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     // If the query succeeds, the graph exists (or is the default graph).
     let result = QueryService::execute_with_audit(
@@ -159,7 +174,11 @@ pub async fn graph_store_head(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        grafeo_service::remote::RemotePolicy {
+            // A read: never a write, whoever makes the browser send it.
+            read_only: true,
+            ..state.service().remote_policy()
+        },
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -218,8 +237,8 @@ pub async fn graph_store_put(
     };
 
     let timeout = state.effective_timeout(None);
-    let read_only = state.service().is_query_read_only();
-    let identity = auth.identity(read_only);
+    let policy = state.service().remote_policy();
+    let identity = auth.identity();
 
     QueryService::execute_with_audit(
         state.databases(),
@@ -229,7 +248,7 @@ pub async fn graph_store_put(
         Some("sparql"),
         None,
         timeout,
-        read_only,
+        policy,
         Some(identity.clone()),
         state.audit_ref("http", auth.actor()),
     )
@@ -246,7 +265,7 @@ pub async fn graph_store_put(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity),
             state.audit_ref("http", auth.actor()),
         )
@@ -274,8 +293,8 @@ pub async fn graph_store_post(
 ) -> Result<Response, ApiError> {
     auth.check_db_access(&db_name)?;
     let parsed = parse_body_to_ntriples(&headers, &body)?;
-    let read_only = state.service().is_query_read_only();
-    let identity = auth.identity(read_only);
+    let policy = state.service().remote_policy();
+    let identity = auth.identity();
 
     // No target params: create a new named graph.
     if params.default.is_none() && params.graph.is_none() {
@@ -291,7 +310,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity.clone()),
             state.audit_ref("http", auth.actor()),
         )
@@ -308,7 +327,7 @@ pub async fn graph_store_post(
                 Some("sparql"),
                 None,
                 timeout,
-                read_only,
+                policy,
                 Some(identity),
                 state.audit_ref("http", auth.actor()),
             )
@@ -338,7 +357,7 @@ pub async fn graph_store_post(
             Some("sparql"),
             None,
             timeout,
-            read_only,
+            policy,
             Some(identity),
             state.audit_ref("http", auth.actor()),
         )
@@ -368,7 +387,7 @@ pub async fn graph_store_delete(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let result = QueryService::execute_with_audit(
         state.databases(),
@@ -378,7 +397,7 @@ pub async fn graph_store_delete(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

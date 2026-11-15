@@ -1,7 +1,8 @@
 export interface QueryRequest {
   query: string;
   params?: Record<string, unknown>;
-  language?: "gql" | "cypher" | "gremlin" | "graphql" | "sparql";
+  /** `sql` is SQL/PGQ (the server also takes `sql-pgq`). */
+  language?: "gql" | "cypher" | "gremlin" | "graphql" | "sparql" | "sql";
   database?: string;
   timeout_ms?: number;
 }
@@ -11,6 +12,8 @@ export interface QueryResponse {
   rows: unknown[][];
   execution_time_ms?: number;
   rows_scanned?: number;
+  /** What a write changed; only on statements that write. */
+  counters?: Record<string, number>;
 }
 
 export interface TransactionResponse {

@@ -15,6 +15,7 @@ fn service(data_dir: &str) -> grafeo_service::ServiceState {
     grafeo_service::ServiceState::new(&grafeo_service::ServiceConfig {
         data_dir: Some(data_dir.to_string()),
         read_only: false,
+        allow_external_access: false,
         session_ttl: 300,
         query_timeout: 30,
         rate_limit: 0,

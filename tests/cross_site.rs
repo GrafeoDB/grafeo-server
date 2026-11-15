@@ -80,6 +80,13 @@ fn is_cross_site_refusal(status: StatusCode, body: &Value) -> bool {
     status == StatusCode::FORBIDDEN && body["error"] == "cross_site_request"
 }
 
+/// Refused by either rule: a server without credentials refuses an untrusted
+/// host name before the cross-site rule looks at the request.
+fn is_rebinding_refusal(status: StatusCode, body: &Value) -> bool {
+    status == StatusCode::FORBIDDEN
+        && (body["error"] == "cross_site_request" || body["error"] == "untrusted_host")
+}
+
 async fn send(
     base: &str,
     method: Method,
@@ -336,7 +343,7 @@ async fn same_origin_with_an_untrusted_host_is_refused() {
         ],
     )
     .await;
-    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+    assert!(is_rebinding_refusal(status, &body), "{status} {body}");
 }
 
 #[tokio::test]
@@ -371,4 +378,464 @@ async fn a_refused_cross_site_request_still_carries_a_request_id() {
         resp.headers().get("x-request-id").is_some(),
         "the 403 must carry an X-Request-Id header"
     );
+}
+
+/// A SPARQL statement run by `GET /db/{name}/sparql` with `headers`: its status.
+#[cfg(feature = "sparql")]
+async fn sparql_get(base: &str, statement: &str, headers: &[(&str, &str)]) -> StatusCode {
+    let url = reqwest::Url::parse_with_params(
+        &format!("{base}/db/default/sparql"),
+        &[("query", statement)],
+    )
+    .unwrap();
+    let mut req = Client::new().get(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    req.send().await.unwrap().status()
+}
+
+#[cfg(feature = "sparql")]
+async fn triple_count(base: &str) -> Value {
+    let resp = Client::new()
+        .post(format!("{base}/db/default/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/json")
+        .body("SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body: Value = resp.json().await.unwrap();
+    body["rows"][0][0].clone()
+}
+
+#[cfg(feature = "sparql")]
+#[tokio::test]
+async fn a_sparql_update_over_get_changes_nothing() {
+    // A GET is a read, so the cross-site guard lets it through: a page on any
+    // site can make a browser send one (an image, a link), cached Basic
+    // credentials included. A SPARQL GET therefore runs read-only, whoever
+    // sends it.
+    let base = spawn_default().await;
+    let update = "INSERT DATA { <http://a> <http://b> <http://c> }";
+    for headers in [
+        &[("origin", EVIL), ("sec-fetch-site", "cross-site")][..],
+        &[("sec-fetch-site", "cross-site")][..],
+        &[][..],
+    ] {
+        let status = sparql_get(&base, update, headers).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+    }
+    assert_eq!(
+        triple_count(&base).await,
+        serde_json::json!(0),
+        "nothing was written"
+    );
+
+    // Reads over GET still answer.
+    let status = sparql_get(&base, "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_rebinding_page_without_fetch_metadata_is_refused() {
+    // A DNS-rebinding page names its own host in Origin and Host alike. With
+    // Sec-Fetch-Site the trusted-host check catches it; a browser without
+    // fetch metadata is caught the same way.
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap();
+    let host = format!("rebound.example:{port}");
+    let origin = format!("http://{host}");
+    let (status, body) = send(
+        &base,
+        Method::POST,
+        "/db",
+        &[("host", host.as_str()), ("origin", origin.as_str())],
+    )
+    .await;
+    assert!(is_rebinding_refusal(status, &body), "{status} {body}");
+}
+
+#[cfg(feature = "sparql")]
+#[tokio::test]
+async fn a_graph_iri_cannot_end_itself_and_add_statement_text() {
+    // The graph store writes the ?graph= IRI between angle brackets; anything
+    // that could close it is refused on every method before a statement runs.
+    let base = spawn_default().await;
+    for iri in [
+        "http://a> } ; DROP ALL ; INSERT DATA { <http://b",
+        "http://a b",
+        "http://a\"",
+        "http://a{",
+        "http://a\\",
+    ] {
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::DELETE,
+            Method::PUT,
+            Method::POST,
+        ] {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/db/default/graph-store"),
+                &[("graph", iri)],
+            )
+            .unwrap();
+            let status = Client::new()
+                .request(method.clone(), url)
+                .header("content-type", "application/n-triples")
+                .body("<http://s> <http://p> <http://o> .")
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {iri}");
+        }
+    }
+}
+
+// --cors-origins '*': any origin may read (CORS, never with credentials), but
+// a write from another origin passes only with credentials the page set
+// itself. A browser attaches a cached Basic login on its own, so that is not
+// one; nor is no credential at all.
+
+#[cfg(feature = "auth")]
+async fn spawn_with_cors_and_token(origins: &[&str], token: &str) -> String {
+    let state = grafeo_server::AppState::new(
+        grafeo_server::grafeo_service::ServiceState::new_in_memory_with_auth(300, token.into()),
+        origins.iter().map(|o| (*o).to_string()).collect(),
+        grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+    );
+    serve(state).await
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_wildcard_origin_writes_only_with_explicit_credentials() {
+    let base = spawn_with_cors_and_token(&["*"], "tok").await;
+    let cross = [("origin", EVIL), ("sec-fetch-site", "cross-site")];
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut h = cross.to_vec();
+        h.extend_from_slice(extra);
+        h
+    };
+
+    // Ambient: a cached Basic login, nothing, or a key with a Basic login
+    // riding along (the auth middleware would fall back to it).
+    for ambient in [
+        &[][..],
+        &[("authorization", "Basic YWRtaW46c2VjcmV0")][..],
+        &[
+            ("x-api-key", "wrong"),
+            ("authorization", "Basic YWRtaW46c2VjcmV0"),
+        ][..],
+        &[("x-api-key", "")][..],
+    ] {
+        let (status, body) = send(&base, Method::POST, "/query", &with(ambient)).await;
+        assert!(
+            is_cross_site_refusal(status, &body),
+            "{ambient:?}: {status} {body}"
+        );
+    }
+
+    // Explicit: a bearer token or an API key, which need a preflight that '*'
+    // answers, and which a browser never sends on its own.
+    for explicit in [("authorization", "Bearer tok"), ("x-api-key", "tok")] {
+        let (status, body) = send(&base, Method::POST, "/query", &with(&[explicit])).await;
+        assert!(
+            !is_cross_site_refusal(status, &body),
+            "{explicit:?}: {status} {body}"
+        );
+        // Past the guard and the auth check (the empty body is then a 422).
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{explicit:?}: {body}");
+    }
+
+    // Without fetch metadata the rule is the same.
+    let (status, body) = send(&base, Method::POST, "/query", &[("origin", EVIL)]).await;
+    assert!(
+        is_cross_site_refusal(status, &body),
+        "no metadata: {status} {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_wildcard_origin_cannot_write_to_a_server_without_credentials() {
+    // There a token proves nothing: any page could make one up.
+    let base = spawn_with_cors(&["*"]).await;
+    for header in [("authorization", "Bearer junk"), ("x-api-key", "junk")] {
+        let (status, body) = send(
+            &base,
+            Method::POST,
+            "/query",
+            &[("origin", EVIL), ("sec-fetch-site", "cross-site"), header],
+        )
+        .await;
+        assert!(
+            is_cross_site_refusal(status, &body),
+            "{header:?}: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_page_on_an_ip_address_writes_to_its_own_server() {
+    // The Studio opened by LAN address: same-origin, Host an IP address that
+    // is neither loopback nor --host. An IP is never a rebinding name.
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let host = format!("192.168.1.20:{port}");
+    let origin = format!("http://{host}");
+    for site in [Some("same-origin"), None] {
+        let mut headers = vec![("host", host.as_str()), ("origin", origin.as_str())];
+        if let Some(site) = site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert!(
+            !is_rebinding_refusal(status, &body),
+            "{site:?}: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_wildcard_origin_cannot_open_the_websocket() {
+    // A browser can't set Authorization on a WebSocket, so a cross-origin
+    // upgrade only ever carries a cached login: refused with '*' too.
+    let base = spawn_with_cors(&["*"]).await;
+    let result = tokio_tungstenite::connect_async(ws_request(&base, &[("origin", EVIL)])).await;
+    assert!(ws_refused_with_403(result));
+}
+
+// A server without credentials answers only on host names it trusts: a
+// DNS-rebinding page reaches it under the page's own name, and could read
+// whatever a GET returns.
+
+async fn get_with_host(base: &str, path: &str, host: &str) -> (StatusCode, Value) {
+    let resp = Client::new()
+        .get(format!("{base}{path}"))
+        .header("host", host)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_server_without_credentials_refuses_an_untrusted_host_name() {
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let rebound = format!("rebound.example:{port}");
+    let (status, body) = get_with_host(&base, "/db", &rebound).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "untrusted_host", "{body}");
+
+    // Loopback names, and any IP literal (a rebinding page always carries a
+    // DNS name), keep working; so do the probes, whatever the Host.
+    for host in [
+        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        format!("[::1]:{port}"),
+        format!("192.168.1.20:{port}"),
+        format!("10.0.0.7:{port}"),
+    ] {
+        let (status, body) = get_with_host(&base, "/db", &host).await;
+        assert_eq!(status, StatusCode::OK, "{host}: {body}");
+    }
+    for probe in ["/health", "/ready"] {
+        let (status, _) = get_with_host(&base, probe, &rebound).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{probe}");
+    }
+}
+
+#[tokio::test]
+async fn a_trusted_host_name_and_a_server_with_credentials_are_unaffected() {
+    // A name listed in --trusted-hosts is answered.
+    let state = grafeo_server::AppState::new_in_memory(300)
+        .with_trusted_hosts(vec!["graph.internal".into()], "http");
+    let base = serve(state).await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let (status, body) = get_with_host(&base, "/db", &format!("graph.internal:{port}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // With credentials, a rebinding page has no login for its own name, so
+    // the host rule does not apply.
+    #[cfg(feature = "auth")]
+    {
+        let state = grafeo_server::AppState::new(
+            grafeo_server::grafeo_service::ServiceState::new_in_memory_with_auth(300, "tok".into()),
+            vec![],
+            grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+        );
+        let base = serve(state).await;
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", format!("proxy.example:{port}"))
+            .bearer_auth("tok")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Basic logins only on trusted names
+// ---------------------------------------------------------------------------
+//
+// A browser keeps a Basic login per origin, and gets one only by answering a
+// challenge for that origin. A server that challenged under any Host gave a
+// DNS-rebinding page its own login prompt; once a user typed the password
+// there, the page held a login for its own name. So a Basic server challenges,
+// and takes Basic writes from browser pages, only on its trusted names
+// (loopback, `--host`, IP addresses, `--trusted-hosts`); a token-only server
+// needs no host rule, since a page can't make a token up.
+
+#[cfg(feature = "auth")]
+const BASIC: &str = "Basic YWRtaW46c2VjcmV0"; // admin:secret
+
+#[cfg(feature = "auth")]
+async fn spawn_basic(trusted: &[&str]) -> (String, String) {
+    let state = grafeo_server::AppState::new(
+        grafeo_server::grafeo_service::ServiceState::new_in_memory_with_basic_auth(
+            300,
+            "admin".into(),
+            "secret".into(),
+        ),
+        vec![],
+        grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+    )
+    .with_trusted_hosts(trusted.iter().map(|h| (*h).to_string()).collect(), "http");
+    let base = serve(state).await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    (base, port)
+}
+
+/// The Studio's own write from a page at `http://{host}`: plain HTTP to a
+/// name, so the browser sends no fetch metadata, with the Studio's marker
+/// and a Basic login.
+#[cfg(feature = "auth")]
+fn studio_write<'a>(host: &'a str, origin: &'a str) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("host", host),
+        ("origin", origin),
+        ("x-grafeo-studio", "1"),
+        ("authorization", BASIC),
+    ]
+}
+
+/// Whether a response names the flag that fixes it.
+#[cfg(feature = "auth")]
+fn names_trusted_hosts(body: &Value) -> bool {
+    body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("--trusted-hosts"))
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_basic_server_on_an_untrusted_name_offers_no_login_and_takes_no_write() {
+    let (base, port) = spawn_basic(&[]).await;
+    let host = format!("grafeo.lan:{port}");
+    let origin = format!("http://{host}");
+
+    // No challenge, so no prompt for the page's name: plain HTTP (the marker)
+    // and a secure origin (fetch metadata) alike, and the 401 names the fix.
+    for fetch_site in [None, Some("same-origin")] {
+        let mut req = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", &host)
+            .header("x-grafeo-studio", "1");
+        if let Some(site) = fetch_site {
+            req = req.header("sec-fetch-site", site);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{fetch_site:?}");
+        assert!(
+            resp.headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_none(),
+            "{fetch_site:?}: no login prompt on an untrusted name"
+        );
+        let body: Value = resp.json().await.unwrap();
+        assert!(names_trusted_hosts(&body), "{fetch_site:?}: {body}");
+    }
+
+    // A browser page's Basic write is refused, also with the right login (a
+    // phished one), and the refusal names the fix.
+    for fetch_site in [None, Some("same-origin")] {
+        let mut headers = studio_write(&host, &origin);
+        if let Some(site) = fetch_site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{fetch_site:?}: {body}");
+        assert_eq!(body["error"], "untrusted_host", "{fetch_site:?}: {body}");
+        assert!(names_trusted_hosts(&body), "{fetch_site:?}: {body}");
+    }
+
+    // Non-browser clients (no Origin) are unaffected on any name.
+    let (status, body) = send(
+        &base,
+        Method::POST,
+        "/query",
+        &[("host", host.as_str()), ("authorization", BASIC)],
+    )
+    .await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_basic_server_on_a_trusted_name_or_an_ip_offers_the_login_and_writes() {
+    let (base, port) = spawn_basic(&["grafeo.lan"]).await;
+    for host in [format!("grafeo.lan:{port}"), format!("192.168.1.20:{port}")] {
+        let origin = format!("http://{host}");
+
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", &host)
+            .header("x-grafeo-studio", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{host}");
+        assert!(
+            resp.headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_some(),
+            "{host}: the Studio's login prompt"
+        );
+
+        let (status, body) =
+            send(&base, Method::POST, "/query", &studio_write(&host, &origin)).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{host}: {body}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{host}: {body}");
+    }
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_token_only_server_takes_a_page_write_on_any_name() {
+    let base = spawn_with_cors_and_token(&[], "tok").await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let host = format!("grafeo.lan:{port}");
+    let origin = format!("http://{host}");
+    for fetch_site in [None, Some("same-origin")] {
+        let mut headers = vec![
+            ("host", host.as_str()),
+            ("origin", origin.as_str()),
+            ("authorization", "Bearer tok"),
+        ];
+        if let Some(site) = fetch_site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{fetch_site:?}: {body}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{fetch_site:?}: {body}");
+    }
 }

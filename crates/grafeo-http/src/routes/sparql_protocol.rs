@@ -63,7 +63,11 @@ pub struct SparqlGetParams {
 
 /// `GET /db/{name}/sparql?query=...`
 ///
-/// Executes a SPARQL query (read-only). Updates via GET return 400.
+/// Executes a SPARQL query, read-only: the statement runs as a read-only
+/// identity, so an update (`INSERT DATA`, `DELETE`, `CLEAR`, `LOAD` into the
+/// store) is refused with 403 and changes nothing; updates are POSTed. A GET
+/// is a read: the cross-site guard lets it through, and a page on any site can
+/// make a browser send one (an image, a link) with cached Basic credentials.
 pub async fn sparql_get(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
@@ -73,8 +77,12 @@ pub async fn sparql_get(
 ) -> Result<Response, ApiError> {
     auth.check_db_access(&db_name)?;
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
+    let read_only = grafeo_service::remote::RemotePolicy {
+        read_only: true,
+        ..state.service().remote_policy()
+    };
     let result = QueryService::execute_with_audit(
         state.databases(),
         state.metrics(),
@@ -83,7 +91,7 @@ pub async fn sparql_get(
         Some("sparql"),
         None,
         timeout,
-        state.service().is_query_read_only(),
+        read_only,
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )
@@ -122,9 +130,8 @@ pub async fn sparql_post(
         .next()
         .unwrap_or(content_type)
         .trim();
-
-    let read_only = state.service().is_query_read_only();
-    let identity = auth.identity(read_only);
+    let policy = state.service().remote_policy();
+    let identity = auth.identity();
 
     let statement = match base_ct {
         CT_SPARQL_QUERY | CT_SPARQL_UPDATE => String::from_utf8(body.to_vec())
@@ -156,7 +163,7 @@ pub async fn sparql_post(
                 Some("sparql"),
                 params,
                 timeout,
-                read_only,
+                policy,
                 Some(identity),
                 state.audit_ref("http", auth.actor()),
             )
@@ -183,7 +190,7 @@ pub async fn sparql_post(
         Some("sparql"),
         None,
         timeout,
-        read_only,
+        policy,
         Some(identity),
         state.audit_ref("http", auth.actor()),
     )

@@ -152,10 +152,10 @@ impl BoltBackend for GrafeoBackend {
         let engine_session = if self.requires_auth() {
             None
         } else {
-            let ro = self.state.is_query_read_only();
+            let policy = self.state.remote_policy();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    grafeo_service::remote::remote_session(&entry.db(), None, ro)
+                    grafeo_service::remote::remote_session(&entry.db(), None, policy)
                 })
                 .await
                 .map_err(BoltError::backend)?,
@@ -213,10 +213,10 @@ impl BoltBackend for GrafeoBackend {
                         .ok_or_else(|| BoltError::Session("database not found".into()))?
                 };
 
-                let ro = self.state.is_query_read_only();
+                let policy = self.state.remote_policy();
                 let id_clone = identity.clone();
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    grafeo_service::remote::remote_session(&entry.db(), Some(id_clone), ro)
+                    grafeo_service::remote::remote_session(&entry.db(), Some(id_clone), policy)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -275,7 +275,7 @@ impl BoltBackend for GrafeoBackend {
                     .get_available(&db_name)
                     .map_err(|e| BoltError::Session(e.to_string()))?;
 
-                let ro = self.state.is_query_read_only();
+                let policy = self.state.remote_policy();
 
                 // Reuse stored identity when switching databases.
                 #[cfg(feature = "auth")]
@@ -288,7 +288,7 @@ impl BoltBackend for GrafeoBackend {
                 #[cfg(not(feature = "auth"))]
                 let identity = None;
                 let engine_session = tokio::task::spawn_blocking(move || {
-                    grafeo_service::remote::remote_session(&entry.db(), identity, ro)
+                    grafeo_service::remote::remote_session(&entry.db(), identity, policy)
                 })
                 .await
                 .map_err(BoltError::backend)?;
@@ -309,7 +309,7 @@ impl BoltBackend for GrafeoBackend {
             .get("default")
             .ok_or_else(|| BoltError::Session("default database not found".into()))?;
 
-        let ro = self.state.is_query_read_only();
+        let policy = self.state.remote_policy();
         let session_arc = self.get_session(session)?;
 
         // A session that has not authenticated stays without an engine
@@ -329,7 +329,7 @@ impl BoltBackend for GrafeoBackend {
         #[cfg(not(feature = "auth"))]
         let identity = None;
         let engine_session = tokio::task::spawn_blocking(move || {
-            grafeo_service::remote::remote_session(&entry.db(), identity, ro)
+            grafeo_service::remote::remote_session(&entry.db(), identity, policy)
         })
         .await
         .map_err(BoltError::backend)?;

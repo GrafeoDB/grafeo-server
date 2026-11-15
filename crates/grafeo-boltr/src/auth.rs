@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use boltr::error::BoltError;
-use boltr::server::{AuthCredentials, AuthInfo, AuthValidator};
+use boltr::server::{AuthContext, AuthCredentials, AuthInfo, AuthValidator};
 use dashmap::DashMap;
 use grafeo_service::auth::{AuthProviderTrait, TokenInfo};
 use uuid::Uuid;
@@ -36,12 +36,14 @@ impl BoltrAuthValidator {
         }
     }
 
-    fn fail(&self, message: impl Into<String>) -> BoltError {
+    /// Refuses a LOGON, recording it in the audit log with the client's IP.
+    fn fail(&self, context: &AuthContext, message: impl Into<String>) -> BoltError {
         let message = message.into();
         if let Some(audit) = &self.audit {
             audit.log(
                 grafeo_service::audit::AuditEvent::new("auth_failure")
                     .transport("bolt")
+                    .source_ip(Some(context.peer_addr.ip()))
                     .detail(&message),
             );
         }
@@ -51,13 +53,17 @@ impl BoltrAuthValidator {
 
 #[async_trait::async_trait]
 impl AuthValidator for BoltrAuthValidator {
-    async fn validate(&self, credentials: &AuthCredentials) -> Result<AuthInfo, BoltError> {
+    async fn validate(
+        &self,
+        credentials: &AuthCredentials,
+        context: &AuthContext,
+    ) -> Result<AuthInfo, BoltError> {
         let token_info = match credentials.scheme.as_str() {
             "bearer" => {
                 let token = credentials.credentials.as_deref().unwrap_or("");
                 self.provider
                     .check_bearer(token)
-                    .ok_or_else(|| self.fail("invalid bearer token"))?
+                    .ok_or_else(|| self.fail(context, "invalid bearer token"))?
             }
             "basic" => {
                 let user = credentials.principal.as_deref().unwrap_or("");
@@ -70,14 +76,14 @@ impl AuthValidator for BoltrAuthValidator {
                         scope: grafeo_service::auth::TokenScope::default(),
                     }
                 } else {
-                    return Err(self.fail("invalid credentials"));
+                    return Err(self.fail(context, "invalid credentials"));
                 }
             }
             "none" => {
-                return Err(self.fail("authentication required"));
+                return Err(self.fail(context, "authentication required"));
             }
             other => {
-                return Err(self.fail(format!("unsupported auth scheme: {other}")));
+                return Err(self.fail(context, format!("unsupported auth scheme: {other}")));
             }
         };
 

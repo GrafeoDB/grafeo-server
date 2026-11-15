@@ -175,14 +175,11 @@ impl Node {
             // ----- Maelstrom lifecycle -----
             "init" => {
                 self.id = body["node_id"].as_str().unwrap_or("").to_string();
-                self.node_ids = body["node_ids"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                self.node_ids = body["node_ids"].as_array().map_or_default(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
                 self.reply(&src, req_msg_id, json!({"type": "init_ok"}), &mut out);
             }
 

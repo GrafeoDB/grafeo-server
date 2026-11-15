@@ -8,19 +8,33 @@
 //! it sees the 401 response and can mutate headers before the client receives
 //! it.
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
-pub async fn studio_www_authenticate(req: Request, next: Next) -> Response {
+/// The Studio's Basic challenge. The API's 401 for a same-origin browser
+/// request carries the same realm (`auth_middleware`), so a browser that
+/// logged in on a Studio page reuses that login for the Studio's API calls.
+pub const STUDIO_CHALLENGE: &str = r#"Basic realm="Grafeo Studio", charset="UTF-8""#;
+
+/// Adds the Studio's challenge to a Studio page's 401, on a host name the
+/// server answers on only: a DNS-rebinding page under its own name gets no
+/// login prompt (see `auth_middleware`).
+pub async fn studio_www_authenticate(
+    State(state): State<crate::state::AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let answered = super::cross_site::request_host_is_answered(&req, state.trusted_hosts());
     let mut response = next.run(req).await;
-    if response.status() == StatusCode::UNAUTHORIZED
+    if answered
+        && response.status() == StatusCode::UNAUTHORIZED
         && !response.headers().contains_key(header::WWW_AUTHENTICATE)
     {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static(r#"Basic realm="Grafeo Studio", charset="UTF-8""#),
+            HeaderValue::from_static(STUDIO_CHALLENGE),
         );
     }
     response
@@ -34,13 +48,24 @@ pub async fn studio_www_authenticate(req: Request, next: Next) -> Response {
 /// When auth is not configured at runtime, `auth_middleware` is a
 /// pass-through, so this function is safe to call unconditionally
 /// whenever the `auth` feature is compiled in.
+///
+/// The Basic challenge is added only where a Basic login can succeed: a
+/// token-only server refuses the Studio with a plain 401, since a browser
+/// prompt for a user name and password could never get through.
 pub fn wrap_with_auth(router: axum::Router, state: crate::state::AppState) -> axum::Router {
-    router
-        .layer(axum::middleware::from_fn_with_state(
+    let basic = state.auth().is_some_and(|auth| auth.basic_enabled());
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::middleware::auth::auth_middleware,
+    ));
+    if basic {
+        router.layer(axum::middleware::from_fn_with_state(
             state,
-            crate::middleware::auth::auth_middleware,
+            studio_www_authenticate,
         ))
-        .layer(axum::middleware::from_fn(studio_www_authenticate))
+    } else {
+        router
+    }
 }
 
 #[cfg(test)]
@@ -49,7 +74,6 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::middleware::from_fn;
     use axum::response::IntoResponse;
     use axum::routing::get;
     use tower::ServiceExt;
@@ -71,9 +95,12 @@ mod tests {
 
     #[tokio::test]
     async fn adds_header_on_401() {
-        let app = Router::new()
-            .route("/", get(unauthorized))
-            .layer(from_fn(studio_www_authenticate));
+        let app = Router::new().route("/", get(unauthorized)).layer(
+            axum::middleware::from_fn_with_state(
+                crate::state::AppState::new_in_memory(300),
+                studio_www_authenticate,
+            ),
+        );
 
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -91,7 +118,10 @@ mod tests {
     async fn leaves_200_untouched() {
         let app = Router::new()
             .route("/", get(ok))
-            .layer(from_fn(studio_www_authenticate));
+            .layer(axum::middleware::from_fn_with_state(
+                crate::state::AppState::new_in_memory(300),
+                studio_www_authenticate,
+            ));
 
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -106,7 +136,10 @@ mod tests {
     async fn preserves_existing_header() {
         let app = Router::new()
             .route("/", get(unauthorized_with_header))
-            .layer(from_fn(studio_www_authenticate));
+            .layer(axum::middleware::from_fn_with_state(
+                crate::state::AppState::new_in_memory(300),
+                studio_www_authenticate,
+            ));
 
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())

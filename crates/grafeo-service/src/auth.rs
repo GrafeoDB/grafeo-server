@@ -136,6 +136,11 @@ pub trait AuthProviderTrait: Send + Sync {
     fn check_basic(&self, user: &str, password: &str) -> bool;
     /// Whether any authentication method is configured.
     fn is_enabled(&self) -> bool;
+    /// Whether HTTP Basic credentials can succeed (a user and password are
+    /// configured), so a browser's Basic login prompt is worth showing.
+    fn basic_enabled(&self) -> bool {
+        false
+    }
     /// Returns a reference to the token store, if available.
     #[cfg(feature = "auth")]
     fn token_store(&self) -> Option<&crate::token_store::TokenStore> {
@@ -276,6 +281,10 @@ impl AuthProviderTrait for StaticAuthProvider {
 
     fn is_enabled(&self) -> bool {
         self.is_enabled()
+    }
+
+    fn basic_enabled(&self) -> bool {
+        self.basic_user.is_some() && self.basic_password.is_some()
     }
 
     fn token_store(&self) -> Option<&crate::token_store::TokenStore> {

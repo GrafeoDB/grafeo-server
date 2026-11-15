@@ -15,7 +15,7 @@ use crate::audit::AuditRef;
 use crate::database::DatabaseManager;
 use crate::error::ServiceError;
 use crate::metrics::{Language, Metrics, determine_language};
-use crate::remote::remote_session;
+use crate::remote::{RemotePolicy, remote_session};
 use crate::session::{ManagedSession, SessionRegistry};
 use crate::types::BatchQuery;
 
@@ -39,11 +39,11 @@ impl QueryService {
         language: Option<&str>,
         params: Option<HashMap<String, grafeo_common::Value>>,
         timeout: Option<Duration>,
-        read_only: bool,
+        policy: RemotePolicy,
         identity: Option<Identity>,
     ) -> Result<QueryResult, ServiceError> {
         Self::execute_with_audit(
-            databases, metrics, db_name, statement, language, params, timeout, read_only, identity,
+            databases, metrics, db_name, statement, language, params, timeout, policy, identity,
             None,
         )
         .await
@@ -62,7 +62,7 @@ impl QueryService {
         language: Option<&str>,
         params: Option<HashMap<String, grafeo_common::Value>>,
         timeout: Option<Duration>,
-        read_only: bool,
+        policy: RemotePolicy,
         identity: Option<Identity>,
         audit: Option<AuditRef>,
     ) -> Result<QueryResult, ServiceError> {
@@ -74,7 +74,7 @@ impl QueryService {
 
         let result = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let session = remote_session(&db, identity, read_only);
+            let session = remote_session(&db, identity, policy);
             let r = dispatch_query(&session, &stmt, lang, params.as_ref());
             if let (Some(audit), Ok(qr)) = (&audit, &r)
                 && qr.counters.contains_updates()
@@ -202,7 +202,7 @@ impl QueryService {
         databases: &DatabaseManager,
         sessions: &SessionRegistry,
         db_name: &str,
-        read_only: bool,
+        policy: RemotePolicy,
         identity: Option<Identity>,
         owner_token_id: Option<String>,
     ) -> Result<String, ServiceError> {
@@ -211,7 +211,7 @@ impl QueryService {
         let db_name = db_name.to_owned();
         let session_id = tokio::task::spawn_blocking(move || {
             let db = entry.db();
-            let mut engine_session = remote_session(&db, identity, read_only);
+            let mut engine_session = remote_session(&db, identity, policy);
             engine_session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -339,11 +339,11 @@ impl QueryService {
         db_name: &str,
         queries: Vec<BatchQuery>,
         timeout: Option<Duration>,
-        read_only: bool,
+        policy: RemotePolicy,
         identity: Option<Identity>,
     ) -> Result<Vec<QueryResult>, ServiceError> {
         Self::batch_execute_with_audit(
-            databases, metrics, db_name, queries, timeout, read_only, identity, None,
+            databases, metrics, db_name, queries, timeout, policy, identity, None,
         )
         .await
     }
@@ -357,7 +357,7 @@ impl QueryService {
         db_name: &str,
         queries: Vec<BatchQuery>,
         timeout: Option<Duration>,
-        read_only: bool,
+        policy: RemotePolicy,
         identity: Option<Identity>,
         audit: Option<AuditRef>,
     ) -> Result<Vec<QueryResult>, ServiceError> {
@@ -393,7 +393,7 @@ impl QueryService {
 
         let results = run_with_timeout(timeout, move || {
             let db = entry.db();
-            let mut session = remote_session(&db, identity, read_only);
+            let mut session = remote_session(&db, identity, policy);
             session
                 .begin_transaction()
                 .map_err(ServiceError::from_engine)?;
@@ -405,16 +405,9 @@ impl QueryService {
                     Ok(qr) => results.push(qr),
                     Err(e) => {
                         let _ = session.rollback();
-                        let message = format!("query at index {idx} failed: {e}");
-                        // A conflict or an unavailable database keeps its kind,
-                        // so the client can tell it may retry.
-                        return Err(match e {
-                            ServiceError::TransactionConflict(_) => {
-                                ServiceError::TransactionConflict(message)
-                            }
-                            ServiceError::Unavailable(_) => ServiceError::Unavailable(message),
-                            _ => ServiceError::BadRequest(message),
-                        });
+                        // The statement's error keeps its kind (a refusal is a
+                        // 403, a conflict retryable) and names its position.
+                        return Err(e.in_batch(idx));
                     }
                 }
             }
@@ -617,7 +610,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -636,7 +629,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -655,7 +648,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -676,7 +669,7 @@ mod tests {
             None,
             Some(params),
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -697,7 +690,7 @@ mod tests {
             Some("gql"),
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -716,7 +709,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -736,7 +729,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await;
@@ -756,7 +749,7 @@ mod tests {
             None,
             None,
             Some(Duration::from_secs(10)),
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -771,28 +764,48 @@ mod tests {
     #[tokio::test]
     async fn begin_tx_returns_session_id() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
-            .await
-            .unwrap();
+        let id = QueryService::begin_tx(
+            s.databases(),
+            s.sessions(),
+            "default",
+            RemotePolicy::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_ne!(id, "");
     }
 
     #[tokio::test]
     async fn begin_tx_not_found_database() {
         let s = state();
-        let err =
-            QueryService::begin_tx(s.databases(), s.sessions(), "no_such_db", false, None, None)
-                .await
-                .unwrap_err();
+        let err = QueryService::begin_tx(
+            s.databases(),
+            s.sessions(),
+            "no_such_db",
+            RemotePolicy::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceError::NotFound(_)));
     }
 
     #[tokio::test]
     async fn tx_execute_then_commit() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
-            .await
-            .unwrap();
+        let id = QueryService::begin_tx(
+            s.databases(),
+            s.sessions(),
+            "default",
+            RemotePolicy::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let qr = QueryService::tx_execute(
             s.sessions(),
@@ -823,9 +836,16 @@ mod tests {
     #[tokio::test]
     async fn tx_execute_then_rollback() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
-            .await
-            .unwrap();
+        let id = QueryService::begin_tx(
+            s.databases(),
+            s.sessions(),
+            "default",
+            RemotePolicy::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         QueryService::tx_execute(
             s.sessions(),
@@ -902,7 +922,7 @@ mod tests {
             "default",
             vec![],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -923,7 +943,7 @@ mod tests {
                 params: None,
             }],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -956,7 +976,7 @@ mod tests {
                 },
             ],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -986,7 +1006,7 @@ mod tests {
                 },
             ],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -1008,7 +1028,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -1032,7 +1052,7 @@ mod tests {
                 },
             ],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await;
@@ -1046,7 +1066,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -1067,7 +1087,7 @@ mod tests {
                 params: None,
             }],
             None,
-            false,
+            RemotePolicy::default(),
             None,
         )
         .await
@@ -1112,9 +1132,16 @@ mod tests {
     #[tokio::test]
     async fn get_session_after_begin() {
         let s = state();
-        let id = QueryService::begin_tx(s.databases(), s.sessions(), "default", false, None, None)
-            .await
-            .unwrap();
+        let id = QueryService::begin_tx(
+            s.databases(),
+            s.sessions(),
+            "default",
+            RemotePolicy::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let session = QueryService::get_session(s.sessions(), &id, 300);
         assert!(session.is_ok());
     }
@@ -1136,7 +1163,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            RemotePolicy::default(),
             Some(identity),
         )
         .await

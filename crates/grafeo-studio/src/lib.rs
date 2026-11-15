@@ -43,13 +43,23 @@ async fn studio_static(uri: Uri) -> Response {
         .unwrap_or_else(|| (StatusCode::NOT_FOUND, "UI not built").into_response())
 }
 
+/// No other site may frame a Studio page: framed, the Studio would run with
+/// the browser's cached login while another page draws over it and steers the
+/// clicks (a restore, a delete). The API's routes send the same refusal.
+const FRAME_ANCESTORS: &str = "frame-ancestors 'none'";
+
 fn serve_file(path: &str) -> Option<Response> {
     let asset = UiAssets::get(path)?;
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     Some(
         (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, mime.as_ref())],
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::X_FRAME_OPTIONS, "DENY"),
+                (header::CONTENT_SECURITY_POLICY, FRAME_ANCESTORS),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
             asset.data.to_vec(),
         )
             .into_response(),

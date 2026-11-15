@@ -56,6 +56,10 @@ use session::SessionRegistry;
 pub struct ServiceConfig {
     pub data_dir: Option<String>,
     pub read_only: bool,
+    /// Remote statements may reach outside the database (`LOAD CSV`, the load
+    /// and export procedures), for admin identities only; off by default
+    /// (`--allow-external-access`).
+    pub allow_external_access: bool,
     pub session_ttl: u64,
     pub query_timeout: u64,
     pub rate_limit: u64,
@@ -96,6 +100,7 @@ struct Inner {
     query_timeout: Duration,
     start_time: Instant,
     read_only: bool,
+    external_access: bool,
     #[cfg(feature = "auth")]
     auth: Option<Arc<dyn auth::AuthProviderTrait>>,
     #[cfg(feature = "push-changefeed")]
@@ -152,6 +157,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(config.query_timeout),
                 start_time: Instant::now(),
                 read_only: config.read_only,
+                external_access: config.allow_external_access,
                 #[cfg(feature = "auth")]
                 auth: {
                     // Resolve token store path: explicit > {data_dir}/tokens.json > None
@@ -230,6 +236,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 #[cfg(feature = "auth")]
                 auth: None,
                 #[cfg(feature = "push-changefeed")]
@@ -258,6 +265,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 auth: auth::AuthProvider::new(Some(auth_token), None, None)
                     .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>),
                 #[cfg(feature = "push-changefeed")]
@@ -286,6 +294,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 auth: auth::AuthProvider::new(None, Some(user), Some(password))
                     .map(|p| Arc::new(p) as Arc<dyn auth::AuthProviderTrait>),
                 #[cfg(feature = "push-changefeed")]
@@ -317,6 +326,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 auth: Some(Arc::new(provider) as Arc<dyn auth::AuthProviderTrait>),
                 #[cfg(feature = "push-changefeed")]
                 change_hub: changefeed::ChangeHub::new(),
@@ -347,6 +357,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 auth: Some(provider),
                 #[cfg(feature = "push-changefeed")]
                 change_hub: changefeed::ChangeHub::new(),
@@ -373,6 +384,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: true,
+                external_access: false,
                 #[cfg(feature = "auth")]
                 auth: None,
                 #[cfg(feature = "push-changefeed")]
@@ -404,6 +416,7 @@ impl ServiceState {
                 query_timeout: Duration::from_secs(30),
                 start_time: Instant::now(),
                 read_only: false,
+                external_access: false,
                 #[cfg(feature = "auth")]
                 auth: None,
                 #[cfg(feature = "push-changefeed")]
@@ -482,6 +495,16 @@ impl ServiceState {
         self.inner.read_only || self.is_replica()
     }
 
+    /// What every remote client's engine session is limited to: read-only
+    /// on a read-only server or replica, and no access outside the database
+    /// unless `--allow-external-access` is set (then admins only).
+    pub fn remote_policy(&self) -> remote::RemotePolicy {
+        remote::RemotePolicy {
+            read_only: self.is_query_read_only(),
+            external_access: self.inner.external_access,
+        }
+    }
+
     /// Returns the replication mode for this instance.
     #[cfg(feature = "replication")]
     pub fn replication_mode(&self) -> &replication::ReplicationMode {
@@ -553,6 +576,17 @@ impl ServiceState {
         }
     }
 
+    /// Lets admin clients' statements reach outside the database, as
+    /// `--allow-external-access` does. Call it before the state is shared
+    /// (cloned into handlers).
+    #[must_use]
+    pub fn with_external_access(mut self, allowed: bool) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_external_access is called before the state is shared")
+            .external_access = allowed;
+        self
+    }
+
     /// Enables the audit log on this state. Call it before the state is
     /// shared (cloned into handlers).
     pub fn with_audit(mut self, config: audit::AuditConfig) -> std::io::Result<Self> {
@@ -616,6 +650,7 @@ mod tests {
         let config = ServiceConfig {
             data_dir: None,
             read_only: false,
+            allow_external_access: false,
             session_ttl: 300,
             query_timeout: 30,
             rate_limit: 0,

@@ -54,12 +54,11 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> impl IntoResponse {
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
     let db_scope = auth
         .0
         .as_ref()
-        .map(|info| info.scope.databases.clone())
-        .unwrap_or_default();
+        .map_or_default(|info| info.scope.databases.clone());
     ws.on_upgrade(move |socket| handle_socket(socket, state, identity, db_scope))
 }
 
@@ -371,7 +370,7 @@ async fn process_query(
         req.language.as_deref(),
         params,
         timeout,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity.clone()),
         state.audit_ref("http", Some(identity.user_id())),
     )

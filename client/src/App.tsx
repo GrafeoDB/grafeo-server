@@ -1,45 +1,41 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AppProvider } from "./context/AppContext";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { ThemeProvider } from "@grafeo-db/ui";
+import { ServerProvider } from "./context/ServerContext";
 import { WorkbenchProvider } from "./context/WorkbenchContext";
-import Layout from "./components/Layout/Layout";
-import WorkbenchView from "./views/WorkbenchView";
-import DatabasesList from "./views/databases/DatabasesList";
-import DatabaseDetails from "./views/databases/DatabaseDetails";
-import TokensView from "./views/TokensView";
+import { LabelStylesScope } from "./labelStyles";
+import StudioShell from "./shell/StudioShell";
+import DatabasesPage from "./pages/DatabasesPage";
+import DatabaseDetailsPage from "./pages/DatabaseDetailsPage";
+import TokensPage from "./pages/TokensPage";
+import SavedQueriesPage from "./pages/SavedQueriesPage";
 
 export default function App() {
   return (
-    <AppProvider>
-      <WorkbenchProvider>
-        <BrowserRouter basename="/studio">
-          <Routes>
-            <Route element={<Layout />}>
-              <Route path="/" element={<WorkbenchView />} />
-              <Route path="/databases" element={<DatabasesList />} />
-              <Route path="/databases/:name" element={<DatabaseDetails />} />
-              <Route path="/tokens" element={<TokensView />} />
-              {/* Legacy /admin/* redirects for anyone with bookmarked URLs */}
-              <Route path="/admin" element={<Navigate to="/databases" replace />} />
-              <Route
-                path="/admin/dashboard"
-                element={<Navigate to="/databases" replace />}
-              />
-              <Route
-                path="/admin/databases"
-                element={<Navigate to="/databases" replace />}
-              />
-              <Route
-                path="/admin/backups"
-                element={<Navigate to="/databases" replace />}
-              />
-              <Route
-                path="/admin/tokens"
-                element={<Navigate to="/tokens" replace />}
-              />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      </WorkbenchProvider>
-    </AppProvider>
+    <ThemeProvider>
+      <BrowserRouter basename="/studio">
+        <ServerProvider>
+          <WorkbenchProvider>
+            <LabelStylesScope>
+              <Routes>
+                <Route element={<StudioShell />}>
+                  <Route index element={null} />
+                  <Route path="databases" element={<DatabasesPage />} />
+                  <Route path="databases/:name" element={<DatabaseDetailsPage />} />
+                  <Route path="tokens" element={<TokensPage />} />
+                  <Route path="saved-queries" element={<SavedQueriesPage />} />
+                  {/* Old addresses, for bookmarks */}
+                  <Route path="admin" element={<Navigate to="/databases" replace />} />
+                  <Route path="admin/dashboard" element={<Navigate to="/databases" replace />} />
+                  <Route path="admin/databases" element={<Navigate to="/databases" replace />} />
+                  <Route path="admin/backups" element={<Navigate to="/databases" replace />} />
+                  <Route path="admin/tokens" element={<Navigate to="/tokens" replace />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Route>
+              </Routes>
+            </LabelStylesScope>
+          </WorkbenchProvider>
+        </ServerProvider>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }

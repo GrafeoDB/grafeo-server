@@ -29,12 +29,22 @@ pub struct Config {
     #[arg(long, default_value_t = false, env = "GRAFEO_READ_ONLY")]
     pub read_only: bool,
 
+    /// Let admin clients' statements read and write files on the server
+    /// (`LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export
+    /// procedures). Off by default: remote statements cannot reach outside
+    /// the database, admins included; read-only and read-write tokens never can.
+    #[arg(long, default_value_t = false, env = "GRAFEO_ALLOW_EXTERNAL_ACCESS")]
+    pub allow_external_access: bool,
+
     /// Transaction session timeout in seconds.
     #[arg(long, default_value_t = 300, env = "GRAFEO_SESSION_TTL")]
     pub session_ttl: u64,
 
     /// CORS allowed origins (comma-separated). Omit to deny cross-origin requests.
-    /// Use "*" to allow all origins (not recommended for production).
+    /// "*" lets every origin read; on a server with credentials it writes only
+    /// with a bearer token or API key it sends itself (never with a Basic login
+    /// the browser has cached), and without credentials it doesn't write. The
+    /// WebSocket needs a listed origin.
     #[arg(long, env = "GRAFEO_CORS_ORIGINS", value_delimiter = ',')]
     pub cors_origins: Vec<String>,
 
@@ -147,10 +157,13 @@ pub struct Config {
     pub trusted_proxies: Vec<String>,
 
     /// Additional host names this server answers on (comma-separated), beyond
-    /// loopback and `--host`. The cross-site check trusts
-    /// `Sec-Fetch-Site: same-origin` only when the request's `Host` is one of
-    /// these, so a DNS-rebinding page cannot use that header to write. Add the
-    /// public name when a proxy rewrites `Host`.
+    /// loopback and `--host`. A server without credentials answers only these
+    /// names and IP addresses, and a Basic-auth server offers its login and
+    /// takes writes from browser pages only on them, so a DNS-rebinding page
+    /// gets neither a login prompt nor a write under its own name.
+    /// Add every name clients use: a service or container name, a LAN host
+    /// name, or the name a proxy puts in `Host` (the public name when it keeps
+    /// `Host`, the upstream name when it rewrites it).
     #[arg(long, env = "GRAFEO_TRUSTED_HOSTS", value_delimiter = ',')]
     pub trusted_hosts: Vec<String>,
 
@@ -270,5 +283,29 @@ impl Config {
              pass --allow-unauthenticated (GRAFEO_ALLOW_UNAUTHENTICATED=true) to accept \
              unauthenticated access"
         ))
+    }
+
+    /// Whether `--cors-origins` can be served: `*` stands alone (it means
+    /// every origin, so a list next to it says two things), and each origin
+    /// is a valid header value (visible ASCII). The error names the flag.
+    pub fn check_cors_origins(&self) -> Result<(), String> {
+        let origins = &self.cors_origins;
+        if origins.len() > 1 && origins.iter().any(|o| o.trim() == "*") {
+            return Err(format!(
+                "invalid --cors-origins '{}': '*' allows every origin and must be the only entry; \
+                 pass either '*' or a list of origins",
+                origins.join(",")
+            ));
+        }
+        if let Some(bad) = origins
+            .iter()
+            .find(|o| !o.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b)))
+        {
+            return Err(format!(
+                "invalid --cors-origins entry {bad:?}: an origin is visible ASCII, such as \
+                 https://app.example"
+            ));
+        }
+        Ok(())
     }
 }

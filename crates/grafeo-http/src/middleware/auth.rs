@@ -14,7 +14,7 @@
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 
 use grafeo_service::auth::TokenInfo;
@@ -26,6 +26,42 @@ use crate::state::AppState;
 /// and `/metrics` when the server runs with `--public-metrics`.
 fn is_exempt(path: &str, method: &Method, public_metrics: bool) -> bool {
     *method == Method::OPTIONS || path == "/health" || (public_metrics && path == "/metrics")
+}
+
+/// The header the Studio sends on its API calls (`X-Grafeo-Studio: 1`).
+pub const STUDIO_MARKER: &str = "x-grafeo-studio";
+
+/// Whether a refused request gets the Studio's Basic challenge: the Studio
+/// calling its own API on a server where Basic credentials can succeed. The
+/// browser then retries with the login it already holds for the realm,
+/// without a new prompt; a browser scopes Basic credentials to the path it
+/// was asked on, so a login at `/studio/` alone would not reach `/db` (#90).
+///
+/// A browser marks its requests with `Sec-Fetch-Site` only on a secure
+/// origin (HTTPS or localhost). There a same-origin request qualifies. On a
+/// plain-HTTP address the header is missing, so the Studio's own marker
+/// header decides: another site's page cannot send a custom header to this
+/// server without a CORS preflight, which only `--cors-origins` allows.
+/// Other sites' pages, navigations, tools and token-only servers keep a
+/// plain 401 and never see a prompt.
+///
+/// The challenge is sent only on a host name this server answers on
+/// (loopback, `--host`, an IP address, `--trusted-hosts`): a browser keeps a
+/// Basic login per name and gets one only by answering a challenge there, so
+/// a DNS-rebinding page under its own name gets no prompt and no login.
+fn studio_may_prompt(
+    req: &Request,
+    provider: &dyn grafeo_service::auth::AuthProviderTrait,
+    trusted_hosts: &[String],
+) -> bool {
+    if !provider.basic_enabled() || !super::cross_site::request_host_is_answered(req, trusted_hosts)
+    {
+        return false;
+    }
+    match req.headers().get("sec-fetch-site") {
+        Some(site) => site.as_bytes() == b"same-origin",
+        None => req.headers().contains_key(STUDIO_MARKER),
+    }
 }
 
 /// Middleware that authenticates requests using any configured method.
@@ -83,7 +119,25 @@ pub async fn auth_middleware(
                 .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
                 .detail(format!("{} {}", req.method(), req.uri().path())),
         );
-        return Err(ApiError::unauthorized());
+        // A Basic server offers no login on a name it does not trust; the
+        // 401 then says how to sign in under this name.
+        if auth_provider.basic_enabled()
+            && !super::cross_site::request_host_is_answered(&req, state.trusted_hosts())
+        {
+            let body = crate::error::ErrorBody {
+                error: "unauthorized".to_string(),
+                detail: Some(super::cross_site::UNTRUSTED_HOST_LOGIN.to_string()),
+            };
+            return Ok((axum::http::StatusCode::UNAUTHORIZED, axum::Json(body)).into_response());
+        }
+        let mut response = ApiError::unauthorized().into_response();
+        if studio_may_prompt(&req, auth_provider.as_ref(), state.trusted_hosts()) {
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static(super::studio_auth::STUDIO_CHALLENGE),
+            );
+        }
+        return Ok(response);
     };
 
     if let Err(e) = super::authorize::authorize(req.method(), req.uri().path(), &info) {

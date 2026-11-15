@@ -2,17 +2,64 @@
 
 All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GWP and Bolt).
 
-## [0.6.3] - Unreleased
+## [0.6.3] - 2026-11-15
 
-Listener release: next to HTTP, GWP and Bolt open only when asked for. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both.
+Listener, security and Studio release: next to HTTP, GWP and Bolt open only when asked for, remote statements no longer read or write files on the server, and the Studio is rebuilt in the Grafeo design. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both. A deployment that loads files by query (`LOAD CSV`, `grafeo.load_nodes_csv`) passes `--allow-external-access` and runs those statements as an admin; a server without credentials reached by a host name (a service name, a LAN name, a proxy) lists that name in `--trusted-hosts`, and so does a Basic-auth server whose Studio is opened by one.
+
+### Added
+
+- **Hybrid search takes `ef`** (#85): `/search/hybrid` and GWP's `HybridSearch` accept `ef`, the beam width of the vector half, as `/search/vector` does; without it the vector half runs at the index default as before. On a 3,000-node index built with a narrow beam, `ef` equal to the node count returns the exact nearest neighbours that the default beam misses.
+- **The Studio explains a query**: Explain in the query toolbar shows the plan of a GQL or Cypher query in the Plan view.
+- **Bolt login failures are audited with the client's IP**: a refused Bolt LOGON writes `auth_failure` with `source_ip`, as HTTP does. GWP's `auth_failure` still has none: gwp gives the server no peer address.
 
 ### Changed
 
+- **The Studio is rebuilt in the Grafeo design**: the workbench (query tabs, editor, graph, inspector, results) and the Databases, database, API tokens and Saved queries pages share one look with the other Grafeo apps, dark or light, from phone to desktop width. Label colours and styles are set from the schema, legend or inspector and kept per database in the browser; saved queries, history and query tabs carry over.
+- **The Studio's API tokens entry shows only where tokens are kept**: on a server that checks credentials and runs with `--data-dir` or `--token-store-path`; it showed on every build with authentication compiled in, where the page could only fail.
 - **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
+- **Concurrent MERGEs of one pattern create it once**: with grafeo 0.6.3 the second of two open transactions that MERGE the same new pattern fails with a retryable conflict (HTTP 409 `conflict`, GWP GQLSTATUS 40001, Bolt `Neo.TransientError.Transaction.Outdated`) instead of creating a duplicate, and a MERGE that only matches no longer conflicts. SPARQL transactions that change one triple, one of them by deleting it, conflict the same way; the client retries the statement or the transaction.
+- **Minimum Rust 1.100**: building from source needs Rust 1.100.0 (was 1.99.0); the Docker images build on `rust:1.100-slim`.
+- **A failed `/batch` statement answers with its own status**: a refused statement is a 403, with the statement's index in the detail, and a statement that times out a 408; both were 400s. Conflicts (409) and unavailable databases (503) answer as before.
+- **A server without credentials answers only on trusted host names**: a request whose `Host` is not loopback, `--host`, a `--trusted-hosts` entry or an IP address gets 403 `untrusted_host`, so a DNS-rebinding page can't read the server under its own name (`/health` and `/ready` answer on any). Every client of such a server is affected, browsers or not: add the name clients use to `--trusted-hosts`: a service or container name, a LAN or mDNS host name, or the name a proxy puts in `Host` (the public name when it keeps `Host`, the upstream name when it rewrites it) (`GRAFEO_TRUSTED_HOSTS`).
+- **A Basic-auth server offers its login only on trusted host names**: the Studio's login prompt, and writes from browser pages with a Basic login, are taken on loopback, `--host`, an IP address or a `--trusted-hosts` name; under another name the browser gets no prompt, and the 401 or the 403 `untrusted_host` says to add the name to `--trusted-hosts`. Token-only servers, and requests with a bearer token or API key, are unaffected.
+- **The ready line names the bound address**: `Grafeo Server ready` logs the address the server listens on, so `--port 0` shows the port it got.
 
 ### Fixed
 
+- **Browser writes pass behind an HTTP/2 proxy**: a request without a `Host` header (HTTP/2 names its host in `:authority`, as a proxy speaking h2c to the server sends it) was refused as cross-site, even on a trusted name; the check now reads the same host as the rest of the server.
+- **The Studio says how to fix a refusal for its address**: an `untrusted_host` or `cross_site_request` refusal, and a login not offered on the name the Studio was opened by, showed as "No access" or "Not signed in"; the Studio now shows the server's message, which names `--trusted-hosts` or `--cors-origins`.
+- **A constraint violation outside a statement is a 400**: one the engine reports at commit or from a direct call (`/tx/commit`, a `/batch` commit, GWP and Bolt commits) was an internal error, a 500 with the detail hidden over HTTP; it is now a bad request with its message.
+- **`--cors-origins` is checked at startup**: `*` next to other origins, or an origin with control characters, stops the server with an error that names the flag; `'https://a.example,*'` panicked while the CORS layer was built.
+- **A database's page starts afresh for each database**: a notice, a typed epoch or a running restore no longer carries over to the next database's page.
+- **The Studio behind Basic auth loads its data wherever it is opened** (#90): opened at `/studio/` (a bookmark, a restored tab), it showed no databases, because the browser's login covered only `/studio/` and the Studio's API calls got a 401 it could not answer. An API 401 now carries the Studio's Basic challenge for the Studio's own requests when Basic auth is configured, also on a plain-HTTP address where browsers send no fetch metadata, and a refused request shows "Not signed in" or "No access" instead of zeros.
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
+- **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
+- **A schema name is always one name**: the schema routes (`POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}`) and GWP's schema calls wrote the name into the statement unquoted, so a name with a space or a backtick failed as a syntax error and a crafted one ended in a 500. Names are now quoted; spaces, backticks and keywords stay part of the name.
+- **The Studio writes when opened by IP address**: on a LAN address that was neither loopback nor `--host`, its queries and actions got 403 `cross_site_request` since 0.6.2; an IP address in `Host` is now trusted, since a DNS-rebinding page always carries a name.
+- **The Studio opens on a plain-HTTP address other than localhost**: reached over HTTP by a LAN address or a host name, it showed a blank page.
+- **A token-only server no longer offers a Basic login on the Studio page**: the page still answers 401, now without a user name and password prompt that could never get through.
+- **The Studio draws paths and the graph inside lists and maps**: a returned path (`RETURN p`) or a `collect(n)` showed in the table only.
+- **The Studio keeps the active database's sidebar current**: a write shows in the schema and the node and edge counts without a reload.
+- **GWP reports a permission refusal as GQLSTATUS 42501**: it was 42001 (syntax error), so a client could not tell a refused statement from a mistake in it.
+
+### Security
+
+- **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again, also on a read-only server or a replica (reads only); read-only and read-write tokens never can, and the refusal names the flag.
+- **A SPARQL update sent by GET is refused**: `GET /db/{name}/sparql?query=` ran updates too, so a page on any site could write through a browser that held the Studio's Basic login, with an image or a link; a GET now runs read-only and an update answers 403. Updates are sent with `POST /db/{name}/sparql`.
+- **Other sites can't frame the Studio**: Studio pages send `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, as the API's routes do; a framing page could steer the Studio's clicks while it runs with the browser's login.
+- **A graph store IRI can't add statement text**: a `?graph=` value with a space or any of `` <>"{}|^`\ `` is refused with 400 before a statement runs, and graph store reads run read-only.
+- **A DNS-rebinding page can't reach a server without credentials**: such a server answers only on trusted host names (see Changed); it answered on any name, so a page on another site could read its databases, and before 0.6.2 also write, through a name of its own.
+- **A DNS-rebinding page can't write from a browser without fetch metadata**: the trusted-host check that 0.6.2 applies to `Sec-Fetch-Site: same-origin` now also applies when the header is missing, which is every browser on plain HTTP to a host name, and Safari 16.3 and older.
+- **A DNS-rebinding page gets no login prompt**: a Basic-auth server sent its login challenge under any host name, so a page under a name of its own could show the server's prompt and keep a login typed there; the challenge is now sent only on trusted names.
+- **`--cors-origins '*'` no longer lets other sites write with a cached login**: with `*`, a write from another origin passes only on a server with credentials and only with a bearer token or `X-API-Key` the page sends itself; a Basic login the browser cached, no credential, or any write to a server without credentials gets 403 `cross_site_request`, and the WebSocket needs a listed origin. Listed origins are unchanged.
+
+### Dependencies
+
+- **grafeo-engine and grafeo-common 0.6.3** (pinned `=0.6.3`, from 0.6.2): `hybrid_search_with` carries the `ef` above; see the engine's [0.6.3 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) for every fix.
+- **gwp 0.5.0** (from 0.4.0): `ef` on `HybridSearchRequest`.
+- **boltr 0.4.0** (from 0.3.0): the `TCP_NODELAY` fix (0.3.1) and the LOGON peer address for the audit log.
+- **@grafeo-db/ui 0.2.1** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it). It brings the Instrument Sans and JetBrains Mono fonts (SIL OFL 1.1), served with the Studio with their licence texts under `/studio/licenses/`; the Studio requests nothing from other sites.
+- **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
 ## [0.6.2] - 2026-11-08
 

@@ -49,14 +49,14 @@ pub async fn tx_begin(
         .unwrap_or("default");
 
     auth.check_db_access(db_name)?;
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
     let owner_token_id = auth.0.as_ref().map(|info| info.id.clone());
 
     let session_id = QueryService::begin_tx(
         state.databases(),
         state.sessions(),
         db_name,
-        state.service().is_query_read_only(),
+        state.service().remote_policy(),
         Some(identity),
         owner_token_id,
     )

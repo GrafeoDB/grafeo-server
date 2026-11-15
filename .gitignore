@@ -66,6 +66,8 @@ target/
 
 # ── Client (Node.js) ──────────────────────────────────────────────────
 client/node_modules/
+client/test-results/
+client/playwright-report/
 client/dist/
 client/.vite/
 client/*.tsbuildinfo

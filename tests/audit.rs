@@ -99,6 +99,42 @@ async fn auth_failure_is_logged_with_source_ip() {
     assert!(event["ts"].as_str().unwrap().ends_with('Z'));
 }
 
+/// A failed Bolt LOGON is recorded with the source IP too, as over HTTP
+/// (boltr 0.4 hands the validator the connection's peer address).
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_auth_failure_is_logged_with_source_ip() {
+    let (_base, audit_path, _dir, state) = spawn_audit(false).await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bolt_addr: SocketAddr = listener.local_addr().unwrap();
+    drop(listener);
+    let service = state.service().clone();
+    let options = grafeo_boltr::BoltrOptions {
+        auth_provider: service.auth().map(std::sync::Arc::clone),
+        audit: service.audit().map(std::sync::Arc::clone),
+        ..Default::default()
+    };
+    let backend = grafeo_boltr::GrafeoBackend::new(service).with_advertise_addr(bolt_addr);
+    tokio::spawn(async move {
+        grafeo_boltr::serve(backend, bolt_addr, options)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let refused = boltr::client::BoltSession::connect_basic(bolt_addr, "mallory", "guess").await;
+    assert!(refused.is_err(), "wrong credentials are refused");
+
+    let lines = audit_lines(&audit_path, &state);
+    let event = lines
+        .iter()
+        .find(|l| l["event"] == "auth_failure" && l["transport"] == "bolt")
+        .unwrap_or_else(|| panic!("a Bolt auth_failure event: {lines:?}"));
+    assert_eq!(event["source_ip"], "127.0.0.1", "{event}");
+    assert_eq!(event["detail"], "invalid credentials");
+}
+
 #[tokio::test]
 async fn access_denied_is_logged_with_actor() {
     let (base, audit_path, _dir, state) = spawn_audit(false).await;

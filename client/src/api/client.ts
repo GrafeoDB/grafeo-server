@@ -23,10 +23,36 @@ export class GrafeoApiError extends Error {
   constructor(
     public status: number,
     public detail: string,
+    /** The server's error code (`error` in the body), when it sent one. */
+    public code?: string,
+    /** Whether the server explained the error (`detail` in the body). */
+    public explained = false,
   ) {
     super(detail);
     this.name = "GrafeoApiError";
   }
+}
+
+/** Refusals about the address the Studio was opened on, not the account: their detail names the flag that fixes them. */
+const ADDRESS_REFUSALS = new Set(["untrusted_host", "cross_site_request"]);
+
+/** Why the server refused a request, when it did: not signed in (401) or no access (403). */
+export type RefusedKind = "unauthenticated" | "forbidden";
+
+/**
+ * The refusal behind an API error, or null for any other failure, so a view
+ * shows "not signed in" or "no access" instead of empty data (#90).
+ *
+ * A refusal for the address (an untrusted host name, a cross-site request) and
+ * a 401 the server explains (no login offered on this name) are failures
+ * instead: the view shows the server's detail, which says how to fix it.
+ */
+export function refusedKind(err: unknown): RefusedKind | null {
+  if (!(err instanceof GrafeoApiError)) return null;
+  if (err.code && ADDRESS_REFUSALS.has(err.code)) return null;
+  if (err.status === 401) return err.explained ? null : "unauthenticated";
+  if (err.status === 403) return "forbidden";
+  return null;
 }
 
 let authToken: string | null = null;
@@ -39,6 +65,9 @@ export function setAuthToken(token: string | null): void {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Says the call is the Studio's own, so a refusal carries the Basic challenge the browser answers with its login
+    // (#90). Browsers send fetch metadata only to HTTPS or localhost; on a plain-HTTP address this header is the sign.
+    "X-Grafeo-Studio": "1",
     ...options.headers as Record<string, string>,
   };
   if (authToken) {
@@ -46,8 +75,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   const res = await fetch(path, { ...options, headers });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new GrafeoApiError(res.status, body.detail ?? res.statusText);
+    const body: { error?: unknown; detail?: unknown } = await res.json().catch(() => ({}));
+    const detail = typeof body.detail === "string" && body.detail ? body.detail : null;
+    // HTTP/2 has no reason phrase, so the status code is the last resort.
+    const fallback = res.statusText || `HTTP ${res.status}`;
+    throw new GrafeoApiError(
+      res.status,
+      detail ?? fallback,
+      typeof body.error === "string" ? body.error : undefined,
+      detail !== null,
+    );
   }
   // 204 No Content and any other empty body: don't try to parse JSON.
   // Endpoints like POST /admin/{db}/restore/epoch return 204 on success;

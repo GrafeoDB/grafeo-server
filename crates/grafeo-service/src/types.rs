@@ -429,6 +429,11 @@ pub struct HybridSearchReq {
     pub query_vector: Vec<f32>,
     /// Number of results to return.
     pub k: u32,
+    /// Search beam width of the vector half (higher = better recall), as on
+    /// `/search/vector`; absent for the index default. The text half has no
+    /// beam, so it has no effect without a query vector.
+    #[serde(default)]
+    pub ef: Option<u32>,
 }
 
 /// A single search result hit.

@@ -1,0 +1,586 @@
+/* The Studio's own details on top of @grafeo-db/ui: the parts of the approved mockup that are not package
+   primitives (stats, chips, the token reveal, epoch picks, form groups). Colours and sizes come from the package's
+   tokens only. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--gu-background);
+}
+
+/* ---------- Workbench ---------- */
+
+/* The main area: the graph or another view of the result, with the floating view switch over it */
+.st-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.st-main > :first-child {
+  flex: 1;
+  min-height: 0;
+}
+
+.st-main-table,
+.st-main-json,
+.st-main-plan {
+  padding-top: 48px;
+  background: var(--gu-surface);
+  overflow: auto;
+}
+
+/* Copy CSV / Copy JSON over the table in the main area, level with the view switch */
+.st-main-copy {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 1;
+}
+
+.st-editor {
+  display: contents;
+}
+
+/* Server rows in the sidebar */
+.st-kv {
+  margin: 0;
+}
+
+.st-kv > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.st-kv dt {
+  color: var(--gu-muted-foreground);
+}
+
+.st-kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-kv .gu-status-item {
+  font: inherit;
+  vertical-align: top;
+}
+
+/* History rows show the query as written: mono, no ligatures (an arrow stays "->") */
+.st-history {
+  display: contents;
+}
+
+.st-history .gu-sidebar-item-label {
+  font-family: var(--gu-font-mono);
+  font-size: 12px;
+  font-variant-ligatures: none;
+}
+
+/* Phone width: the status bar keeps state, counts and timing; the host is on the Databases page */
+@media (max-width: 600px) {
+  .gu-statusbar-end .gu-status-item:last-child {
+    display: none;
+  }
+}
+
+.st-note {
+  margin: 4px 0;
+  color: var(--gu-muted-foreground);
+  font-size: 12px;
+}
+
+/* ---------- Pages ---------- */
+
+.st-muted {
+  color: var(--gu-muted-foreground);
+}
+
+.st-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--gu-link);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.st-link-button:hover {
+  text-decoration: underline;
+}
+
+.st-link-button:focus-visible {
+  outline: var(--gu-focus-width) solid var(--gu-ring);
+  outline-offset: var(--gu-focus-offset);
+}
+
+.st-strong {
+  font-weight: 500;
+}
+
+.st-mono,
+.st-num {
+  font-family: var(--gu-font-mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-seq {
+  color: var(--gu-muted-foreground);
+  font-family: var(--gu-font-mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-spacer {
+  flex: 1;
+}
+
+/* Chips */
+.st-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--gu-border);
+  border-radius: var(--gu-radius-control);
+  color: var(--gu-muted-foreground);
+  font: 400 11px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  white-space: nowrap;
+}
+
+.gu-page-title .st-chip {
+  font-weight: 400;
+  vertical-align: middle;
+}
+
+.st-chip-strong {
+  border-color: var(--gu-border-strong);
+  color: var(--gu-foreground);
+}
+
+.st-chip-ram {
+  color: var(--gu-foreground);
+}
+
+.st-chip-ram::before,
+.st-chip-disk::before,
+.st-chip-none::before {
+  content: "";
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.st-chip-ram::before {
+  background: var(--gu-foreground);
+}
+
+.st-chip-disk::before {
+  border: 1.5px solid var(--gu-muted-foreground);
+}
+
+.st-chip-none::before {
+  border: 1.5px dashed var(--gu-muted-foreground);
+}
+
+/* Stats: figures split by hairlines, no boxes. In a section the last figure gets more room (a date); the wide
+   strip on Databases splits evenly. */
+.st-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.5fr);
+}
+
+.st-stats-wide .st-stats {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.st-stats + .st-stats {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--gu-border);
+}
+
+.st-stats-wide {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--gu-border);
+}
+
+.st-stat {
+  min-width: 0;
+  padding: 0 16px;
+  border-left: 1px solid var(--gu-border);
+}
+
+.st-stat:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+/* Narrow screens: three figures a row, so a version keeps room to show */
+@media (max-width: 640px) {
+  .st-stats,
+  .st-stats-wide .st-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 14px;
+  }
+
+  .st-stat:nth-child(3n + 1) {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+.st-stat-label {
+  display: block;
+  margin-bottom: 8px;
+  overflow: hidden;
+  color: var(--gu-muted-foreground);
+  font: 500 10.5px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.st-stat-value {
+  overflow: hidden;
+  font: 500 17px/1.1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-stat-value small {
+  margin-left: 3px;
+  color: var(--gu-muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.st-stat-date {
+  font-size: 13px;
+  line-height: 20px;
+  /* A date is never cut: its time wraps onto a second line when the cell is narrow */
+  white-space: normal;
+}
+
+/* Phone width: two figures a row, so every label shows in full */
+@media (max-width: 480px) {
+  .st-stats,
+  .st-stats-wide .st-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-stat:nth-child(3n + 1) {
+    padding-left: 16px;
+    border-left: 1px solid var(--gu-border);
+  }
+
+  .st-stat:nth-child(2n + 1) {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+.st-narrow {
+  max-width: 520px;
+}
+
+.st-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.st-row-actions a.gu-button {
+  text-decoration: none;
+}
+
+/* Restore to a point in time */
+.st-field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.st-epoch {
+  width: 140px;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-hint {
+  color: var(--gu-muted-foreground);
+  font-size: 12px;
+}
+
+.st-hint .st-num {
+  color: var(--gu-foreground);
+}
+
+.st-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.st-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--gu-border);
+  border-radius: var(--gu-radius-control);
+  background: none;
+  color: var(--gu-muted-foreground);
+  font: 400 11.5px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  cursor: pointer;
+}
+
+.st-pick b {
+  color: var(--gu-foreground);
+  font-weight: 400;
+}
+
+.st-pick:hover,
+.st-pick-on {
+  border-color: var(--gu-border-strong);
+  color: var(--gu-foreground);
+}
+
+.st-pick-on {
+  background: var(--gu-selected);
+}
+
+.st-pick:focus-visible {
+  outline: var(--gu-focus-width) solid var(--gu-ring);
+  outline-offset: var(--gu-focus-offset);
+}
+
+/* Danger zone */
+.st-danger-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.st-danger-row p {
+  max-width: 60ch;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .st-danger-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+}
+
+/* The token shown once */
+.st-reveal {
+  margin: 16px 0 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--gu-border-strong);
+  border-radius: var(--gu-radius-box);
+  background: var(--gu-background);
+  box-shadow: inset 2px 0 0 var(--gu-primary);
+}
+
+.st-reveal-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.st-reveal-head strong {
+  font-weight: 600;
+}
+
+.st-reveal p {
+  margin: 0 0 10px;
+  color: var(--gu-muted-foreground);
+}
+
+.st-secret {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.st-secret code {
+  display: flex;
+  flex: 0 1 460px;
+  align-items: center;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--gu-border);
+  border-radius: var(--gu-radius-control);
+  background: var(--gu-surface);
+  font: 400 13px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-reveal .st-usage {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.st-usage code {
+  color: var(--gu-foreground);
+  font: 400 12px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+}
+
+.st-after-reveal {
+  margin-top: 12px;
+}
+
+/* Saved queries: the first line takes the room left and truncates */
+.st-saved td:nth-child(1) {
+  max-width: 220px;
+}
+
+.st-qname {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.st-saved td:nth-child(3) {
+  width: 100%;
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.st-qline {
+  color: var(--gu-muted-foreground);
+  font: 400 12px/1 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  white-space: nowrap;
+}
+
+/* ---------- Dialog fields ---------- */
+
+.st-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.st-field-label {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.st-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 4px;
+}
+
+.st-check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font: 400 12px/1.4 var(--gu-font-mono);
+  font-variant-ligatures: none;
+}
+
+.st-check input {
+  margin: 0;
+  accent-color: var(--gu-primary);
+}
+
+.st-error {
+  margin: 0;
+  color: var(--gu-status-error);
+  font-size: 12.5px;
+}
+
+/* "More options": a disclosure under the one required field */
+.st-more {
+  border-top: 1px solid var(--gu-border);
+  padding-top: 10px;
+}
+
+.st-more > summary {
+  color: var(--gu-foreground);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.st-more > summary:focus-visible {
+  outline: var(--gu-focus-width) solid var(--gu-ring);
+  outline-offset: var(--gu-focus-offset);
+}
+
+.st-group {
+  margin: 12px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.st-group > legend {
+  padding: 0;
+  margin-bottom: 8px;
+  color: var(--gu-muted-foreground);
+  font: 500 11px/1.4 var(--gu-font-mono);
+  font-variant-ligatures: none;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.st-group .st-fields {
+  gap: 10px;
+}
+
+.st-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12.5px;
+}
+
+.st-inline input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--gu-primary);
+}
+
+.st-tier-label {
+  flex: 0 0 120px;
+  font-size: 12px;
+}
+
+select.gu-input {
+  font-family: var(--gu-font-ui);
+}

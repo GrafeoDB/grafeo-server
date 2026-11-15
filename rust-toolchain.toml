@@ -1,11 +1,11 @@
 # Pinned so local builds and CI use the same compiler and clippy lint set.
 # Bump deliberately (and fix new lints in the same change) instead of tracking `stable`.
 # Keep this identical to the `dtolnay/rust-toolchain@<version>` refs in .github/workflows.
-# The MSRV (rust-version in Cargo.toml) is 1.99.0 too since 0.6.0 (grafeo 0.6 needs it),
-# checked separately with `cargo +1.99.0`; the Docker builder image stays on the MSRV
+# The MSRV (rust-version in Cargo.toml) is 1.100.0 too since 0.6.3 (1.99.0 in 0.6.0 to 0.6.2),
+# checked separately with `cargo +1.100.0`; the Docker builder image stays on the MSRV
 # and never sees this file (Dockerfile.dockerignore).
 
 [toolchain]
-channel = "1.99.0"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

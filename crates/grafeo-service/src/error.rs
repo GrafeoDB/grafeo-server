@@ -80,25 +80,39 @@ impl ServiceError {
     #[must_use]
     pub fn from_engine(error: grafeo_common::Error) -> Self {
         use grafeo_common::Error;
-        use grafeo_common::utils::error::{QueryErrorKind, TransactionError};
+        use grafeo_common::utils::error::{ErrorCode, QueryErrorKind, TransactionError};
 
-        // The engine reports a permission error without a kind of its own
-        // (a semantic query error, or a read-only transaction), so its
+        // A statement reaching outside the database without external access
+        // (GRAFEO-Q008): the engine names its own Rust API, so say what the
+        // operator of this server can do instead.
+        if error.error_code() == ErrorCode::QueryExternalAccessDenied {
+            return Self::Forbidden(format!(
+                "{error}. On this server it needs --allow-external-access \
+                 (GRAFEO_ALLOW_EXTERNAL_ACCESS), and then an admin token"
+            ));
+        }
+        // The engine reports other permission errors without a kind of their
+        // own (a semantic query error, or a read-only transaction), so the
         // message is the only sign.
         if error.to_string().contains("permission denied") {
             return Self::Forbidden(error.to_string());
+        }
+        // A conflict with a concurrent transaction is known by its code
+        // (GRAFEO-T001, T005 or the deadlock code), whichever variant carries
+        // it, so a conflict the engine starts reporting another way (such as
+        // concurrent MERGEs of one pattern) is still one the client retries.
+        if matches!(
+            error.error_code(),
+            ErrorCode::TransactionConflict
+                | ErrorCode::TransactionSerialization
+                | ErrorCode::TransactionDeadlock
+        ) {
+            return Self::TransactionConflict(error.to_string());
         }
         match error {
             Error::Internal(_) | Error::Io(_) | Error::Serialization(_) | Error::Storage(_) => {
                 Self::Internal(error.to_string())
             }
-            Error::Transaction(
-                TransactionError::WriteConflict(_)
-                | TransactionError::Conflict
-                | TransactionError::Aborted
-                | TransactionError::SerializationFailure(_)
-                | TransactionError::Deadlock,
-            ) => Self::TransactionConflict(error.to_string()),
             Error::Transaction(
                 TransactionError::DatabaseClosed
                 | TransactionError::IncompleteCommit
@@ -114,11 +128,150 @@ impl ServiceError {
             | Error::LabelNotFound(_)
             | Error::TypeMismatch { .. }
             | Error::InvalidValue(_)
+            | Error::Constraint { .. }
             | Error::Transaction(_)
             | Error::Query(_) => Self::BadRequest(error.to_string()),
             // `Error` is non-exhaustive: a variant added later (corruption
             // included) is not known to be the caller's fault.
             _ => Self::Internal(error.to_string()),
+        }
+    }
+
+    /// The error of the batch statement at `index`: the same kind, so a
+    /// refused statement is still a 403 and a conflict still retryable, with
+    /// the statement's position in front of the message.
+    #[must_use]
+    pub fn in_batch(self, index: usize) -> Self {
+        let at = |message: String| format!("query at index {index} failed: {message}");
+        match self {
+            Self::BadRequest(m) => Self::BadRequest(at(m)),
+            Self::NotFound(m) => Self::NotFound(at(m)),
+            Self::Conflict(m) => Self::Conflict(at(m)),
+            Self::TransactionConflict(m) => Self::TransactionConflict(at(m)),
+            Self::Forbidden(m) => Self::Forbidden(at(m)),
+            Self::Unavailable(m) => Self::Unavailable(at(m)),
+            Self::Internal(m) => Self::Internal(at(m)),
+            // Kinds with a fixed message keep it; the status says enough.
+            other @ (Self::SessionNotFound
+            | Self::Timeout
+            | Self::Unauthorized
+            | Self::TooManyRequests
+            | Self::ReadOnly) => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_engine_conflict_is_a_retryable_conflict() {
+        use grafeo_common::Error;
+        use grafeo_common::utils::error::TransactionError;
+        for error in [
+            TransactionError::Conflict,
+            TransactionError::WriteConflict("node 1".into()),
+            TransactionError::Aborted,
+            TransactionError::SerializationFailure("read set changed".into()),
+            TransactionError::Deadlock,
+        ] {
+            let error = Error::Transaction(error);
+            let code = error.error_code();
+            assert!(
+                matches!(
+                    ServiceError::from_engine(error),
+                    ServiceError::TransactionConflict(_)
+                ),
+                "{code} is a conflict the client retries"
+            );
+        }
+        // The other transaction errors keep their own kinds.
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::Timeout)),
+            ServiceError::Timeout
+        ));
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::DatabaseClosed)),
+            ServiceError::Unavailable(_)
+        ));
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::ReadOnly)),
+            ServiceError::BadRequest(_)
+        ));
+    }
+
+    /// A constraint violation (GRAFEO-V001) is the caller's data, not a server
+    /// fault: it answers 400 on every path that maps engine errors, commits
+    /// included, not a 500 with the detail hidden.
+    #[test]
+    fn a_constraint_violation_is_a_bad_request() {
+        use grafeo_common::Error;
+        use grafeo_common::utils::error::ConstraintKind;
+        for kind in [ConstraintKind::Schema, ConstraintKind::EdgesStillExist] {
+            let error = Error::Constraint {
+                kind,
+                message: "UNIQUE on :Key(id) violated".into(),
+            };
+            assert!(
+                matches!(
+                    ServiceError::from_engine(error),
+                    ServiceError::BadRequest(ref m) if m.contains("UNIQUE")
+                ),
+                "{kind:?} is a bad request with its message"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_error_keeps_its_kind_and_names_the_statement() {
+        let forbidden = ServiceError::Forbidden("no external access".into()).in_batch(2);
+        assert!(matches!(&forbidden, ServiceError::Forbidden(_)));
+        assert_eq!(
+            forbidden.to_string(),
+            "query at index 2 failed: no external access"
+        );
+
+        for (error, same_kind) in [
+            (
+                ServiceError::BadRequest("x".into()),
+                (|e: &ServiceError| matches!(e, ServiceError::BadRequest(_)))
+                    as fn(&ServiceError) -> bool,
+            ),
+            (ServiceError::NotFound("x".into()), |e| {
+                matches!(e, ServiceError::NotFound(_))
+            }),
+            (ServiceError::Conflict("x".into()), |e| {
+                matches!(e, ServiceError::Conflict(_))
+            }),
+            (ServiceError::TransactionConflict("x".into()), |e| {
+                matches!(e, ServiceError::TransactionConflict(_))
+            }),
+            (ServiceError::Unavailable("x".into()), |e| {
+                matches!(e, ServiceError::Unavailable(_))
+            }),
+            (ServiceError::Internal("x".into()), |e| {
+                matches!(e, ServiceError::Internal(_))
+            }),
+            (ServiceError::Timeout, |e| {
+                matches!(e, ServiceError::Timeout)
+            }),
+            (ServiceError::ReadOnly, |e| {
+                matches!(e, ServiceError::ReadOnly)
+            }),
+        ] {
+            let before = error.to_string();
+            let fixed_message = matches!(error, ServiceError::Timeout | ServiceError::ReadOnly);
+            let after = error.in_batch(0);
+            assert!(same_kind(&after), "{before} kept its kind: {after:?}");
+            if fixed_message {
+                assert_eq!(after.to_string(), before);
+            } else {
+                assert!(
+                    after.to_string().contains("query at index 0 failed: x"),
+                    "{after}"
+                );
+            }
         }
     }
 }
