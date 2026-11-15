@@ -44,10 +44,9 @@ export default function DatabasesPage() {
 
   const columns: DataColumn<Row>[] = [
     {
+      // Plain text: with onRowClick the table draws it as the row's one control (a native button that opens it)
       key: "name",
       header: "Name",
-      // The row opens the database (click or Enter), so the name is text, not a second control
-      render: (d) => <span className="st-link-text">{d.name}</span>,
     },
     { key: "type", header: "Type", render: (d) => <Chip>{modelName(d.database_type)}</Chip> },
     { key: "nodes", header: "Nodes", align: "end", render: (d) => fmt(d.stats?.node_count ?? d.node_count) },

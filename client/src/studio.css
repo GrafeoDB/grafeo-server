@@ -127,11 +127,6 @@ body {
   outline-offset: var(--gu-focus-offset);
 }
 
-.st-link-text {
-  color: var(--gu-link);
-  font-weight: 500;
-}
-
 .st-strong {
   font-weight: 500;
 }

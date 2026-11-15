@@ -13,7 +13,7 @@
     "minimatch": "11.0.5"
   },
   "dependencies": {
-    "@grafeo-db/ui": "^0.2.0",
+    "@grafeo-db/ui": "^0.2.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.18.4"
