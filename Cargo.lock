@@ -437,9 +437,9 @@ dependencies = [
 
 [[package]]
 name = "boltr"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df535b8c258f9c991f7e1c72babc11e1ba14be5d7eace2e07a21b1595240019"
+checksum = "fd20c9f936c83e6daa3c241411caeabd69feaf45e5492c21231dfbf2c68ef159"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1393,9 +1393,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca11785dbcfd3f5c9c32475ab7722e3da0fdcbfbcb535dff98a245fc245f9145"
+checksum = "9a220ac12ce7aade26f4f7f6527e7e478d0d5bb40b1ea89db99a6372e46cfdef"
 dependencies = [
  "grafeo-common",
  "grafeo-core",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-boltr"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "boltr",
@@ -1421,9 +1421,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa27dcea8a70c2ce83fc751c3022fb207a2b68066ce52364f60c081863026e59"
+checksum = "13d340edc5bb7d445358238f08847c5c38411d5e8b58a93c1f58f2f3c7f1c3e2"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1446,9 +1446,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6de07617c96d44d033929522946c2238a74210c07024f3ac14fab17d6263a22"
+checksum = "c9c2266a7e15b5cc98acc7efd6e834fc57ad878b6059b5e31553e3286459cfb0"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1474,9 +1474,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0500f98699d74a6c3aa966ade00f5ca242c20ecfbcf5fa677c2ae7a5a483c72f"
+checksum = "0a6ee5fad8b3bc169253bbe7be3895a540ca5651a8a10c0768cb8789b0bbaf5a"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-gwp"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "dashmap",
  "grafeo-common",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-http"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-stream",
  "axum",
@@ -1553,14 +1553,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-maelstrom"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "grafeo-server"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-service"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -1615,9 +1615,9 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31d074f2ce89c265ceae49061121191fe2ffa74e5ddffcd67f2941b96e30af92"
+checksum = "322a9175fa727457e6e80047194ad41149cc8e8ec5435a42e7e3dc34a2302e9f"
 dependencies = [
  "bincode",
  "bytes",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-studio"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "axum",
  "mime_guess",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-sync"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "axum",
  "grafeo-service",
@@ -1655,9 +1655,9 @@ dependencies = [
 
 [[package]]
 name = "gwp"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "989680815d3a3868b87132d685c8e91d892428f61b9db57de4556472b34076c3"
+checksum = "30ad953c35348541dd1e6dcb4dfc7db5b843b851cf9d06ef032c8461651d2acd"
 dependencies = [
  "prost",
  "prost-build",
@@ -3919,7 +3919,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

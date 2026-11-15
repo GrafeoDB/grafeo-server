@@ -1139,6 +1139,7 @@ impl GqlBackend for GrafeoBackend {
             query_text: req.query_text,
             query_vector: req.query_vector,
             k: req.k,
+            ef: req.ef,
         };
 
         let hits = SearchService::hybrid_search(self.state.databases(), &req.graph, service_req)

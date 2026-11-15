@@ -9332,6 +9332,240 @@ async fn bolt_write_conflict_is_a_transient_error() {
     );
 }
 
+/// Runs a statement in a language in an HTTP transaction; the status and the body.
+async fn http_tx_query_in(
+    client: &Client,
+    base: &str,
+    session: &str,
+    language: &str,
+    query: &str,
+) -> (u16, Value) {
+    let resp = client
+        .post(format!("{base}/tx/query"))
+        .header("X-Session-Id", session)
+        .json(&json!({ "query": query, "language": language }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Counts the `:Key {id: 1}` nodes over HTTP.
+async fn http_key_count(client: &Client, base: &str) -> Value {
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "MATCH (n:Key {id: 1}) RETURN count(n) AS c"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    body["rows"][0][0].clone()
+}
+
+/// Two transactions MERGE one pattern that neither sees yet: since grafeo
+/// 0.6.3 the younger gets the retryable `GRAFEO-T001` (at its MERGE or at its
+/// commit) instead of creating a duplicate, so HTTP answers 409 `conflict`,
+/// and its retry matches the node the older one created.
+#[tokio::test]
+async fn http_concurrent_merge_is_409_and_the_retry_matches() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let older = http_begin(&client, &base).await;
+    let younger = http_begin(&client, &base).await;
+    let (status, body) = http_tx_query(&client, &base, &older, "MERGE (:Key {id: 1})").await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = http_tx_query(&client, &base, &younger, "MERGE (:Key {id: 1})").await;
+    let conflict = if status == 409 {
+        body
+    } else {
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &older).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &younger).await;
+        assert_eq!(status, 409, "the younger commit conflicts: {body}");
+        body
+    };
+    assert_eq!(conflict["error"], "conflict", "{conflict}");
+    assert!(
+        conflict["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "the reason is in the response: {conflict}"
+    );
+
+    let _ = http_commit(&client, &base, &older).await;
+    let _ = http_commit(&client, &base, &younger).await;
+    let retry = http_begin(&client, &base).await;
+    let (status, body) = http_tx_query(&client, &base, &retry, "MERGE (:Key {id: 1})").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http_commit(&client, &base, &retry).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        http_key_count(&client, &base).await,
+        1,
+        "MERGE created it once"
+    );
+}
+
+/// Two transactions MERGE the same existing node without `ON MATCH SET`: both
+/// commit (grafeo 0.6.2 failed the second with a conflict).
+#[tokio::test]
+async fn http_merge_that_only_matches_commits_in_both() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/query"))
+        .json(&json!({"query": "INSERT (:Key {id: 1})"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let first = http_begin(&client, &base).await;
+    let second = http_begin(&client, &base).await;
+    for session in [&first, &second] {
+        let (status, body) = http_tx_query(&client, &base, session, "MERGE (:Key {id: 1})").await;
+        assert_eq!(status, 200, "{body}");
+    }
+    for session in [&first, &second] {
+        let (status, body) = http_commit(&client, &base, session).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(http_key_count(&client, &base).await, 1);
+}
+
+/// The concurrent MERGE conflict over GWP is GQLSTATUS 40001.
+#[cfg(feature = "gwp")]
+#[tokio::test]
+async fn gwp_concurrent_merge_is_gqlstatus_40001() {
+    let (_http, gwp_endpoint) = spawn_server_with_gwp().await;
+    let conn = gwp::client::GqlConnection::connect(&gwp_endpoint)
+        .await
+        .unwrap();
+    let mut older_session = conn.create_session().await.unwrap();
+    let mut younger_session = conn.create_session().await.unwrap();
+    let mut older = older_session.begin_transaction().await.unwrap();
+    let mut younger = younger_session.begin_transaction().await.unwrap();
+
+    let mut cursor = older.execute_simple("MERGE (:Key {id: 1})").await.unwrap();
+    assert!(cursor.is_success().await.unwrap());
+
+    let mut cursor = younger
+        .execute_simple("MERGE (:Key {id: 1})")
+        .await
+        .unwrap();
+    let code = if cursor.is_success().await.unwrap() {
+        older.commit().await.unwrap();
+        match younger.commit().await {
+            Err(gwp::error::GqlError::Status { status }) => status.code.clone(),
+            other => panic!("expected a GQLSTATUS from the commit, got {other:?}"),
+        }
+    } else {
+        let summary = cursor.summary().await.unwrap().cloned().unwrap();
+        summary.status.unwrap().code
+    };
+    assert_eq!(code, "40001", "a MERGE conflict is a serialization failure");
+}
+
+/// The concurrent MERGE conflict over Bolt is a transient error, which drivers
+/// retry in a managed transaction.
+#[cfg(feature = "bolt")]
+#[tokio::test]
+async fn bolt_concurrent_merge_is_a_transient_error() {
+    let (_http, bolt_addr) = spawn_server_with_bolt().await;
+    let mut older = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    let mut younger = boltr::client::BoltSession::connect(bolt_addr)
+        .await
+        .unwrap();
+    older.begin().await.unwrap();
+    younger.begin().await.unwrap();
+    let _summary = older.run("MERGE (:Key {id: 1})").await.unwrap();
+
+    let code = match younger.run("MERGE (:Key {id: 1})").await {
+        Err(boltr::BoltError::Query { code, .. }) => code,
+        Err(other) => panic!("expected a FAILURE with a code, got {other:?}"),
+        Ok(_) => {
+            older.commit().await.unwrap();
+            match younger.commit().await {
+                Err(boltr::BoltError::Query { code, .. }) => code,
+                other => panic!("expected a FAILURE with a code, got {other:?}"),
+            }
+        }
+    };
+    assert_eq!(code, "Neo.TransientError.Transaction.Outdated");
+}
+
+/// Two SPARQL transactions delete one triple: since grafeo 0.6.3 the second
+/// fails with `GRAFEO-T001` (at its delete or at its commit), which HTTP
+/// answers as a 409 `conflict`. A write that changes nothing in its snapshot
+/// (inserting a triple it already holds) records nothing and does not
+/// conflict, so the case is two deletes.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[tokio::test]
+async fn http_conflicting_sparql_updates_are_409() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let resp = client
+        .post(format!("{base}/db"))
+        .json(&json!({"name": "rdf-tx", "database_type": "Rdf"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let triple = "<http://ex.org/a> <http://ex.org/p> <http://ex.org/b>";
+    let begin = || async {
+        let resp = client
+            .post(format!("{base}/tx/begin"))
+            .json(&json!({"database": "rdf-tx"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        body["session_id"].as_str().unwrap().to_string()
+    };
+    let load = begin().await;
+    let insert = format!("INSERT DATA {{ {triple} }}");
+    let (status, body) = http_tx_query_in(&client, &base, &load, "sparql", &insert).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http_commit(&client, &base, &load).await;
+    assert_eq!(status, 200, "{body}");
+
+    let first = begin().await;
+    let second = begin().await;
+    let delete = format!("DELETE DATA {{ {triple} }}");
+    let (status, body) = http_tx_query_in(&client, &base, &first, "sparql", &delete).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http_tx_query_in(&client, &base, &second, "sparql", &delete).await;
+    let conflict = if status == 409 {
+        body
+    } else {
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &first).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http_commit(&client, &base, &second).await;
+        assert_eq!(status, 409, "the second commit conflicts: {body}");
+        body
+    };
+    assert_eq!(conflict["error"], "conflict", "{conflict}");
+    let _ = http_commit(&client, &base, &first).await;
+    let _ = http_commit(&client, &base, &second).await;
+
+    let check = begin().await;
+    let (status, body) = http_tx_query_in(
+        &client,
+        &base,
+        &check,
+        "sparql",
+        &format!("ASK {{ {triple} }}"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0][0], false, "the delete stands: {body}");
+}
+
 // ---------------------------------------------------------------------------
 // Query language names
 // ---------------------------------------------------------------------------

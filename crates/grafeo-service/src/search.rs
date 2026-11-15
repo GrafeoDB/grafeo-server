@@ -111,20 +111,20 @@ impl SearchService {
         let entry = databases.get_available(db_name)?;
 
         let results = tokio::task::spawn_blocking(move || {
-            let query_vec = if req.query_vector.is_empty() {
-                None
-            } else {
-                Some(req.query_vector)
-            };
-            entry.db().hybrid_search(
+            let mut options = grafeo_engine::database::HybridSearchOptions::new();
+            if !req.query_vector.is_empty() {
+                options = options.with_query_vector(&req.query_vector);
+            }
+            if let Some(ef) = req.ef {
+                options = options.with_ef(ef as usize);
+            }
+            entry.db().hybrid_search_with(
                 &req.label,
                 &req.text_property,
                 &req.vector_property,
                 &req.query_text,
-                query_vec.as_deref(),
                 req.k as usize,
-                None,
-                None,
+                &options,
             )
         })
         .await
@@ -267,6 +267,7 @@ mod tests {
             query_text: "hello".into(),
             query_vector: vec![1.0, 2.0],
             k: 5,
+            ef: None,
         };
         let err = SearchService::hybrid_search(s.databases(), "nope", req)
             .await
@@ -289,11 +290,282 @@ mod tests {
             query_text: "hello".into(),
             query_vector: vec![1.0],
             k: 5,
+            ef: None,
         };
         let err = SearchService::hybrid_search(s.databases(), "default", req)
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceError::BadRequest(_)));
         assert!(err.to_string().contains("hybrid-search"));
+    }
+
+    #[test]
+    fn hybrid_search_req_decodes_ef() {
+        let base = serde_json::json!({
+            "label": "Doc",
+            "text_property": "content",
+            "vector_property": "emb",
+            "query_text": "harbour",
+            "k": 5,
+        });
+        let decode = |extra: serde_json::Value| {
+            let mut body = base.clone();
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<types::HybridSearchReq>(body)
+        };
+
+        assert_eq!(decode(serde_json::json!({})).unwrap().ef, None);
+        assert_eq!(decode(serde_json::json!({ "ef": null })).unwrap().ef, None);
+        assert_eq!(
+            decode(serde_json::json!({ "ef": 256 })).unwrap().ef,
+            Some(256)
+        );
+        assert!(decode(serde_json::json!({ "ef": -1 })).is_err());
+        assert!(decode(serde_json::json!({ "ef": "256" })).is_err());
+        assert!(decode(serde_json::json!({ "ef": 1.5 })).is_err());
+        assert!(decode(serde_json::json!({ "ef": 4_294_967_296_u64 })).is_err());
+    }
+}
+
+/// The beam width of a hybrid search's vector half (grafeo-server#85), on
+/// the engine's fixture for the same feature: a vector index built with a
+/// narrow construction beam, so the default search beam misses exact
+/// neighbours and `ef` changes what the vector half finds.
+#[cfg(all(test, feature = "hybrid-search"))]
+mod hybrid_ef_tests {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    use grafeo_common::Value;
+
+    use super::*;
+    use crate::ServiceState;
+
+    const DIMENSIONS: usize = 16;
+    const NODES: usize = 3000;
+    /// The results asked for; each half fetches twice as many.
+    const K: u32 = 5;
+    /// A text that no document contains, so the vector half alone decides.
+    const NO_TEXT_MATCH: &str = "zzzz";
+    /// Query seeds; the default beam misses an exact neighbour for most.
+    const SEEDS: std::ops::Range<u64> = 1..9;
+
+    /// A linear congruential generator, so every run builds the same vectors.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_value(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            f32::from(u16::try_from(self.0 >> 48).expect("16 bits")) / 65_536.0
+        }
+
+        fn vector(&mut self) -> Vec<f32> {
+            (0..DIMENSIONS).map(|_| self.next_value()).collect()
+        }
+    }
+
+    struct Fixture {
+        state: ServiceState,
+        vectors: Vec<(u64, Vec<f32>)>,
+    }
+
+    fn fixture() -> &'static Fixture {
+        static FIXTURE: OnceLock<Fixture> = OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let state = ServiceState::new_in_memory(300);
+            let db = state.databases().get_available("default").unwrap().db();
+            let mut values = Lcg(0x5EED);
+            let mut vectors = Vec::with_capacity(NODES);
+            for i in 0..NODES {
+                let id = db.create_node(&["Doc"]).unwrap();
+                let text = if i % 3 == 0 {
+                    "Lisbon harbour at dawn"
+                } else {
+                    "Porto bridges at night"
+                };
+                db.set_node_property(id, "content", Value::String(text.into()))
+                    .unwrap();
+                let vector = values.vector();
+                db.set_node_property(id, "emb", Value::Vector(vector.clone().into()))
+                    .unwrap();
+                vectors.push((id.as_u64(), vector));
+            }
+            db.create_text_index("Doc", "content").unwrap();
+            db.create_vector_index(
+                "Doc",
+                "emb",
+                Some(DIMENSIONS),
+                Some("euclidean"),
+                Some(16),
+                Some(8),
+                None,
+            )
+            .unwrap();
+            Fixture { state, vectors }
+        })
+    }
+
+    fn query_vector(seed: u64) -> Vec<f32> {
+        Lcg(seed).vector()
+    }
+
+    fn hybrid_req(
+        query_text: &str,
+        query_vector: Vec<f32>,
+        ef: Option<u32>,
+    ) -> types::HybridSearchReq {
+        types::HybridSearchReq {
+            database: "default".into(),
+            label: "Doc".into(),
+            text_property: "content".into(),
+            vector_property: "emb".into(),
+            query_text: query_text.into(),
+            query_vector,
+            k: K,
+            ef,
+        }
+    }
+
+    async fn hybrid(
+        query_text: &str,
+        query_vector: Vec<f32>,
+        ef: Option<u32>,
+    ) -> Vec<types::SearchHit> {
+        SearchService::hybrid_search(
+            fixture().state.databases(),
+            "default",
+            hybrid_req(query_text, query_vector, ef),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn ids(hits: &[types::SearchHit]) -> Vec<u64> {
+        hits.iter().map(|h| h.node_id).collect()
+    }
+
+    /// The `k` nodes nearest to `query` by a scan of every vector.
+    fn nearest_by_scan(query: &[f32], k: usize) -> Vec<u64> {
+        let mut by_distance: Vec<(f32, u64)> = fixture()
+            .vectors
+            .iter()
+            .map(|(id, v)| {
+                let d: f32 = v.iter().zip(query).map(|(a, b)| (a - b) * (a - b)).sum();
+                (d, *id)
+            })
+            .collect();
+        by_distance.sort_by(|a, b| a.0.total_cmp(&b.0));
+        by_distance.into_iter().take(k).map(|(_, id)| id).collect()
+    }
+
+    fn sorted(mut ids: Vec<u64>) -> Vec<u64> {
+        ids.sort_unstable();
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_full_beam_finds_the_exact_nearest_neighbours() {
+        let full = u32::try_from(NODES).unwrap();
+        let mut default_missed = 0;
+        for seed in SEEDS {
+            let query = query_vector(seed);
+            let exact = sorted(nearest_by_scan(&query, K as usize));
+            let at_full_beam = sorted(ids(&hybrid(NO_TEXT_MATCH, query.clone(), Some(full)).await));
+            assert_eq!(at_full_beam, exact, "seed {seed}: ef={full} must be exact");
+            let at_default = sorted(ids(&hybrid(NO_TEXT_MATCH, query, None).await));
+            if at_default != exact {
+                default_missed += 1;
+            }
+        }
+        // Without this the test could not tell whether `ef` reached the engine.
+        assert!(
+            default_missed > 0,
+            "the default beam found every exact neighbour; the fixture no longer shows ef"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_vector_half_matches_vector_search_at_the_same_ef() {
+        for ef in [None, Some(8), Some(64), Some(400)] {
+            for seed in SEEDS {
+                let query = query_vector(seed);
+                let hybrid_ids = ids(&hybrid(NO_TEXT_MATCH, query.clone(), ef).await);
+                let vector = SearchService::vector_search(
+                    fixture().state.databases(),
+                    "default",
+                    types::VectorSearchReq {
+                        database: "default".into(),
+                        label: "Doc".into(),
+                        property: "emb".into(),
+                        query_vector: query,
+                        k: 2 * K,
+                        ef,
+                        filters: HashMap::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                // With an empty text half, RRF keeps the vector half's order.
+                let expected: Vec<u64> = ids(&vector).into_iter().take(K as usize).collect();
+                assert_eq!(hybrid_ids, expected, "seed {seed}, ef {ef:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn without_ef_the_results_are_the_engines_default_hybrid_search() {
+        let db = fixture()
+            .state
+            .databases()
+            .get_available("default")
+            .unwrap()
+            .db();
+        for seed in SEEDS {
+            let query = query_vector(seed);
+            let expected: Vec<(u64, f64)> = db
+                .hybrid_search(
+                    "Doc",
+                    "content",
+                    "emb",
+                    "harbour",
+                    Some(&query),
+                    K as usize,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(id, score)| (id.as_u64(), score))
+                .collect();
+            let got: Vec<(u64, f64)> = hybrid("harbour", query, None)
+                .await
+                .into_iter()
+                .map(|h| (h.node_id, h.score))
+                .collect();
+            assert_eq!(got, expected, "seed {seed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ef_without_a_query_vector_is_accepted_and_changes_nothing() {
+        let text_only = hybrid("harbour", Vec::new(), None).await;
+        assert_eq!(text_only.len(), K as usize);
+        for ef in [Some(1), Some(64), Some(u32::MAX)] {
+            let with_ef = hybrid("harbour", Vec::new(), ef).await;
+            assert_eq!(ids(&with_ef), ids(&text_only), "ef {ef:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_small_or_huge_beam_still_returns_k_results() {
+        for ef in [1, 2, u32::MAX] {
+            let hits = hybrid(NO_TEXT_MATCH, query_vector(1), Some(ef)).await;
+            assert_eq!(hits.len(), K as usize, "ef {ef}");
+        }
     }
 }
