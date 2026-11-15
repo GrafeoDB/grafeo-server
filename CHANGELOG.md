@@ -8,13 +8,16 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 
 ### Added
 
+- **Hybrid search takes `ef`** (#85): `/search/hybrid` and GWP's `HybridSearch` accept `ef`, the beam width of the vector half, as `/search/vector` does; without it the vector half runs at the index default as before. On a 3,000-node index built with a narrow beam, `ef` equal to the node count returns the exact nearest neighbours that the default beam misses.
 - **The Studio explains a query**: Explain in the query toolbar shows the plan of a GQL or Cypher query in the Plan view.
+- **Bolt login failures are audited with the client's IP**: a refused Bolt LOGON writes `auth_failure` with `source_ip`, as HTTP has since 0.6.2 (it was missing for Bolt).
 
 ### Changed
 
 - **The Studio is rebuilt in the Grafeo design**: the workbench (query tabs, editor, graph, inspector, results) and the Databases, database, API tokens and Saved queries pages share one look with the other Grafeo apps, dark or light, from phone to desktop width. Label colours and styles are set from the schema, legend or inspector and kept per database in the browser; saved queries, history and query tabs carry over.
 - **The Studio's API tokens entry shows only where tokens are kept**: on a server that checks credentials and runs with `--data-dir` or `--token-store-path`; it showed on every build with authentication compiled in, where the page could only fail.
 - **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
+- **Concurrent MERGEs of one pattern create it once**: with grafeo 0.6.3 the second of two open transactions that MERGE the same new pattern fails with a retryable conflict (HTTP 409 `conflict`, GWP GQLSTATUS 40001, Bolt `Neo.TransientError.Transaction.Outdated`) instead of creating a duplicate, and a MERGE that only matches no longer conflicts. SPARQL transactions that change one triple, one of them by deleting it, conflict the same way; the client retries the statement or the transaction.
 - **Minimum Rust 1.100**: building from source needs Rust 1.100.0 (was 1.99.0); the Docker images build on `rust:1.100-slim`.
 - **A failed `/batch` statement answers with its own status**: a refused statement is a 403 and a missing resource a 404, with the statement's index in the detail; they were 400s. A timeout is a 408 and an internal error a 500, as on `/query`; conflicts (409) and unavailable databases (503) answer as before.
 - **A server without credentials answers only on trusted host names**: a request whose `Host` is not loopback, `--host`, a `--trusted-hosts` entry or an IP address gets 403 `untrusted_host`, so a DNS-rebinding page can't read the server under its own name (`/health` and `/ready` answer on any). Every client of such a server is affected, browsers or not: add the name clients use to `--trusted-hosts`: a service or container name, a LAN or mDNS host name, or the name a proxy puts in `Host` (the public name when it keeps `Host`, the upstream name when it rewrites it) (`GRAFEO_TRUSTED_HOSTS`).
@@ -43,7 +46,9 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 
 ### Dependencies
 
-- **boltr 0.3.1** (from 0.3.0): the `TCP_NODELAY` fix above.
+- **grafeo-engine and grafeo-common 0.6.3** (pinned `=0.6.3`, from 0.6.2): `hybrid_search_with` carries the `ef` above; see the engine's [0.6.3 changelog](https://github.com/GrafeoDB/grafeo/blob/main/CHANGELOG.md) for every fix.
+- **gwp 0.5.0** (from 0.4.0): `ef` on `HybridSearchRequest`.
+- **boltr 0.4.0** (from 0.3.0): the `TCP_NODELAY` fix (0.3.1) and the LOGON peer address for the audit log.
 - **@grafeo-db/ui 0.2.1** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it). It brings the Instrument Sans and JetBrains Mono fonts (SIL OFL 1.1), served with the Studio with their licence texts under `/studio/licenses/`; the Studio requests nothing from other sites.
 - **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
