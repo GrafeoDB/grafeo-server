@@ -4,10 +4,16 @@ All notable changes to grafeo-server, the Grafeo graph database server (HTTP, GW
 
 ## [0.6.3] - 2026-11-15
 
-Listener and security release: next to HTTP, GWP and Bolt open only when asked for, and remote statements no longer read or write files on the server. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both. A deployment that loads files by query (`LOAD CSV`, `grafeo.load_nodes_csv`) passes `--allow-external-access` and runs those statements as an admin.
+Listener, security and Studio release: next to HTTP, GWP and Bolt open only when asked for, remote statements no longer read or write files on the server, and the Studio is rebuilt in the Grafeo design. Anyone who connected over GWP to the standard image (`latest`) passes `--gwp` (or `GRAFEO_GWP=true`) and publishes port 7688; the full image starts both. A deployment that loads files by query (`LOAD CSV`, `grafeo.load_nodes_csv`) passes `--allow-external-access` and runs those statements as an admin.
+
+### Added
+
+- **The Studio explains a query**: Explain in the query toolbar shows the plan of a GQL or Cypher query in the Plan view.
 
 ### Changed
 
+- **The Studio is rebuilt in the Grafeo design**: the workbench (query tabs, editor, graph, inspector, results) and the Databases, database, API tokens and Saved queries pages share one look with the other Grafeo apps, dark or light, from phone to desktop width. Label colours and styles are set from the schema, legend or inspector and kept per database in the browser; saved queries, history and query tabs carry over.
+- **The Studio's API tokens entry shows only where tokens are kept**: on a server that checks credentials and runs with `--data-dir` or `--token-store-path`; it showed on every build with authentication compiled in, where the page could only fail.
 - **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
 - **Minimum Rust 1.100**: building from source needs Rust 1.100.0 (was 1.99.0); the Docker images build on `rust:1.100-slim`.
 - **A failed `/batch` statement answers with its own status**: a refused statement is a 403 and a missing resource a 404, with the statement's index in the detail; they were 400s. A timeout is a 408 and an internal error a 500, as on `/query`; conflicts (409) and unavailable databases (503) answer as before.
@@ -18,6 +24,8 @@ Listener and security release: next to HTTP, GWP and Bolt open only when asked f
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
 - **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
 - **A schema name is always one name**: the schema routes (`POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}`) and GWP's schema calls wrote the name into the statement unquoted, so a name with a space or a backtick failed as a syntax error and a crafted one ended in a 500. Names are now quoted; spaces, backticks and keywords stay part of the name.
+- **The Studio draws paths and the graph inside lists and maps**: a returned path (`RETURN p`) or a `collect(n)` showed in the table only.
+- **The Studio keeps the active database's sidebar current**: a write shows in the schema and the node and edge counts without a reload.
 - **GWP reports a permission refusal as GQLSTATUS 42501**: it was 42001 (syntax error), so a client could not tell a refused statement from a mistake in it.
 
 ### Security
@@ -27,6 +35,7 @@ Listener and security release: next to HTTP, GWP and Bolt open only when asked f
 ### Dependencies
 
 - **boltr 0.3.1** (from 0.3.0): the `TCP_NODELAY` fix above.
+- **@grafeo-db/ui 0.1.0** (new): the shared Grafeo parts the Studio is built from; its graph view, query editor and table replace the Studio's own (Sigma, graphology and CodeMirror now come with it).
 - **Rust and Studio dependencies refreshed within their ranges**: 70 crates and 38 npm packages; `npm audit` reports no vulnerabilities.
 
 ## [0.6.2] - 2026-11-08
