@@ -372,3 +372,61 @@ async fn a_refused_cross_site_request_still_carries_a_request_id() {
         "the 403 must carry an X-Request-Id header"
     );
 }
+
+/// A SPARQL statement run by `GET /db/{name}/sparql` with `headers`: its status.
+#[cfg(feature = "sparql")]
+async fn sparql_get(base: &str, statement: &str, headers: &[(&str, &str)]) -> StatusCode {
+    let url = reqwest::Url::parse_with_params(
+        &format!("{base}/db/default/sparql"),
+        &[("query", statement)],
+    )
+    .unwrap();
+    let mut req = Client::new().get(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    req.send().await.unwrap().status()
+}
+
+#[cfg(feature = "sparql")]
+async fn triple_count(base: &str) -> Value {
+    let resp = Client::new()
+        .post(format!("{base}/db/default/sparql"))
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/json")
+        .body("SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body: Value = resp.json().await.unwrap();
+    body["rows"][0][0].clone()
+}
+
+#[cfg(feature = "sparql")]
+#[tokio::test]
+async fn a_sparql_update_over_get_changes_nothing() {
+    // A GET is a read, so the cross-site guard lets it through: a page on any
+    // site can make a browser send one (an image, a link), cached Basic
+    // credentials included. A SPARQL GET therefore runs read-only, whoever
+    // sends it.
+    let base = spawn_default().await;
+    let update = "INSERT DATA { <http://a> <http://b> <http://c> }";
+    for headers in [
+        &[("origin", EVIL), ("sec-fetch-site", "cross-site")][..],
+        &[("sec-fetch-site", "cross-site")][..],
+        &[][..],
+    ] {
+        let status = sparql_get(&base, update, headers).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+    }
+    assert_eq!(
+        triple_count(&base).await,
+        serde_json::json!(0),
+        "nothing was written"
+    );
+
+    // Reads over GET still answer.
+    let status = sparql_get(&base, "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
