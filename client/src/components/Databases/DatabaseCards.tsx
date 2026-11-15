@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../../api/client";
+import { api, refusedKind, type RefusedKind } from "../../api/client";
 import type { DatabaseSummary, DatabaseStatsResponse } from "../../types/api";
+import RefusedNote from "../RefusedNote";
 import styles from "./DatabaseCards.module.css";
 
 interface DbCardData extends DatabaseSummary {
@@ -24,11 +25,13 @@ function formatBytes(bytes: number): string {
 export default function DatabaseCards() {
   const [databases, setDatabases] = useState<DbCardData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refused, setRefused] = useState<RefusedKind | null>(null);
 
   const refresh = useCallback(() => {
     api.db
       .list()
       .then(async (r) => {
+        setRefused(null);
         const withStats = await Promise.all(
           r.databases.map(async (db) => {
             try {
@@ -41,7 +44,7 @@ export default function DatabaseCards() {
         );
         setDatabases(withStats);
       })
-      .catch(() => {})
+      .catch((err) => setRefused(refusedKind(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -51,6 +54,10 @@ export default function DatabaseCards() {
 
   if (loading) {
     return <div className={styles.empty}>Loading…</div>;
+  }
+
+  if (refused) {
+    return <RefusedNote kind={refused} className={styles.empty} />;
   }
 
   if (databases.length === 0) {

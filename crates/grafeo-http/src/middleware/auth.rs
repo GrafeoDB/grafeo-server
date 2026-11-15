@@ -14,7 +14,7 @@
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 
 use grafeo_service::auth::TokenInfo;
@@ -26,6 +26,24 @@ use crate::state::AppState;
 /// and `/metrics` when the server runs with `--public-metrics`.
 fn is_exempt(path: &str, method: &Method, public_metrics: bool) -> bool {
     *method == Method::OPTIONS || path == "/health" || (public_metrics && path == "/metrics")
+}
+
+/// Whether a refused request gets the Studio's Basic challenge: a browser's
+/// same-origin request (the Studio calling its own API) on a server where
+/// Basic credentials can succeed. The browser then retries with the login it
+/// already holds for the realm, without a new prompt; a browser scopes Basic
+/// credentials to the path it was asked on, so a login at `/studio/` alone
+/// would not reach `/db` (#90). Other sites' pages, navigations, tools and
+/// token-only servers keep a plain 401 and never see a prompt.
+fn studio_may_prompt(
+    req: &Request,
+    provider: &dyn grafeo_service::auth::AuthProviderTrait,
+) -> bool {
+    provider.basic_enabled()
+        && req
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|v| v.as_bytes() == b"same-origin")
 }
 
 /// Middleware that authenticates requests using any configured method.
@@ -83,7 +101,14 @@ pub async fn auth_middleware(
                 .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
                 .detail(format!("{} {}", req.method(), req.uri().path())),
         );
-        return Err(ApiError::unauthorized());
+        let mut response = ApiError::unauthorized().into_response();
+        if studio_may_prompt(&req, auth_provider.as_ref()) {
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static(super::studio_auth::STUDIO_CHALLENGE),
+            );
+        }
+        return Ok(response);
     };
 
     if let Err(e) = super::authorize::authorize(req.method(), req.uri().path(), &info) {

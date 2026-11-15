@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { api } from "../../api/client";
+import { api, refusedKind, type RefusedKind } from "../../api/client";
 import type { HealthResponse, DatabaseSummary } from "../../types/api";
+import RefusedNote from "../RefusedNote";
 import styles from "./ServerStats.module.css";
 
 function formatUptime(seconds: number): string {
@@ -22,19 +23,22 @@ interface Tile {
  */
 export default function ServerStats() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
+  // `null` until the list arrives, so a refused or failed list is never
+  // shown as "0 databases, 0 nodes".
+  const [databases, setDatabases] = useState<DatabaseSummary[] | null>(null);
+  const [refused, setRefused] = useState<RefusedKind | null>(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => {});
-    api.db.list().then((r) => setDatabases(r.databases)).catch(() => {});
+    api.db
+      .list()
+      .then((r) => setDatabases(r.databases))
+      .catch((err) => setRefused(refusedKind(err)));
   }, []);
 
   if (!health) {
     return <div className={styles.loading}>Loading server stats…</div>;
   }
-
-  const totalNodes = databases.reduce((n, d) => n + d.node_count, 0);
-  const totalEdges = databases.reduce((n, d) => n + d.edge_count, 0);
 
   const tiles: Tile[] = [
     { label: "Version", value: `v${health.version}` },
@@ -45,19 +49,28 @@ export default function ServerStats() {
       value: health.uptime_seconds != null ? formatUptime(health.uptime_seconds) : "—",
     },
     { label: "Sessions", value: health.active_sessions ?? 0 },
-    { label: "Databases", value: databases.length },
-    { label: "Nodes", value: totalNodes.toLocaleString() },
-    { label: "Edges", value: totalEdges.toLocaleString() },
   ];
+  if (databases) {
+    const totalNodes = databases.reduce((n, d) => n + d.node_count, 0);
+    const totalEdges = databases.reduce((n, d) => n + d.edge_count, 0);
+    tiles.push(
+      { label: "Databases", value: databases.length },
+      { label: "Nodes", value: totalNodes.toLocaleString() },
+      { label: "Edges", value: totalEdges.toLocaleString() },
+    );
+  }
 
   return (
-    <div className={styles.grid}>
-      {tiles.map((t) => (
-        <div key={t.label} className={styles.tile}>
-          <span className={styles.tileLabel}>{t.label}</span>
-          <span className={styles.tileValue}>{t.value}</span>
-        </div>
-      ))}
-    </div>
+    <>
+      <div className={styles.grid}>
+        {tiles.map((t) => (
+          <div key={t.label} className={styles.tile}>
+            <span className={styles.tileLabel}>{t.label}</span>
+            <span className={styles.tileValue}>{t.value}</span>
+          </div>
+        ))}
+      </div>
+      {refused && <RefusedNote kind={refused} className={styles.refused} />}
+    </>
   );
 }

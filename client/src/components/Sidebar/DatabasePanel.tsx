@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../../api/client";
+import { api, refusedKind, type RefusedKind } from "../../api/client";
 import type { DatabaseSummary } from "../../types/api";
+import RefusedNote from "../RefusedNote";
 import CreateDatabaseDialog from "./CreateDatabaseDialog";
 import styles from "./DatabasePanel.module.css";
 
@@ -22,19 +23,21 @@ export default function DatabasePanel({
   onSelectDatabase,
 }: DatabasePanelProps) {
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
+  const [refused, setRefused] = useState<RefusedKind | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const refresh = useCallback(() => {
     api.db
       .list()
       .then((res) => {
+        setRefused(null);
         setDatabases(res.databases);
         const current = res.databases.find((d) => d.name === currentDatabase);
         if (current?.database_type) {
           onSelectDatabase(currentDatabase, current.database_type);
         }
       })
-      .catch(() => {});
+      .catch((err) => setRefused(refusedKind(err)));
   }, [currentDatabase, onSelectDatabase]);
 
   useEffect(() => {
@@ -48,6 +51,11 @@ export default function DatabasePanel({
   };
 
   const hasCurrent = databases.some((d) => d.name === currentDatabase);
+
+  // A refused list is not an empty one: say why instead of "No databases".
+  if (refused) {
+    return <RefusedNote kind={refused} className={styles.refused} />;
+  }
 
   return (
     <>

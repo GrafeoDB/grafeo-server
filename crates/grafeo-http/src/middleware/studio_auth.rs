@@ -13,6 +13,11 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
+/// The Studio's Basic challenge. The API's 401 for a same-origin browser
+/// request carries the same realm (`auth_middleware`), so a browser that
+/// logged in on a Studio page reuses that login for the Studio's API calls.
+pub const STUDIO_CHALLENGE: &str = r#"Basic realm="Grafeo Studio", charset="UTF-8""#;
+
 pub async fn studio_www_authenticate(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
     if response.status() == StatusCode::UNAUTHORIZED
@@ -20,7 +25,7 @@ pub async fn studio_www_authenticate(req: Request, next: Next) -> Response {
     {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static(r#"Basic realm="Grafeo Studio", charset="UTF-8""#),
+            HeaderValue::from_static(STUDIO_CHALLENGE),
         );
     }
     response

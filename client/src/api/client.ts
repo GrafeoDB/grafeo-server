@@ -29,6 +29,20 @@ export class GrafeoApiError extends Error {
   }
 }
 
+/** Why the server refused a request, when it did: not signed in (401) or no access (403). */
+export type RefusedKind = "unauthenticated" | "forbidden";
+
+/**
+ * The refusal behind an API error, or null for any other failure, so a view
+ * shows "not signed in" or "no access" instead of empty data (#90).
+ */
+export function refusedKind(err: unknown): RefusedKind | null {
+  if (!(err instanceof GrafeoApiError)) return null;
+  if (err.status === 401) return "unauthenticated";
+  if (err.status === 403) return "forbidden";
+  return null;
+}
+
 let authToken: string | null = null;
 
 /** Set a Bearer token for all subsequent API requests. Pass null to clear. */
