@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Button, Dialog } from "@grafeo-db/ui";
-import { api, GrafeoApiError } from "../api/client";
+import { api } from "../api/client";
 import type { DatabaseType, SectionName, StorageMode, SystemResources, TierOverride } from "../types/api";
 import { bytesText } from "../shell/format";
+import { errorMessage } from "./common";
 
 const TYPES: { id: DatabaseType; name: string; gloss: string }[] = [
   { id: "Lpg", name: "LPG", gloss: "labeled property graph" },
@@ -116,7 +117,7 @@ function OpenNewDatabaseDialog({ onClose, onCreated }: Props) {
       });
       onCreated(trimmed);
     } catch (err) {
-      setError(err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSubmitting(false);
     }

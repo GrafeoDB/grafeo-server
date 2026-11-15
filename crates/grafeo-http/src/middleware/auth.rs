@@ -28,22 +28,33 @@ fn is_exempt(path: &str, method: &Method, public_metrics: bool) -> bool {
     *method == Method::OPTIONS || path == "/health" || (public_metrics && path == "/metrics")
 }
 
-/// Whether a refused request gets the Studio's Basic challenge: a browser's
-/// same-origin request (the Studio calling its own API) on a server where
-/// Basic credentials can succeed. The browser then retries with the login it
-/// already holds for the realm, without a new prompt; a browser scopes Basic
-/// credentials to the path it was asked on, so a login at `/studio/` alone
-/// would not reach `/db` (#90). Other sites' pages, navigations, tools and
-/// token-only servers keep a plain 401 and never see a prompt.
+/// The header the Studio sends on its API calls (`X-Grafeo-Studio: 1`).
+pub const STUDIO_MARKER: &str = "x-grafeo-studio";
+
+/// Whether a refused request gets the Studio's Basic challenge: the Studio
+/// calling its own API on a server where Basic credentials can succeed. The
+/// browser then retries with the login it already holds for the realm,
+/// without a new prompt; a browser scopes Basic credentials to the path it
+/// was asked on, so a login at `/studio/` alone would not reach `/db` (#90).
+///
+/// A browser marks its requests with `Sec-Fetch-Site` only on a secure
+/// origin (HTTPS or localhost). There a same-origin request qualifies. On a
+/// plain-HTTP address the header is missing, so the Studio's own marker
+/// header decides: another site's page cannot send a custom header to this
+/// server without a CORS preflight, which only `--cors-origins` allows.
+/// Other sites' pages, navigations, tools and token-only servers keep a
+/// plain 401 and never see a prompt.
 fn studio_may_prompt(
     req: &Request,
     provider: &dyn grafeo_service::auth::AuthProviderTrait,
 ) -> bool {
-    provider.basic_enabled()
-        && req
-            .headers()
-            .get("sec-fetch-site")
-            .is_some_and(|v| v.as_bytes() == b"same-origin")
+    if !provider.basic_enabled() {
+        return false;
+    }
+    match req.headers().get("sec-fetch-site") {
+        Some(site) => site.as_bytes() == b"same-origin",
+        None => req.headers().contains_key(STUDIO_MARKER),
+    }
 }
 
 /// Middleware that authenticates requests using any configured method.

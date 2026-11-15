@@ -4,8 +4,10 @@
 //! Opened at `/studio/`, the Studio's own API calls (`/db`, `/query`) went out
 //! without them and got a 401 the browser could not answer, so the Studio
 //! showed no databases. An API 401 now carries the Studio's challenge for a
-//! same-origin browser request when Basic auth is configured, so the browser
-//! reuses the login it already has; other requests keep a plain 401.
+//! same-origin browser request (or, on a plain-HTTP address where browsers
+//! send no fetch metadata, a request with the Studio's marker header) when
+//! Basic auth is configured, so the browser reuses the login it already has;
+//! other requests keep a plain 401.
 
 use std::net::SocketAddr;
 
@@ -108,6 +110,40 @@ async fn other_requests_keep_a_plain_401() {
 }
 
 #[tokio::test]
+async fn the_studio_on_a_plain_http_address_gets_the_challenge() {
+    // A browser sends no fetch metadata to an insecure origin (plain HTTP on
+    // a LAN address or a host name), so the Studio's marker header is what
+    // says the request is its own.
+    let base = basic_server().await;
+    let resp = Client::new()
+        .get(format!("{base}/db"))
+        .header("X-Grafeo-Studio", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(challenge_of(&resp).as_deref(), Some(CHALLENGE));
+}
+
+#[tokio::test]
+async fn the_marker_does_not_override_fetch_metadata() {
+    // Where the browser does say where a request comes from, that decides:
+    // another site's page gets no prompt, marker or not.
+    let base = basic_server().await;
+    for site in ["cross-site", "same-site", "none"] {
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header("Sec-Fetch-Site", site)
+            .header("X-Grafeo-Studio", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{site}");
+        assert_eq!(challenge_of(&resp), None, "{site}");
+    }
+}
+
+#[tokio::test]
 async fn a_token_only_server_sends_no_basic_challenge() {
     // Basic credentials could never succeed there, so a prompt would only
     // trap the user.
@@ -116,14 +152,16 @@ async fn a_token_only_server_sends_no_basic_challenge() {
         "token".into(),
     ))
     .await;
-    let resp = Client::new()
-        .get(format!("{base}/db"))
-        .header("Sec-Fetch-Site", "same-origin")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(challenge_of(&resp), None);
+    for marker in [("Sec-Fetch-Site", "same-origin"), ("X-Grafeo-Studio", "1")] {
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header(marker.0, marker.1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge_of(&resp), None, "{marker:?}");
+    }
 }
 
 #[tokio::test]

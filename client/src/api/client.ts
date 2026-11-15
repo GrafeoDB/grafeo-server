@@ -53,6 +53,9 @@ export function setAuthToken(token: string | null): void {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Says the call is the Studio's own, so a refusal carries the Basic challenge the browser answers with its login
+    // (#90). Browsers send fetch metadata only to HTTPS or localhost; on a plain-HTTP address this header is the sign.
+    "X-Grafeo-Studio": "1",
     ...options.headers as Record<string, string>,
   };
   if (authToken) {

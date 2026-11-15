@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { ConfirmDialog } from "@grafeo-db/ui";
+import { ConfirmDialog, FORBIDDEN_NOTE, UNAUTHENTICATED_NOTE } from "@grafeo-db/ui";
+import { GrafeoApiError, refusedKind } from "../api/client";
 import { formatBytes } from "../shell/format";
 
 export function Chip({ children, tone }: { children: ReactNode; tone?: "strong" | "ram" | "disk" | "none" }) {
@@ -61,6 +62,13 @@ export function useAsk() {
     />
   );
   return { open: setAsk, dialog };
+}
+
+/** What a failed request says: a refusal (401/403) in the package's words, else the server's detail. */
+export function errorMessage(err: unknown): string {
+  const kind = refusedKind(err);
+  if (kind) return kind === "forbidden" ? FORBIDDEN_NOTE : UNAUTHENTICATED_NOTE;
+  return err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err);
 }
 
 /** An action's failure, said under the page header until the next action. */

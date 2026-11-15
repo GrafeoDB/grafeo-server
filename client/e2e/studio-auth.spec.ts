@@ -1,4 +1,5 @@
 import { test, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { networkInterfaces } from "node:os";
 import { startServer, type Auth, type RunningServer } from "./server";
 
 /**
@@ -30,6 +31,14 @@ test.afterEach(async () => {
 async function start(auth: Auth): Promise<string> {
   server = await startServer(auth);
   return server.base;
+}
+
+/** This machine's first non-loopback IPv4 address, if it has one. */
+function lanAddress(): string | undefined {
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
+  }
+  return undefined;
 }
 
 /** A browser session that answers the login prompt with these credentials. */
@@ -112,6 +121,21 @@ test.describe("Studio behind Basic auth (#90)", () => {
     await context.close();
   });
 
+  test("loads on a plain-HTTP address that is not localhost", async ({ browser }) => {
+    // Browsers send fetch metadata (Sec-Fetch-Site) only to HTTPS or localhost. Reached by a LAN address over plain
+    // HTTP, the Studio's own marker header is what earns the Basic challenge, and the page runs outside a secure
+    // context (no crypto.randomUUID).
+    const lan = lanAddress();
+    test.skip(!lan, "no non-loopback IPv4 address on this machine");
+    server = await startServer({ kind: "basic", user: USER, password: PASSWORD }, [], lan!);
+    const context = await signedIn(browser);
+    const page = await context.newPage();
+    await page.goto(`${server.base}/studio/`);
+    expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
+    await expectStudioLoaded(page);
+    await context.close();
+  });
+
   test("refuses wrong credentials", async ({ browser }) => {
     const base = await start({ kind: "basic", user: USER, password: PASSWORD });
     const context = await signedIn(browser, "wrong");
@@ -156,6 +180,8 @@ test.describe("Studio on other authentication modes", () => {
     const page = await context.newPage();
     const response = await page.goto(`${base}/studio/`);
     expect(response?.status()).toBe(401);
+    // No Basic prompt: a user name and password could never get through.
+    expect(response?.headers()["www-authenticate"]).toBeUndefined();
     await context.close();
   });
 });

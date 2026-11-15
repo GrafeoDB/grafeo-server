@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Button, DataTable, Dialog, FORBIDDEN_NOTE, Page, UNAUTHENTICATED_NOTE, type DataColumn } from "@grafeo-db/ui";
-import { api, GrafeoApiError, refusedKind } from "../api/client";
+import { Button, DataTable, Dialog, Page, type DataColumn } from "@grafeo-db/ui";
+import { api } from "../api/client";
 import type { TokenResponse } from "../types/api";
 import { useServer } from "../context/ServerContext";
 import { formatDate } from "../shell/format";
-import { ActionError, Chip, useAsk } from "./common";
+import { ActionError, Chip, errorMessage, useAsk } from "./common";
 
 const ROLES = [
   { id: "read-only", gloss: "queries only" },
@@ -12,11 +12,7 @@ const ROLES = [
   { id: "admin", gloss: "everything" },
 ] as const;
 
-function message(err: unknown): string {
-  const kind = refusedKind(err);
-  if (kind) return kind === "forbidden" ? FORBIDDEN_NOTE : UNAUTHENTICATED_NOTE;
-  return err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err);
-}
+const message = errorMessage;
 
 export default function TokensPage() {
   const { databases, tokens, refreshTokens: reload } = useServer();

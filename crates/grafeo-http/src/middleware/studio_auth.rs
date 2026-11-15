@@ -39,13 +39,21 @@ pub async fn studio_www_authenticate(req: Request, next: Next) -> Response {
 /// When auth is not configured at runtime, `auth_middleware` is a
 /// pass-through, so this function is safe to call unconditionally
 /// whenever the `auth` feature is compiled in.
+///
+/// The Basic challenge is added only where a Basic login can succeed: a
+/// token-only server refuses the Studio with a plain 401, since a browser
+/// prompt for a user name and password could never get through.
 pub fn wrap_with_auth(router: axum::Router, state: crate::state::AppState) -> axum::Router {
-    router
-        .layer(axum::middleware::from_fn_with_state(
-            state,
-            crate::middleware::auth::auth_middleware,
-        ))
-        .layer(axum::middleware::from_fn(studio_www_authenticate))
+    let basic = state.auth().is_some_and(|auth| auth.basic_enabled());
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        state,
+        crate::middleware::auth::auth_middleware,
+    ));
+    if basic {
+        router.layer(axum::middleware::from_fn(studio_www_authenticate))
+    } else {
+        router
+    }
 }
 
 #[cfg(test)]

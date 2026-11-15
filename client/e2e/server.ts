@@ -13,7 +13,7 @@ export interface RunningServer {
   stop: () => Promise<void>;
 }
 
-/** A free TCP port on loopback. */
+/** A free TCP port (checked on loopback; the server may bind another address). */
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
@@ -55,20 +55,25 @@ function authArgs(auth: Auth): string[] {
  * Starts the grafeo-server binary on a free loopback port (in memory unless
  * `extraArgs` say otherwise) and waits until `/health` answers.
  */
-export async function startServer(auth: Auth, extraArgs: string[] = []): Promise<RunningServer> {
+export async function startServer(
+  auth: Auth,
+  extraArgs: string[] = [],
+  /** The address to bind and to open the Studio on; loopback by default. */
+  host = "127.0.0.1",
+): Promise<RunningServer> {
   const bin = process.env.GRAFEO_SERVER_BIN;
   if (!bin) {
     throw new Error("set GRAFEO_SERVER_BIN to a grafeo-server binary built with the Studio");
   }
   const port = await freePort();
-  const child: ChildProcess = spawn(bin, ["--host", "127.0.0.1", "--port", String(port), ...authArgs(auth), ...extraArgs], {
+  const child: ChildProcess = spawn(bin, ["--host", host, "--port", String(port), ...authArgs(auth), ...extraArgs], {
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
   });
-  const base = `http://127.0.0.1:${port}`;
+  const base = `http://${host}:${port}`;
   const deadline = Date.now() + 15_000;
   for (;;) {
     if (child.exitCode !== null) {

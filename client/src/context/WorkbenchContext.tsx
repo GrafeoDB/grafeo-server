@@ -107,11 +107,21 @@ function isHistory(value: unknown): value is HistoryEntry[] {
   return Array.isArray(value) && value.every((e) => typeof e?.query === "string" && typeof e.timestamp === "number");
 }
 
+/**
+ * A random tab id. `crypto.randomUUID` exists only in secure contexts (HTTPS or localhost); the Studio is also opened
+ * over plain HTTP on a LAN address, where `getRandomValues` still works.
+ */
+function randomId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function newTab(tabs: QueryTab[], language: LanguageId = "gql"): QueryTab {
   const used = new Set(tabs.map((t) => t.name));
   let n = tabs.length + 1;
   while (used.has(`Query ${n}`)) n++;
-  return { id: crypto.randomUUID(), name: `Query ${n}`, language };
+  return { id: randomId(), name: `Query ${n}`, language };
 }
 
 function loadTabs(): TabState {

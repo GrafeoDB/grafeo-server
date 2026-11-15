@@ -71,10 +71,12 @@ export default function DatabasesPage() {
       render: (d) =>
         d.stats?.disk_bytes != null ? (
           bytesText(d.stats.disk_bytes)
-        ) : (
+        ) : d.stats && !d.persistent ? (
           <span className="st-muted" title="In-memory databases keep nothing on disk">
             none
           </span>
+        ) : (
+          <span className="st-muted">{stats.state === "loading" ? "…" : d.stats ? "none" : "unknown"}</span>
         ),
     },
   ];
@@ -115,7 +117,9 @@ export default function DatabasesPage() {
               ["Databases", fmt(rows.length)],
               ["Nodes", fmt(totals.nodes)],
               ["Edges", fmt(totals.edges)],
-              bytesStat("Memory", totals.memory),
+              stats.state === "loading" || totals.memory !== undefined
+                ? bytesStat("Memory", totals.memory)
+                : ["Memory", "unknown"],
               ["Sessions", health ? fmt(health.active_sessions) : "…"],
               ["Server", health?.version ?? "…", health ? (health.persistent ? "persistent" : "in memory") : undefined],
             ]}

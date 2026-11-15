@@ -1,29 +1,16 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import {
-  Button,
-  DataTable,
-  FORBIDDEN_NOTE,
-  Page,
-  PageSection,
-  StateNote,
-  UNAUTHENTICATED_NOTE,
-  type DataColumn,
-} from "@grafeo-db/ui";
-import { api, GrafeoApiError, refusedKind } from "../api/client";
+import { Button, DataTable, Page, PageSection, StateNote, type DataColumn } from "@grafeo-db/ui";
+import { api, GrafeoApiError } from "../api/client";
 import type { BackupEntry, SectionTierInfo } from "../types/api";
-import { useServer } from "../context/ServerContext";
+import { useServer, type Loaded } from "../context/ServerContext";
 import { useLoaded } from "../hooks/useLoaded";
 import { forgetLabelStyles } from "../labelStyles";
 import { bytesText, fmt, formatDate, modelName } from "../shell/format";
-import { ActionError, Chip, Stats, bytesStat, useAsk, type StatItem } from "./common";
+import { ActionError, Chip, Stats, bytesStat, errorMessage, useAsk, type StatItem } from "./common";
 import { BackupDialog, RestoreDialog } from "./BackupDialogs";
 
-function message(err: unknown): string {
-  const kind = refusedKind(err);
-  if (kind) return kind === "forbidden" ? FORBIDDEN_NOTE : UNAUTHENTICATED_NOTE;
-  return err instanceof GrafeoApiError ? err.detail : err instanceof Error ? err.message : String(err);
-}
+const message = errorMessage;
 
 /** A backup's short name: its label, else its sequence number (`movies_3.grafeo` is `#3`). */
 function backupName(b: BackupEntry): string {
@@ -99,7 +86,7 @@ export default function DatabaseDetailsPage() {
 
   // Not found only when the list lacks it and the database itself does not answer: a database just created is on
   // the server before the refreshed list arrives.
-  if (server.databases.state === "ready" && !summary && (info.state === "failed" || info.state === "refused")) {
+  if (server.databases.state === "ready" && !summary && info.state === "failed") {
     return (
       <Page
         breadcrumb={<DatabasesCrumb name={name} />}
@@ -124,10 +111,19 @@ export default function DatabaseDetailsPage() {
     epochText.trim() !== "" && Number.isInteger(epoch) && epoch >= 0 && epoch <= reach && epoch !== currentEpoch;
 
   // What did not load is said, never shown as empty figures or a WAL that is off.
+  const why = (loaded: Loaded<unknown>) =>
+    loaded.state === "failed"
+      ? loaded.message
+      : loaded.state === "refused"
+        ? loaded.refused === "forbidden"
+          ? "no access"
+          : "not signed in"
+        : null;
   const loadFailures = [
     info.state === "failed" ? `the database (${info.message})` : null,
     stats.state === "failed" ? `its counts and sizes (${stats.message})` : null,
-    wal.state === "failed" ? `its write-ahead log (${wal.message})` : null,
+    // A refused overview says so itself; a refused write-ahead log only here.
+    why(wal) ? `its write-ahead log (${why(wal)})` : null,
   ].filter((f): f is string => f !== null);
 
   let meta: string | undefined;
