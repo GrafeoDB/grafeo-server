@@ -1,4 +1,4 @@
-#![cfg(feature = "hybrid-search")]
+#![cfg(all(feature = "hybrid-search", feature = "http"))]
 //! `ef` on hybrid search (grafeo-server#85) over the transports: `/search/hybrid`
 //! takes it and decodes it strictly, it is in the OpenAPI schema, and HTTP and
 //! GWP pass it to the vector half, on a vector index with a narrow

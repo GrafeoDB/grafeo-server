@@ -33,7 +33,14 @@
 //!
 //! A trusted `Host` (rules 1 and 3) is a name in `--trusted-hosts` (with
 //! loopback and `--host`) or any IP address: a DNS-rebinding page always
-//! carries a DNS name of its own.
+//! carries a DNS name of its own. The Host part of rules 1 and 3 applies
+//! where a page could write with credentials the browser holds for it: on a
+//! server without credentials, and on a Basic server for a request without a
+//! token or key of its own (a browser gets a Basic login for a name only by
+//! answering a challenge there, and the server challenges only on trusted
+//! names). A token-only server needs no host rule: a page can't make a token
+//! up. A request refused for its Host gets `untrusted_host`, which names the
+//! fix (`--trusted-hosts`); one from another site gets `cross_site_request`.
 //!
 //! Reads (GET, HEAD) other than WebSocket upgrades pass: CORS keeps a foreign
 //! page from reading their answers. Preflights (OPTIONS) are left to the CORS
@@ -54,8 +61,7 @@ use axum::response::{IntoResponse, Response};
 use crate::AppState;
 use crate::error::ErrorBody;
 
-/// Whether the server checks credentials (then a rebinding page has no login
-/// for its own name, and the host rule is not needed).
+/// Whether the server checks credentials.
 fn has_credentials(state: &AppState) -> bool {
     #[cfg(feature = "auth")]
     {
@@ -68,9 +74,37 @@ fn has_credentials(state: &AppState) -> bool {
     }
 }
 
+/// Whether the server takes Basic logins, which a browser attaches on its own
+/// once it holds one for a name.
+fn basic_enabled(state: &AppState) -> bool {
+    #[cfg(feature = "auth")]
+    {
+        state.auth().is_some_and(|auth| auth.basic_enabled())
+    }
+    #[cfg(not(feature = "auth"))]
+    {
+        let _ = state;
+        false
+    }
+}
+
+/// Whether the Host part of the rule applies to a request: on a server
+/// without credentials, and on a Basic server unless the request carries a
+/// token or key it set itself (see the module docs).
+fn host_rule_applies(credentials: bool, basic: bool, headers: &HeaderMap) -> bool {
+    !credentials || (basic && !explicit_credentials(headers))
+}
+
+/// Whether a request is for a host name this server answers on (its `Host`,
+/// or its target's authority); a request without either is.
+#[cfg(feature = "auth")]
+pub(crate) fn request_host_is_answered<B>(req: &Request<B>, trusted_hosts: &[String]) -> bool {
+    request_host(req).is_none_or(|h| host_is_answered(&h, trusted_hosts))
+}
+
 /// The host a request is for: its `Host` header, or the authority of its
 /// target when it has none (an HTTP/2 request names it in `:authority`).
-fn request_host(req: &Request<Body>) -> Option<String> {
+fn request_host<B>(req: &Request<B>) -> Option<String> {
     req.headers()
         .get(HOST)
         .and_then(|v| v.to_str().ok())
@@ -110,15 +144,20 @@ pub async fn cross_site_middleware(
         };
         return (StatusCode::FORBIDDEN, axum::Json(body)).into_response();
     }
-    if is_guarded(req.method(), req.headers())
-        && !is_allowed(
+    let refusal = if is_guarded(req.method(), req.headers()) {
+        check(
             req.headers(),
             state.cors_origins(),
             state.trusted_hosts(),
             state.scheme(),
             credentials,
+            host_rule_applies(credentials, basic_enabled(&state), req.headers()),
         )
-    {
+        .err()
+    } else {
+        None
+    };
+    if let Some(refusal) = refusal {
         tracing::warn!(
             method = %req.method(),
             path = %req.uri().path(),
@@ -142,17 +181,37 @@ pub async fn cross_site_middleware(
                     500,
                 )),
         );
-        let body = ErrorBody {
-            error: "cross_site_request".to_string(),
-            detail: Some(
-                "cross-site requests may not write or open a WebSocket; \
-                 list the page's origin in --cors-origins to allow it"
-                    .to_string(),
-            ),
+        let body = match refusal {
+            Refusal::CrossSite => ErrorBody {
+                error: "cross_site_request".to_string(),
+                detail: Some(
+                    "cross-site requests may not write or open a WebSocket; \
+                     list the page's origin in --cors-origins to allow it"
+                        .to_string(),
+                ),
+            },
+            Refusal::UntrustedHost => ErrorBody {
+                error: "untrusted_host".to_string(),
+                detail: Some(UNTRUSTED_HOST_LOGIN.to_string()),
+            },
         };
         return (StatusCode::FORBIDDEN, axum::Json(body)).into_response();
     }
     next.run(req).await
+}
+
+/// Why a browser page's login or write on an untrusted name is refused, and
+/// the fix: a Basic server takes both only on its trusted names.
+pub(crate) const UNTRUSTED_HOST_LOGIN: &str = "this server takes browser logins and writes only on \
+     its trusted host names; add this name to --trusted-hosts (GRAFEO_TRUSTED_HOSTS) to use it";
+
+/// Why a guarded request is refused.
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    /// From another site's page, not listed in `--cors-origins`.
+    CrossSite,
+    /// From this server's own page, under a host name it does not trust.
+    UntrustedHost,
 }
 
 /// Whether the rule applies: a method that may change state, or a
@@ -167,14 +226,17 @@ fn is_guarded(method: &Method, headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
-/// Whether a guarded request may go on (see the module docs for the rule).
-fn is_allowed(
+/// Whether a guarded request may go on, and if not why (see the module docs
+/// for the rule). `host_rule` says whether this server's own page also needs
+/// a trusted `Host` ([`host_rule_applies`]).
+fn check(
     headers: &HeaderMap,
     allowed_origins: &[String],
     trusted_hosts: &[String],
     scheme: &str,
     credentials_checked: bool,
-) -> bool {
+    host_rule: bool,
+) -> Result<(), Refusal> {
     let origin = headers.get(ORIGIN).and_then(|v| v.to_str().ok());
     // '*' lets another origin write only with credentials it set itself, and
     // only where the server checks them: without credentials any page could
@@ -186,27 +248,34 @@ fn is_allowed(
                 && explicit_credentials(headers))
     });
     let host = headers.get(HOST).and_then(|v| v.to_str().ok());
+    // This server's own page under the request's Host. Where the host rule
+    // applies, that Host must be one this server answers on: a DNS-rebinding
+    // page names its own host.
+    let own_page = || {
+        if !host_rule || host.is_some_and(|h| host_is_answered(h, trusted_hosts)) {
+            Ok(())
+        } else {
+            Err(Refusal::UntrustedHost)
+        }
+    };
     match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         // The browser says the request is same-origin (or from the address
-        // bar). A DNS-rebinding page sends `same-origin` too, with its own
-        // name in `Host`, so the Host must be one this server answers on.
+        // bar); a DNS-rebinding page sends `same-origin` too.
         Some(site)
             if site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none") =>
         {
-            host.is_some_and(|h| host_is_answered(h, trusted_hosts))
+            own_page()
         }
-        Some(_) => listed,
-        // Without fetch metadata (browsers before it, or a non-browser
-        // client with an Origin) the Origin must name this request's Host,
-        // and that Host must be one this server answers on: a DNS-rebinding
-        // page names its own host in both.
+        Some(_) if listed => Ok(()),
+        Some(_) => Err(Refusal::CrossSite),
+        // Without fetch metadata (plain HTTP to a name, older browsers, or a
+        // non-browser client with an Origin) the Origin must be listed or
+        // name this request's Host on the effective scheme.
         None => match origin {
-            None => true,
-            Some(o) => {
-                listed
-                    || (names_host(o, host, scheme)
-                        && host.is_some_and(|h| host_is_answered(h, trusted_hosts)))
-            }
+            None => Ok(()),
+            Some(_) if listed => Ok(()),
+            Some(o) if names_host(o, host, scheme) => own_page(),
+            Some(_) => Err(Refusal::CrossSite),
         },
     }
 }
@@ -279,6 +348,66 @@ fn names_host(origin: &str, host: Option<&str>, scheme: &str) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    /// The rule for a server whose credentials include a Basic login (or, with
+    /// `credentials_checked` false, a server without credentials).
+    fn is_allowed(
+        headers: &HeaderMap,
+        allowed_origins: &[String],
+        trusted_hosts: &[String],
+        scheme: &str,
+        credentials_checked: bool,
+    ) -> bool {
+        check(
+            headers,
+            allowed_origins,
+            trusted_hosts,
+            scheme,
+            credentials_checked,
+            host_rule_applies(credentials_checked, true, headers),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn a_token_only_server_needs_no_host_rule_and_refusals_say_why() {
+        let trusted = vec!["localhost".to_string()];
+        let rebound = [
+            ("host", "grafeo.lan:7474"),
+            ("origin", "http://grafeo.lan:7474"),
+        ];
+        for metadata in [None, Some(("sec-fetch-site", "same-origin"))] {
+            let mut pairs = rebound.to_vec();
+            pairs.extend(metadata);
+            let h = headers(&pairs);
+            // Token-only: no host rule, however the browser marks it.
+            let token_only = host_rule_applies(true, false, &h);
+            assert_eq!(check(&h, &[], &trusted, "http", true, token_only), Ok(()));
+            // A Basic server refuses it for its Host, which names the fix.
+            let basic = host_rule_applies(true, true, &h);
+            assert_eq!(
+                check(&h, &[], &trusted, "http", true, basic),
+                Err(Refusal::UntrustedHost),
+                "{metadata:?}"
+            );
+        }
+        // A bearer token on a Basic server is the page's own: no host rule.
+        let h = headers(&[
+            ("host", "grafeo.lan:7474"),
+            ("origin", "http://grafeo.lan:7474"),
+            ("authorization", "Bearer tok"),
+        ]);
+        assert!(!host_rule_applies(true, true, &h));
+        // Another site's page is a cross-site refusal, not a Host one.
+        let h = headers(&[
+            ("host", "localhost:7474"),
+            ("origin", "https://evil.example"),
+        ]);
+        assert_eq!(
+            check(&h, &[], &trusted, "http", true, true),
+            Err(Refusal::CrossSite)
+        );
+    }
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut h = HeaderMap::new();

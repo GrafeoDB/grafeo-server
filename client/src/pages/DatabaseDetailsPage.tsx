@@ -36,8 +36,16 @@ function notConfigured(err: unknown): boolean {
   return err instanceof GrafeoApiError && err.status === 400 && err.detail.includes("backup not configured");
 }
 
+/**
+ * One database's page. It starts afresh for each database: a notice, a typed epoch or a running restore belongs to
+ * the database it was made on, not to the next one opened.
+ */
 export default function DatabaseDetailsPage() {
   const { name = "" } = useParams();
+  return <DatabaseDetails key={name} name={name} />;
+}
+
+function DatabaseDetails({ name }: { name: string }) {
   const navigate = useNavigate();
   const server = useServer();
   const ask = useAsk();

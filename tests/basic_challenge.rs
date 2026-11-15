@@ -181,3 +181,54 @@ async fn the_right_credentials_still_pass_and_health_stays_open() {
     let resp = client.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// The Studio's pages challenge only on a trusted name too: under any other
+/// name the browser shows no prompt, and the 401 says which flag adds it.
+#[tokio::test]
+async fn studio_pages_challenge_only_on_trusted_names() {
+    let state = grafeo_server::AppState::new(
+        grafeo_service::ServiceState::new_in_memory_with_basic_auth(
+            300,
+            "admin".into(),
+            "secret".into(),
+        ),
+        vec![],
+        grafeo_service::types::EnabledFeatures::default(),
+    );
+    let studio = axum::Router::new().route("/studio/", axum::routing::get(|| async { "page" }));
+    let app = grafeo_http::middleware::studio_auth::wrap_with_auth(studio, state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let port = addr.port();
+    let page = |host: String| async move {
+        Client::new()
+            .get(format!("http://{addr}/studio/"))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap()
+    };
+
+    let resp = page(format!("127.0.0.1:{port}")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(challenge_of(&resp).as_deref(), Some(CHALLENGE));
+
+    let resp = page(format!("rebound.example:{port}")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(challenge_of(&resp), None, "no prompt for an untrusted name");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("--trusted-hosts")),
+        "{body}"
+    );
+}

@@ -157,10 +157,10 @@ pub struct Config {
     pub trusted_proxies: Vec<String>,
 
     /// Additional host names this server answers on (comma-separated), beyond
-    /// loopback and `--host`. The cross-site check trusts
-    /// `Sec-Fetch-Site: same-origin` only when the request's `Host` is one of
-    /// these, so a DNS-rebinding page cannot use that header to write, and a
-    /// server without credentials answers only these names and IP addresses.
+    /// loopback and `--host`. A server without credentials answers only these
+    /// names and IP addresses, and a Basic-auth server offers its login and
+    /// takes writes from browser pages only on them, so a DNS-rebinding page
+    /// gets neither a login prompt nor a write under its own name.
     /// Add every name clients use: a service or container name, a LAN host
     /// name, or the name a proxy puts in `Host` (the public name when it keeps
     /// `Host`, the upstream name when it rewrites it).
@@ -283,5 +283,29 @@ impl Config {
              pass --allow-unauthenticated (GRAFEO_ALLOW_UNAUTHENTICATED=true) to accept \
              unauthenticated access"
         ))
+    }
+
+    /// Whether `--cors-origins` can be served: `*` stands alone (it means
+    /// every origin, so a list next to it says two things), and each origin
+    /// is a valid header value (visible ASCII). The error names the flag.
+    pub fn check_cors_origins(&self) -> Result<(), String> {
+        let origins = &self.cors_origins;
+        if origins.len() > 1 && origins.iter().any(|o| o.trim() == "*") {
+            return Err(format!(
+                "invalid --cors-origins '{}': '*' allows every origin and must be the only entry; \
+                 pass either '*' or a list of origins",
+                origins.join(",")
+            ));
+        }
+        if let Some(bad) = origins
+            .iter()
+            .find(|o| !o.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b)))
+        {
+            return Err(format!(
+                "invalid --cors-origins entry {bad:?}: an origin is visible ASCII, such as \
+                 https://app.example"
+            ));
+        }
+        Ok(())
     }
 }

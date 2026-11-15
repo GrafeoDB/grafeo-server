@@ -27,7 +27,7 @@ use crate::types::{BatchQueryRequest, BatchQueryResponse};
         (status = 200, description = "All queries executed successfully", body = BatchQueryResponse),
         (status = 400, description = "A query is invalid", body = ErrorBody),
         (status = 403, description = "A query was refused (role, scope or external access)", body = ErrorBody),
-        (status = 404, description = "Database not found, or a query names a missing resource", body = ErrorBody),
+        (status = 404, description = "Database not found", body = ErrorBody),
         (status = 408, description = "The batch timed out", body = ErrorBody),
         (status = 409, description = "A query conflicted with a concurrent transaction; retry the batch", body = ErrorBody),
         (status = 503, description = "The database is unavailable (restoring or closing)", body = ErrorBody),

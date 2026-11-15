@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
+import { createInterface } from "node:readline";
 
 /** How a test's server authenticates. */
 export type Auth =
@@ -13,22 +13,17 @@ export interface RunningServer {
   stop: () => Promise<void>;
 }
 
-/** A free TCP port (checked on loopback; the server may bind another address). */
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const address = srv.address();
-      if (address && typeof address === "object") {
-        const { port } = address;
-        srv.close(() => resolve(port));
-      } else {
-        srv.close(() => reject(new Error("no port")));
-      }
-    });
-  });
+/** The port in a JSON log line of the server saying it is ready (`"addr": "127.0.0.1:55476"`), if it is that line. */
+function readyPort(line: string): number | null {
+  try {
+    const event = JSON.parse(line) as { fields?: { message?: string; addr?: string } };
+    const fields = event.fields;
+    if (!fields?.message?.startsWith("Grafeo Server ready") || !fields.addr) return null;
+    const port = Number(fields.addr.slice(fields.addr.lastIndexOf(":") + 1));
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
 }
 
 function authArgs(auth: Auth): string[] {
@@ -52,8 +47,10 @@ function authArgs(auth: Auth): string[] {
 }
 
 /**
- * Starts the grafeo-server binary on a free loopback port (in memory unless
- * `extraArgs` say otherwise) and waits until `/health` answers.
+ * Starts the grafeo-server binary (in memory unless `extraArgs` say otherwise)
+ * and waits until `/health` answers. The server binds port 0 and its ready
+ * line names the port it got, so two workers never share a port and a test
+ * never talks to another worker's server.
  */
 export async function startServer(
   auth: Auth,
@@ -65,16 +62,37 @@ export async function startServer(
   if (!bin) {
     throw new Error("set GRAFEO_SERVER_BIN to a grafeo-server binary built with the Studio");
   }
-  const port = await freePort();
-  const child: ChildProcess = spawn(bin, ["--host", host, "--port", String(port), ...authArgs(auth), ...extraArgs], {
-    stdio: ["ignore", "ignore", "pipe"],
-  });
+  const child: ChildProcess = spawn(
+    bin,
+    ["--host", host, "--port", "0", "--log-format", "json", ...authArgs(auth), ...extraArgs],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
   });
-  const base = `http://${host}:${port}`;
   const deadline = Date.now() + 15_000;
+  const port = await new Promise<number>((resolve, reject) => {
+    const lines = createInterface({ input: child.stdout! });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`grafeo-server did not say it was ready: ${stderr}`));
+    }, 15_000);
+    lines.on("line", (line) => {
+      const found = readyPort(line);
+      if (found !== null) {
+        clearTimeout(timer);
+        resolve(found);
+      }
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`grafeo-server exited with ${code}: ${stderr}`));
+    });
+  });
+  // Keep reading the log, so a full pipe never blocks the server.
+  child.stdout?.resume();
+  const base = `http://${host}:${port}`;
   for (;;) {
     if (child.exitCode !== null) {
       throw new Error(`grafeo-server exited with ${child.exitCode}: ${stderr}`);

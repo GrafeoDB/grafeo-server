@@ -229,3 +229,59 @@ test.describe("a refused request is said, never shown as empty", () => {
     });
   }
 });
+
+/**
+ * The Studio opened by a host name over plain HTTP, as on a LAN or behind a service name. The browser sends no fetch
+ * metadata there. A Basic server offers its login and takes the Studio's writes only on a trusted name (loopback,
+ * `--host`, an IP address, `--trusted-hosts`); under any other name a DNS-rebinding page would get the server's login
+ * prompt for its own name. Chromium maps the made-up names to loopback (a browser of its own, launched with the
+ * mapping); the other browsers can't, so they skip.
+ */
+test.describe("Studio opened by a host name", () => {
+  test.skip(({ browserName }) => browserName !== "chromium", "only Chromium maps a host name to an address");
+
+  let named: Browser | undefined;
+  test.beforeEach(async ({ playwright }) => {
+    named = await playwright.chromium.launch({
+      args: ["--host-resolver-rules=MAP grafeo.test 127.0.0.1, MAP rebound.test 127.0.0.1"],
+    });
+  });
+  test.afterEach(async () => {
+    await named?.close();
+    named = undefined;
+  });
+
+  test("a trusted name offers the login and the Studio writes there", async () => {
+    const browser = named!;
+    server = await startServer({ kind: "basic", user: USER, password: PASSWORD }, ["--trusted-hosts", "grafeo.test"]);
+    const port = new URL(server.base).port;
+    const context = await signedIn(browser);
+    const page = await context.newPage();
+    await page.goto(`http://grafeo.test:${port}/studio/`);
+    await expectStudioLoaded(page);
+    const status = await page.evaluate(async () => {
+      const res = await fetch("/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Grafeo-Studio": "1" },
+        body: JSON.stringify({ query: "INSERT (:Probe {at: 'name'})" }),
+      });
+      return res.status;
+    });
+    expect(status).toBe(200);
+    await context.close();
+  });
+
+  test("an untrusted name offers no login and says how to add it", async () => {
+    const browser = named!;
+    server = await startServer({ kind: "basic", user: USER, password: PASSWORD }, ["--trusted-hosts", "grafeo.test"]);
+    const port = new URL(server.base).port;
+    // The context would answer a login prompt; none comes, so it never sends the password to this name.
+    const context = await signedIn(browser);
+    const page = await context.newPage();
+    const response = await page.goto(`http://rebound.test:${port}/studio/`);
+    expect(response?.status()).toBe(401);
+    expect(response?.headers()["www-authenticate"]).toBeUndefined();
+    await expect(page.getByText("--trusted-hosts", { exact: false })).toBeVisible();
+    await context.close();
+  });
+});

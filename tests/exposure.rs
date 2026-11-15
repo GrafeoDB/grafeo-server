@@ -218,3 +218,25 @@ fn empty_credentials_do_not_satisfy_the_exposure_check() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `--cors-origins` is checked at startup: `*` stands alone (with other
+/// origins it panicked when the CORS layer was built), and every origin must
+/// be a valid header value. The error names the flag.
+#[test]
+fn cors_origins_are_checked_before_the_server_starts() {
+    for ok in [
+        &[][..],
+        &["--cors-origins", "*"][..],
+        &["--cors-origins", "https://a.example,http://localhost:5173"][..],
+    ] {
+        assert!(config(ok).check_cors_origins().is_ok(), "{ok:?}");
+    }
+    for bad in [
+        &["--cors-origins", "https://a.example,*"][..],
+        &["--cors-origins", "*,https://a.example"][..],
+        &["--cors-origins", "https://a.example\u{7f}"][..],
+    ] {
+        let err = config(bad).check_cors_origins().unwrap_err();
+        assert!(err.contains("--cors-origins"), "{bad:?}: {err}");
+    }
+}

@@ -128,6 +128,7 @@ impl ServiceError {
             | Error::LabelNotFound(_)
             | Error::TypeMismatch { .. }
             | Error::InvalidValue(_)
+            | Error::Constraint { .. }
             | Error::Transaction(_)
             | Error::Query(_) => Self::BadRequest(error.to_string()),
             // `Error` is non-exhaustive: a variant added later (corruption
@@ -198,6 +199,28 @@ mod tests {
             ServiceError::from_engine(Error::Transaction(TransactionError::ReadOnly)),
             ServiceError::BadRequest(_)
         ));
+    }
+
+    /// A constraint violation (GRAFEO-V001) is the caller's data, not a server
+    /// fault: it answers 400 on every path that maps engine errors, commits
+    /// included, not a 500 with the detail hidden.
+    #[test]
+    fn a_constraint_violation_is_a_bad_request() {
+        use grafeo_common::Error;
+        use grafeo_common::utils::error::ConstraintKind;
+        for kind in [ConstraintKind::Schema, ConstraintKind::EdgesStillExist] {
+            let error = Error::Constraint {
+                kind,
+                message: "UNIQUE on :Key(id) violated".into(),
+            };
+            assert!(
+                matches!(
+                    ServiceError::from_engine(error),
+                    ServiceError::BadRequest(ref m) if m.contains("UNIQUE")
+                ),
+                "{kind:?} is a bad request with its message"
+            );
+        }
     }
 
     #[test]

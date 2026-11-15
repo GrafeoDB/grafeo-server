@@ -333,7 +333,7 @@ mod tests {
 /// the engine's fixture for the same feature: a vector index built with a
 /// narrow construction beam, so the default search beam misses exact
 /// neighbours and `ef` changes what the vector half finds.
-#[cfg(all(test, feature = "hybrid-search"))]
+#[cfg(all(test, feature = "hybrid-search", feature = "vector-index"))]
 mod hybrid_ef_tests {
     use std::collections::HashMap;
     use std::sync::OnceLock;

@@ -9333,6 +9333,7 @@ async fn bolt_write_conflict_is_a_transient_error() {
 }
 
 /// Runs a statement in a language in an HTTP transaction; the status and the body.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
 async fn http_tx_query_in(
     client: &Client,
     base: &str,

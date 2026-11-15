@@ -85,7 +85,10 @@ async fn main() {
     let has_credentials = service.auth().is_some_and(|a| a.is_enabled());
     #[cfg(not(feature = "auth"))]
     let has_credentials = false;
-    if let Err(msg) = config.check_exposure(has_credentials) {
+    if let Err(msg) = config
+        .check_exposure(has_credentials)
+        .and_then(|()| config.check_cors_origins())
+    {
         tracing::error!("{msg}");
         std::process::exit(2);
     }
@@ -248,6 +251,8 @@ async fn main() {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .expect("failed to bind");
+        // The address bound, so the ready line names the port `--port 0` got.
+        let addr = listener.local_addr().unwrap_or(addr);
 
         // GWP alongside HTTP, when asked for with --gwp
         #[cfg(feature = "gwp")]

@@ -44,11 +44,18 @@ pub const STUDIO_MARKER: &str = "x-grafeo-studio";
 /// server without a CORS preflight, which only `--cors-origins` allows.
 /// Other sites' pages, navigations, tools and token-only servers keep a
 /// plain 401 and never see a prompt.
+///
+/// The challenge is sent only on a host name this server answers on
+/// (loopback, `--host`, an IP address, `--trusted-hosts`): a browser keeps a
+/// Basic login per name and gets one only by answering a challenge there, so
+/// a DNS-rebinding page under its own name gets no prompt and no login.
 fn studio_may_prompt(
     req: &Request,
     provider: &dyn grafeo_service::auth::AuthProviderTrait,
+    trusted_hosts: &[String],
 ) -> bool {
-    if !provider.basic_enabled() {
+    if !provider.basic_enabled() || !super::cross_site::request_host_is_answered(req, trusted_hosts)
+    {
         return false;
     }
     match req.headers().get("sec-fetch-site") {
@@ -112,8 +119,19 @@ pub async fn auth_middleware(
                 .source_ip(super::rate_limit::extract_ip(&req, state.trusted_proxies()))
                 .detail(format!("{} {}", req.method(), req.uri().path())),
         );
+        // A Basic server offers no login on a name it does not trust; the
+        // 401 then says how to sign in under this name.
+        if auth_provider.basic_enabled()
+            && !super::cross_site::request_host_is_answered(&req, state.trusted_hosts())
+        {
+            let body = crate::error::ErrorBody {
+                error: "unauthorized".to_string(),
+                detail: Some(super::cross_site::UNTRUSTED_HOST_LOGIN.to_string()),
+            };
+            return Ok((axum::http::StatusCode::UNAUTHORIZED, axum::Json(body)).into_response());
+        }
         let mut response = ApiError::unauthorized().into_response();
-        if studio_may_prompt(&req, auth_provider.as_ref()) {
+        if studio_may_prompt(&req, auth_provider.as_ref(), state.trusted_hosts()) {
             response.headers_mut().insert(
                 axum::http::header::WWW_AUTHENTICATE,
                 axum::http::HeaderValue::from_static(super::studio_auth::STUDIO_CHALLENGE),

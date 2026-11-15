@@ -37,8 +37,21 @@ async function run(page: Page, query: string) {
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.press("Delete");
   await box.pressSequentially(query);
-  await page.getByRole("button", { name: "Run" }).click();
-  await expect(page.getByRole("button", { name: "Run" })).toBeVisible();
+  // The run's answer, then the button back at "Run": the name is exact, since "Run" alone also matches "Running…".
+  const answered = queryAnswered(page);
+  await runButton(page).click();
+  await answered;
+  await expect(runButton(page)).toBeVisible();
+}
+
+/** The Run button while no query runs (exact: "Running…" contains "Run"). */
+function runButton(page: Page) {
+  return page.getByRole("button", { name: "Run", exact: true });
+}
+
+/** The next answer to a query run. */
+function queryAnswered(page: Page) {
+  return page.waitForResponse((res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/query");
 }
 
 async function seed(page: Page) {
@@ -159,7 +172,11 @@ test("old addresses lead to the new pages", async ({ page }) => {
 });
 
 test("a server without credentials has no token management to show", async ({ page }) => {
+  // The token list's answer first, so the check below is not passed by a list still loading.
+  const tokensAnswered = page.waitForResponse((res) => new URL(res.url()).pathname === "/admin/tokens");
   await open(page);
+  await tokensAnswered;
+  await expect(page.getByRole("list", { name: "Studio" }).getByRole("button", { name: "Databases" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Studio" }).getByRole("button", { name: "API tokens" })).toHaveCount(0);
 });
 
@@ -247,10 +264,14 @@ test("an answer for the database left behind is not shown under the new one", as
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.press("Delete");
   await box.pressSequentially("MATCH (a)-[r]->(b) RETURN a, r, b");
-  await page.getByRole("button", { name: "Run" }).click();
+  const answered = queryAnswered(page);
+  await runButton(page).click();
+  await expect(page.getByRole("button", { name: "Running…" })).toBeVisible();
   await page.getByRole("list", { name: "Databases" }).getByRole("button", { name: "hooli", exact: true }).click();
   await expect(page.getByText("database: hooli")).toBeVisible();
-  await page.waitForTimeout(2500);
+  // The slow answer arrives for the database left behind; the Studio settles without showing it.
+  await answered;
+  await expect(runButton(page)).toBeVisible();
   await expect(page.getByText("2 nodes · 1 edge", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("table", { name: "Results" })).toHaveCount(0);
 });

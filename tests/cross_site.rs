@@ -681,3 +681,161 @@ async fn a_trusted_host_name_and_a_server_with_credentials_are_unaffected() {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Basic logins only on trusted names
+// ---------------------------------------------------------------------------
+//
+// A browser keeps a Basic login per origin, and gets one only by answering a
+// challenge for that origin. A server that challenged under any Host gave a
+// DNS-rebinding page its own login prompt; once a user typed the password
+// there, the page held a login for its own name. So a Basic server challenges,
+// and takes Basic writes from browser pages, only on its trusted names
+// (loopback, `--host`, IP addresses, `--trusted-hosts`); a token-only server
+// needs no host rule, since a page can't make a token up.
+
+#[cfg(feature = "auth")]
+const BASIC: &str = "Basic YWRtaW46c2VjcmV0"; // admin:secret
+
+#[cfg(feature = "auth")]
+async fn spawn_basic(trusted: &[&str]) -> (String, String) {
+    let state = grafeo_server::AppState::new(
+        grafeo_server::grafeo_service::ServiceState::new_in_memory_with_basic_auth(
+            300,
+            "admin".into(),
+            "secret".into(),
+        ),
+        vec![],
+        grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+    )
+    .with_trusted_hosts(trusted.iter().map(|h| (*h).to_string()).collect(), "http");
+    let base = serve(state).await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    (base, port)
+}
+
+/// The Studio's own write from a page at `http://{host}`: plain HTTP to a
+/// name, so the browser sends no fetch metadata, with the Studio's marker
+/// and a Basic login.
+#[cfg(feature = "auth")]
+fn studio_write<'a>(host: &'a str, origin: &'a str) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("host", host),
+        ("origin", origin),
+        ("x-grafeo-studio", "1"),
+        ("authorization", BASIC),
+    ]
+}
+
+/// Whether a response names the flag that fixes it.
+#[cfg(feature = "auth")]
+fn names_trusted_hosts(body: &Value) -> bool {
+    body["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("--trusted-hosts"))
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_basic_server_on_an_untrusted_name_offers_no_login_and_takes_no_write() {
+    let (base, port) = spawn_basic(&[]).await;
+    let host = format!("grafeo.lan:{port}");
+    let origin = format!("http://{host}");
+
+    // No challenge, so no prompt for the page's name: plain HTTP (the marker)
+    // and a secure origin (fetch metadata) alike, and the 401 names the fix.
+    for fetch_site in [None, Some("same-origin")] {
+        let mut req = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", &host)
+            .header("x-grafeo-studio", "1");
+        if let Some(site) = fetch_site {
+            req = req.header("sec-fetch-site", site);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{fetch_site:?}");
+        assert!(
+            resp.headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_none(),
+            "{fetch_site:?}: no login prompt on an untrusted name"
+        );
+        let body: Value = resp.json().await.unwrap();
+        assert!(names_trusted_hosts(&body), "{fetch_site:?}: {body}");
+    }
+
+    // A browser page's Basic write is refused, also with the right login (a
+    // phished one), and the refusal names the fix.
+    for fetch_site in [None, Some("same-origin")] {
+        let mut headers = studio_write(&host, &origin);
+        if let Some(site) = fetch_site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{fetch_site:?}: {body}");
+        assert_eq!(body["error"], "untrusted_host", "{fetch_site:?}: {body}");
+        assert!(names_trusted_hosts(&body), "{fetch_site:?}: {body}");
+    }
+
+    // Non-browser clients (no Origin) are unaffected on any name.
+    let (status, body) = send(
+        &base,
+        Method::POST,
+        "/query",
+        &[("host", host.as_str()), ("authorization", BASIC)],
+    )
+    .await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_basic_server_on_a_trusted_name_or_an_ip_offers_the_login_and_writes() {
+    let (base, port) = spawn_basic(&["grafeo.lan"]).await;
+    for host in [format!("grafeo.lan:{port}"), format!("192.168.1.20:{port}")] {
+        let origin = format!("http://{host}");
+
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", &host)
+            .header("x-grafeo-studio", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{host}");
+        assert!(
+            resp.headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_some(),
+            "{host}: the Studio's login prompt"
+        );
+
+        let (status, body) =
+            send(&base, Method::POST, "/query", &studio_write(&host, &origin)).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{host}: {body}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{host}: {body}");
+    }
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_token_only_server_takes_a_page_write_on_any_name() {
+    let base = spawn_with_cors_and_token(&[], "tok").await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let host = format!("grafeo.lan:{port}");
+    let origin = format!("http://{host}");
+    for fetch_site in [None, Some("same-origin")] {
+        let mut headers = vec![
+            ("host", host.as_str()),
+            ("origin", origin.as_str()),
+            ("authorization", "Bearer tok"),
+        ];
+        if let Some(site) = fetch_site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{fetch_site:?}: {body}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{fetch_site:?}: {body}");
+    }
+}
