@@ -10,17 +10,19 @@ Listener and security release: next to HTTP, GWP and Bolt open only when asked f
 
 - **GWP and Bolt open next to HTTP only when asked for**: `--gwp` (`GRAFEO_GWP=true`) and `--bolt` (`GRAFEO_BOLT=true`) start them; a build with `http` opened every listener compiled in, so the standard image served GWP on 7688 without its docs or Dockerfile saying so. Builds without `http` (the gwp and bolt images) still serve their protocol on their own.
 - **Minimum Rust 1.100**: building from source needs Rust 1.100.0 (was 1.99.0); the Docker images build on `rust:1.100-slim`.
+- **A failed `/batch` statement answers with its own status**: a refused statement is a 403 and a missing resource a 404, with the statement's index in the detail; they were 400s. A timeout is a 408 and an internal error a 500, as on `/query`; conflicts (409) and unavailable databases (503) answer as before.
 
 ### Fixed
 
+- **The Studio behind Basic auth loads its data wherever it is opened** (#90): opened at `/studio/` (a bookmark, a restored tab), it showed no databases, because the browser's login covered only `/studio/` and the Studio's API calls got a 401 it could not answer. An API 401 now carries the Studio's Basic challenge for same-origin requests when Basic auth is configured, and a refused request shows "Not signed in" or "No access" instead of zeros.
 - **`docker-compose.yml` pulls `grafeo/grafeo-server`**: it named `grafeodb/grafeo-server`, which does not exist on Docker Hub.
 - **A Bolt round trip takes under a millisecond again**: boltr sets `TCP_NODELAY` on accepted sockets, so a RUN or PULL no longer waits about 40 ms for the client's delayed ACK.
-- **A statement refused in `/batch` is a 403**: a batch statement that failed for lack of permission, a missing resource, a conflict or a timeout came back as a 400 with its message. The batch now answers with that statement's own status, still naming its index.
+- **A schema name is always one name**: the schema routes (`POST /db/{name}/schemas`, `DELETE /db/{name}/schemas/{schema}`) and GWP's schema calls wrote the name into the statement unquoted, so a name with a space or a backtick failed as a syntax error and a crafted one ended in a 500. Names are now quoted; spaces, backticks and keywords stay part of the name.
 - **GWP reports a permission refusal as GQLSTATUS 42501**: it was 42001 (syntax error), so a client could not tell a refused statement from a mistake in it.
 
 ### Security
 
-- **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again; read-only and read-write tokens never can.
+- **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again, also on a read-only server; read-only and read-write tokens never can, and the refusal names the flag.
 
 ### Dependencies
 
