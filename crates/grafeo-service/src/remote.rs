@@ -112,22 +112,50 @@ mod tests {
     }
 
     /// Whether `session` may read the server's file at `path`, by every way a
-    /// query can: GQL's load procedure and, with Cypher, `LOAD CSV`. Panics
-    /// when the two disagree, or when a refusal is not the external-access one.
+    /// query can: GQL's load procedure (which also writes the rows) and every
+    /// read-only way of [`reads_files_without_writing`]. Panics when the ways
+    /// disagree, or when a refusal is not the external-access one.
     fn reads_files(session: &Session, path: &str) -> bool {
-        let procedure = session.execute(&format!(
-            "CALL grafeo.load_nodes_csv({{path: '{path}', labels: ['Leak'], key: 'id'}})"
-        ));
-        let results = [procedure.map(|_| ())];
+        let procedure = session
+            .execute(&format!(
+                "CALL grafeo.load_nodes_csv({{path: '{path}', labels: ['Leak'], key: 'id'}})"
+            ))
+            .map(|_| ());
+        let mut results = file_reads(session, path);
+        results.push(procedure);
+        agreed(&results)
+    }
+
+    /// Whether `session` may read the server's file at `path` by the ways that
+    /// only read: GQL's `LOAD DATA` and, with Cypher, `LOAD CSV`. These run on
+    /// a read-only server too, where the load procedure is refused as a write.
+    fn reads_files_without_writing(session: &Session, path: &str) -> bool {
+        agreed(&file_reads(session, path))
+    }
+
+    /// The outcome of each read-only way to read the file at `path`.
+    fn file_reads(session: &Session, path: &str) -> Vec<Result<(), grafeo_common::Error>> {
+        let gql = session
+            .execute(&format!(
+                "LOAD DATA FROM '{path}' FORMAT CSV WITH HEADERS AS row RETURN row.name"
+            ))
+            .map(|_| ());
         #[cfg(feature = "cypher")]
-        let results = [
-            results[0].clone(),
+        let cypher = Some(
             session
                 .execute_cypher(&format!(
                     "LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row.name"
                 ))
                 .map(|_| ()),
-        ];
+        );
+        #[cfg(not(feature = "cypher"))]
+        let cypher = None;
+        std::iter::once(gql).chain(cypher).collect()
+    }
+
+    /// Whether every way was allowed; panics when they disagree, or when a
+    /// refusal is not the external-access one.
+    fn agreed(results: &[Result<(), grafeo_common::Error>]) -> bool {
         let allowed: Vec<bool> = results
             .iter()
             .map(|r| match r {
@@ -210,11 +238,7 @@ mod tests {
         };
         let admin = remote_session(&db, Some(Identity::new("a", [Role::Admin])), policy);
         assert!(
-            admin
-                .execute_cypher(&format!(
-                    "LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row.name"
-                ))
-                .is_ok(),
+            reads_files_without_writing(&admin, &path),
             "an admin reads a file on a read-only server with the flag"
         );
         assert!(
