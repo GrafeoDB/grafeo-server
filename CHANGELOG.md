@@ -34,6 +34,9 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 
 - **Remote statements cannot reach outside the database by default**: `LOAD CSV`, `grafeo.load_nodes_csv` and the other import and export procedures read any file the server process could, for every client of an unauthenticated server and every admin token; they are now refused over every transport (HTTP 403, GWP 42501, Bolt `Neo.ClientError.Security.Forbidden`). `--allow-external-access` (`GRAFEO_ALLOW_EXTERNAL_ACCESS`) lets admin identities run them again, also on a read-only server or a replica (reads only); read-only and read-write tokens never can, and the refusal names the flag.
 - **A SPARQL update sent by GET is refused**: `GET /db/{name}/sparql?query=` ran updates too, so a page on any site could write through a browser that held the Studio's Basic login, with an image or a link; a GET now runs read-only and an update answers 403. Updates are sent with `POST /db/{name}/sparql`.
+- **Other sites can't frame the Studio**: Studio pages send `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, as the API's routes do; a framing page could steer the Studio's clicks while it runs with the browser's login.
+- **A graph store IRI can't add statement text**: a `?graph=` value with a space or any of `<>"{}|^`\`` is refused with 400 before a statement runs, and graph store reads run read-only.
+- **A DNS-rebinding page can't write from a browser without fetch metadata**: the trusted-host check that 0.6.2 applies to `Sec-Fetch-Site: same-origin` now also applies when the header is missing (Safari 16.3 and older).
 
 ### Dependencies
 
