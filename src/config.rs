@@ -41,7 +41,10 @@ pub struct Config {
     pub session_ttl: u64,
 
     /// CORS allowed origins (comma-separated). Omit to deny cross-origin requests.
-    /// Use "*" to allow all origins (not recommended for production).
+    /// "*" lets every origin read; on a server with credentials it writes only
+    /// with a bearer token or API key it sends itself (never with a Basic login
+    /// the browser has cached), and without credentials it doesn't write. The
+    /// WebSocket needs a listed origin.
     #[arg(long, env = "GRAFEO_CORS_ORIGINS", value_delimiter = ',')]
     pub cors_origins: Vec<String>,
 
@@ -156,8 +159,11 @@ pub struct Config {
     /// Additional host names this server answers on (comma-separated), beyond
     /// loopback and `--host`. The cross-site check trusts
     /// `Sec-Fetch-Site: same-origin` only when the request's `Host` is one of
-    /// these, so a DNS-rebinding page cannot use that header to write. Add the
-    /// public name when a proxy rewrites `Host`.
+    /// these, so a DNS-rebinding page cannot use that header to write, and a
+    /// server without credentials answers only these names and IP addresses.
+    /// Add every name clients use: a service or container name, a LAN host
+    /// name, or the name a proxy puts in `Host` (the public name when it keeps
+    /// `Host`, the upstream name when it rewrites it).
     #[arg(long, env = "GRAFEO_TRUSTED_HOSTS", value_delimiter = ',')]
     pub trusted_hosts: Vec<String>,
 

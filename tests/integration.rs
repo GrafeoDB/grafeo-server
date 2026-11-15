@@ -8617,33 +8617,31 @@ async fn websocket_cors_disallowed_origin_rejected() {
 }
 
 #[tokio::test]
-async fn websocket_cors_wildcard_allows_any_origin() {
+async fn websocket_cors_wildcard_refuses_other_origins_without_credentials() {
+    // With '*', another origin opens the WebSocket only with credentials it
+    // sends itself, on a server that checks them. A browser can't set them on
+    // a WebSocket, and on this server (no credentials) a token proves nothing:
+    // refused either way. To use the WebSocket from another site, list it.
     let base = spawn_server_with_cors(vec!["*".to_string()]).await;
     let ws_url = base.replace("http://", "ws://") + "/ws";
-
-    let request = tungstenite::http::Request::builder()
-        .uri(&ws_url)
-        .header("Host", "localhost")
-        .header("Origin", "http://any-site.example.com")
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .header(
-            "Sec-WebSocket-Key",
-            tungstenite::handshake::client::generate_key(),
-        )
-        .header("Sec-WebSocket-Version", "13")
-        .body(())
-        .unwrap();
-
-    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    ws.send(tungstenite::Message::Text(
-        json!({"type": "ping"}).to_string().into(),
-    ))
-    .await
-    .unwrap();
-    let reply = ws.next().await.unwrap().unwrap();
-    let body: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
-    assert_eq!(body["type"], "pong");
+    for bearer in [false, true] {
+        let mut builder = tungstenite::http::Request::builder()
+            .uri(&ws_url)
+            .header("Host", "localhost")
+            .header("Origin", "http://any-site.example.com")
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .header("Sec-WebSocket-Version", "13");
+        if bearer {
+            builder = builder.header("Authorization", "Bearer any-token");
+        }
+        let result = tokio_tungstenite::connect_async(builder.body(()).unwrap()).await;
+        assert!(result.is_err(), "bearer {bearer}: the upgrade is refused");
+    }
 }
 
 #[tokio::test]

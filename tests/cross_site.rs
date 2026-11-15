@@ -80,6 +80,13 @@ fn is_cross_site_refusal(status: StatusCode, body: &Value) -> bool {
     status == StatusCode::FORBIDDEN && body["error"] == "cross_site_request"
 }
 
+/// Refused by either rule: a server without credentials refuses an untrusted
+/// host name before the cross-site rule looks at the request.
+fn is_rebinding_refusal(status: StatusCode, body: &Value) -> bool {
+    status == StatusCode::FORBIDDEN
+        && (body["error"] == "cross_site_request" || body["error"] == "untrusted_host")
+}
+
 async fn send(
     base: &str,
     method: Method,
@@ -336,7 +343,7 @@ async fn same_origin_with_an_untrusted_host_is_refused() {
         ],
     )
     .await;
-    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+    assert!(is_rebinding_refusal(status, &body), "{status} {body}");
 }
 
 #[tokio::test]
@@ -447,7 +454,7 @@ async fn a_rebinding_page_without_fetch_metadata_is_refused() {
         &[("host", host.as_str()), ("origin", origin.as_str())],
     )
     .await;
-    assert!(is_cross_site_refusal(status, &body), "{status} {body}");
+    assert!(is_rebinding_refusal(status, &body), "{status} {body}");
 }
 
 #[cfg(feature = "sparql")]
@@ -485,5 +492,192 @@ async fn a_graph_iri_cannot_end_itself_and_add_statement_text() {
                 .status();
             assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {iri}");
         }
+    }
+}
+
+// --cors-origins '*': any origin may read (CORS, never with credentials), but
+// a write from another origin passes only with credentials the page set
+// itself. A browser attaches a cached Basic login on its own, so that is not
+// one; nor is no credential at all.
+
+#[cfg(feature = "auth")]
+async fn spawn_with_cors_and_token(origins: &[&str], token: &str) -> String {
+    let state = grafeo_server::AppState::new(
+        grafeo_server::grafeo_service::ServiceState::new_in_memory_with_auth(300, token.into()),
+        origins.iter().map(|o| (*o).to_string()).collect(),
+        grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+    );
+    serve(state).await
+}
+
+#[cfg(feature = "auth")]
+#[tokio::test]
+async fn a_wildcard_origin_writes_only_with_explicit_credentials() {
+    let base = spawn_with_cors_and_token(&["*"], "tok").await;
+    let cross = [("origin", EVIL), ("sec-fetch-site", "cross-site")];
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut h = cross.to_vec();
+        h.extend_from_slice(extra);
+        h
+    };
+
+    // Ambient: a cached Basic login, nothing, or a key with a Basic login
+    // riding along (the auth middleware would fall back to it).
+    for ambient in [
+        &[][..],
+        &[("authorization", "Basic YWRtaW46c2VjcmV0")][..],
+        &[
+            ("x-api-key", "wrong"),
+            ("authorization", "Basic YWRtaW46c2VjcmV0"),
+        ][..],
+        &[("x-api-key", "")][..],
+    ] {
+        let (status, body) = send(&base, Method::POST, "/query", &with(ambient)).await;
+        assert!(
+            is_cross_site_refusal(status, &body),
+            "{ambient:?}: {status} {body}"
+        );
+    }
+
+    // Explicit: a bearer token or an API key, which need a preflight that '*'
+    // answers, and which a browser never sends on its own.
+    for explicit in [("authorization", "Bearer tok"), ("x-api-key", "tok")] {
+        let (status, body) = send(&base, Method::POST, "/query", &with(&[explicit])).await;
+        assert!(
+            !is_cross_site_refusal(status, &body),
+            "{explicit:?}: {status} {body}"
+        );
+        // Past the guard and the auth check (the empty body is then a 422).
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{explicit:?}: {body}");
+    }
+
+    // Without fetch metadata the rule is the same.
+    let (status, body) = send(&base, Method::POST, "/query", &[("origin", EVIL)]).await;
+    assert!(
+        is_cross_site_refusal(status, &body),
+        "no metadata: {status} {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_wildcard_origin_cannot_write_to_a_server_without_credentials() {
+    // There a token proves nothing: any page could make one up.
+    let base = spawn_with_cors(&["*"]).await;
+    for header in [("authorization", "Bearer junk"), ("x-api-key", "junk")] {
+        let (status, body) = send(
+            &base,
+            Method::POST,
+            "/query",
+            &[("origin", EVIL), ("sec-fetch-site", "cross-site"), header],
+        )
+        .await;
+        assert!(
+            is_cross_site_refusal(status, &body),
+            "{header:?}: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_page_on_an_ip_address_writes_to_its_own_server() {
+    // The Studio opened by LAN address: same-origin, Host an IP address that
+    // is neither loopback nor --host. An IP is never a rebinding name.
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let host = format!("192.168.1.20:{port}");
+    let origin = format!("http://{host}");
+    for site in [Some("same-origin"), None] {
+        let mut headers = vec![("host", host.as_str()), ("origin", origin.as_str())];
+        if let Some(site) = site {
+            headers.push(("sec-fetch-site", site));
+        }
+        let (status, body) = send(&base, Method::POST, "/query", &headers).await;
+        assert!(
+            !is_rebinding_refusal(status, &body),
+            "{site:?}: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_wildcard_origin_cannot_open_the_websocket() {
+    // A browser can't set Authorization on a WebSocket, so a cross-origin
+    // upgrade only ever carries a cached login: refused with '*' too.
+    let base = spawn_with_cors(&["*"]).await;
+    let result = tokio_tungstenite::connect_async(ws_request(&base, &[("origin", EVIL)])).await;
+    assert!(ws_refused_with_403(result));
+}
+
+// A server without credentials answers only on host names it trusts: a
+// DNS-rebinding page reaches it under the page's own name, and could read
+// whatever a GET returns.
+
+async fn get_with_host(base: &str, path: &str, host: &str) -> (StatusCode, Value) {
+    let resp = Client::new()
+        .get(format!("{base}{path}"))
+        .header("host", host)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_server_without_credentials_refuses_an_untrusted_host_name() {
+    let base = spawn_default().await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let rebound = format!("rebound.example:{port}");
+    let (status, body) = get_with_host(&base, "/db", &rebound).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "untrusted_host", "{body}");
+
+    // Loopback names, and any IP literal (a rebinding page always carries a
+    // DNS name), keep working; so do the probes, whatever the Host.
+    for host in [
+        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        format!("[::1]:{port}"),
+        format!("192.168.1.20:{port}"),
+        format!("10.0.0.7:{port}"),
+    ] {
+        let (status, body) = get_with_host(&base, "/db", &host).await;
+        assert_eq!(status, StatusCode::OK, "{host}: {body}");
+    }
+    for probe in ["/health", "/ready"] {
+        let (status, _) = get_with_host(&base, probe, &rebound).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{probe}");
+    }
+}
+
+#[tokio::test]
+async fn a_trusted_host_name_and_a_server_with_credentials_are_unaffected() {
+    // A name listed in --trusted-hosts is answered.
+    let state = grafeo_server::AppState::new_in_memory(300)
+        .with_trusted_hosts(vec!["graph.internal".into()], "http");
+    let base = serve(state).await;
+    let port = base.rsplit(':').next().unwrap().to_string();
+    let (status, body) = get_with_host(&base, "/db", &format!("graph.internal:{port}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // With credentials, a rebinding page has no login for its own name, so
+    // the host rule does not apply.
+    #[cfg(feature = "auth")]
+    {
+        let state = grafeo_server::AppState::new(
+            grafeo_server::grafeo_service::ServiceState::new_in_memory_with_auth(300, "tok".into()),
+            vec![],
+            grafeo_server::grafeo_service::types::EnabledFeatures::default(),
+        );
+        let base = serve(state).await;
+        let port = base.rsplit(':').next().unwrap().to_string();
+        let resp = Client::new()
+            .get(format!("{base}/db"))
+            .header("host", format!("proxy.example:{port}"))
+            .bearer_auth("tok")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

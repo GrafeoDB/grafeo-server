@@ -367,8 +367,8 @@ All settings are available as CLI flags and environment variables (prefix `GRAFE
 | `GRAFEO_BOLT_MAX_MESSAGE_SIZE` | `--bolt-max-message-size` | `0` | Largest Bolt message in bytes (0 = the default, 16 MiB) |
 | `GRAFEO_BOLT_MAX_UNAUTHENTICATED_MESSAGE_SIZE` | `--bolt-max-unauthenticated-message-size` | `0` | Largest Bolt message before LOGON, in bytes (0 = the default, 64 KiB) |
 | `GRAFEO_BOLT_HANDSHAKE_TIMEOUT` | `--bolt-handshake-timeout` | `30` | Seconds a Bolt connection has to finish its handshake, HELLO and LOGON (0 = no limit) |
-| `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated origins whose pages may call the API, write and open the WebSocket (`*` for all) |
-| `GRAFEO_TRUSTED_HOSTS` | `--trusted-hosts` | loopback + `--host` | Additional host names the server answers on; `Sec-Fetch-Site: same-origin` is trusted only for these `Host` values (DNS-rebinding protection). Add the public name when a proxy rewrites `Host` |
+| `GRAFEO_CORS_ORIGINS` | `--cors-origins` | _(none)_ | Comma-separated origins whose pages may call the API, write and open the WebSocket. `*` lets every origin read; on a server with credentials it writes only with a bearer token or API key it sends itself, and without credentials it doesn't write. The WebSocket needs a listed origin |
+| `GRAFEO_TRUSTED_HOSTS` | `--trusted-hosts` | loopback + `--host` | Additional host names the server answers on (DNS-rebinding protection): `Sec-Fetch-Site: same-origin` is trusted only for these `Host` values, and a server without credentials answers only these names and IP addresses. Add every name clients use: a service name, a LAN host name, or the name a proxy puts in `Host` |
 | `GRAFEO_LOG_LEVEL` | `--log-level` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `--log-format` | `pretty` | Log format: `pretty` or `json` |
 | `GRAFEO_RATE_LIMIT` | `--rate-limit` | `0` | Max requests per window per IP (0 = disabled) |
@@ -392,7 +392,9 @@ Included in the default build and every image (feature `auth`). A server on a no
 
 When an auth token is set, all API endpoints require `Authorization: Bearer <token>` or `X-API-Key: <token>`. `/health` and `/studio/` are exempt, and `/metrics` too with `--public-metrics` (`GRAFEO_PUBLIC_METRICS`); otherwise a Prometheus scrape sends the token (`authorization` in its scrape config).
 
-A browser page from another origin can't write (POST, PUT, PATCH, DELETE) or open the WebSocket, with or without credentials, unless `--cors-origins` lists its origin; such a request gets 403 `cross_site_request`. Non-browser clients and Studio are unaffected.
+A browser page from another origin can't write (POST, PUT, PATCH, DELETE) or open the WebSocket, with or without credentials, unless `--cors-origins` lists its origin; such a request gets 403 `cross_site_request`. With `--cors-origins '*'` another origin writes only on a server with credentials, and only with a bearer token or `X-API-Key` it sets itself, never with a Basic login the browser has cached; it opens the WebSocket only when listed. Non-browser clients and Studio are unaffected by this rule.
+
+A server without credentials answers only on loopback, `--host`, `--trusted-hosts` and IP addresses, so a DNS-rebinding page can't read it under its own name; another name gets 403 `untrusted_host` (`/health` and `/ready` answer on any). This applies to every client, browsers or not: add the name clients use to `--trusted-hosts`: a service or container name, a LAN or mDNS host name, or the name a proxy puts in `Host` (the public name when it keeps `Host`, the upstream name when it rewrites it). A server with credentials answers any name.
 
 ```bash
 # Bearer token

@@ -133,6 +133,16 @@ test.describe("Studio behind Basic auth (#90)", () => {
     await page.goto(`${server.base}/studio/`);
     expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
     await expectStudioLoaded(page);
+    // And it writes there: an IP address in Host is never a DNS-rebinding name.
+    const status = await page.evaluate(async () => {
+      const res = await fetch("/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Grafeo-Studio": "1" },
+        body: JSON.stringify({ query: "INSERT (:Probe {at: 'lan'})" }),
+      });
+      return res.status;
+    });
+    expect(status).toBe(200);
     await context.close();
   });
 
