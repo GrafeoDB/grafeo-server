@@ -26,6 +26,7 @@ Listener, security and Studio release: next to HTTP, GWP and Bolt open only when
 
 ### Fixed
 
+- **Browser writes pass behind an HTTP/2 proxy**: a request without a `Host` header (HTTP/2 names its host in `:authority`, as a proxy speaking h2c to the server sends it) was refused as cross-site, even on a trusted name; the check now reads the same host as the rest of the server.
 - **The Studio says how to fix a refusal for its address**: an `untrusted_host` or `cross_site_request` refusal, and a login not offered on the name the Studio was opened by, showed as "No access" or "Not signed in"; the Studio now shows the server's message, which names `--trusted-hosts` or `--cors-origins`.
 - **A constraint violation outside a statement is a 400**: one the engine reports at commit or from a direct call (`/tx/commit`, a `/batch` commit, GWP and Bolt commits) was an internal error, a 500 with the detail hidden over HTTP; it is now a bad request with its message.
 - **`--cors-origins` is checked at startup**: `*` next to other origins, or an origin with control characters, stops the server with an error that names the flag; `'https://a.example,*'` panicked while the CORS layer was built.
