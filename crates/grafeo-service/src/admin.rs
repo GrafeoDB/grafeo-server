@@ -496,7 +496,7 @@ impl AdminService {
             databases,
             metrics,
             db_name,
-            &format!("CREATE SCHEMA {schema_name}"),
+            &format!("CREATE SCHEMA {}", quote_identifier(schema_name)),
             Some("gql"),
             None,
             None,
@@ -531,7 +531,7 @@ impl AdminService {
             databases,
             metrics,
             db_name,
-            &format!("DROP SCHEMA {schema_name}"),
+            &format!("DROP SCHEMA {}", quote_identifier(schema_name)),
             Some("gql"),
             None,
             None,
@@ -773,6 +773,13 @@ fn compact_entry(
         Err(_panic) => Err(ServiceError::Internal("compaction panicked".to_string())),
     };
     (DatabaseEntry::new(Arc::new(db), metadata), result)
+}
+
+/// A GQL delimited identifier: the name in backticks, a backtick doubled, so a
+/// client's name is one name and never statement text (the schema statements
+/// run as the anonymous admin).
+fn quote_identifier(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 /// Reject names containing `/`, which grafeo-engine uses internally as the

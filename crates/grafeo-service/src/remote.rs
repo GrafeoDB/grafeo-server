@@ -34,17 +34,13 @@ pub struct RemotePolicy {
 /// the anonymous admin when the server does not authenticate (`None`),
 /// within `policy`.
 pub fn remote_session(db: &GrafeoDB, identity: Option<Identity>, policy: RemotePolicy) -> Session {
-    let identity = cap_identity_read_only(
-        identity.unwrap_or_else(Identity::anonymous),
-        policy.read_only,
-    );
-    // With external access allowed, the identity's role decides (admin only);
-    // without it, nobody reaches outside the database.
-    let identity = if policy.external_access {
-        identity
-    } else {
-        identity.with_external_access(false)
-    };
+    let identity = identity.unwrap_or_else(Identity::anonymous);
+    // Only an admin may reach outside the database, and only when the
+    // operator allows it. Decided before the read-only cap, which would make
+    // an admin read-only: reading a file is independent of writing data.
+    let external_access = policy.external_access && identity.can_admin();
+    let identity =
+        cap_identity_read_only(identity, policy.read_only).with_external_access(external_access);
     db.session_with_identity(identity)
 }
 
@@ -200,6 +196,39 @@ mod tests {
                 "{role:?} never reads server files"
             );
         }
+    }
+
+    #[test]
+    fn on_a_read_only_server_the_flag_still_lets_an_admin_read_files() {
+        // Read-only and external access are independent (the engine's rule):
+        // a read-only server caps writes, not reads of a file.
+        let db = db();
+        let (_dir, path) = people_csv();
+        let policy = RemotePolicy {
+            read_only: true,
+            external_access: true,
+        };
+        let admin = remote_session(&db, Some(Identity::new("a", [Role::Admin])), policy);
+        assert!(
+            admin
+                .execute_cypher(&format!(
+                    "LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row.name"
+                ))
+                .is_ok(),
+            "an admin reads a file on a read-only server with the flag"
+        );
+        assert!(
+            !writes(&admin),
+            "and still cannot write: the server is read-only"
+        );
+        let rw = remote_session(&db, Some(Identity::new("w", [Role::ReadWrite])), policy);
+        assert!(!reads_files(&rw, &path), "read-write never reads files");
+        let closed = RemotePolicy {
+            read_only: true,
+            external_access: false,
+        };
+        let admin = remote_session(&db, Some(Identity::new("a", [Role::Admin])), closed);
+        assert!(!reads_files(&admin, &path), "without the flag nobody does");
     }
 
     #[test]

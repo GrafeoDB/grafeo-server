@@ -54,7 +54,7 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> impl IntoResponse {
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
     let db_scope = auth
         .0
         .as_ref()

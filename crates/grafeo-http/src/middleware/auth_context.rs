@@ -66,16 +66,16 @@ impl AuthContext {
         Ok(())
     }
 
-    /// Build an engine [`Identity`] from the token, or anonymous if auth is off.
-    ///
-    /// When `server_read_only` is true, the identity is capped to `Role::ReadOnly`
-    /// regardless of the token's role.
-    pub fn identity(&self, server_read_only: bool) -> Identity {
-        let base = match &self.0 {
+    /// The engine [`Identity`] of the token, or the anonymous admin if auth is
+    /// off, with its own role. The server-wide limits (the read-only cap of a
+    /// read-only server or replica, external access) are applied once, where
+    /// the engine session is opened (`grafeo_service::remote::remote_session`
+    /// with the server's `RemotePolicy`), as on GWP and Bolt.
+    pub fn identity(&self) -> Identity {
+        match &self.0 {
             Some(info) => info.identity(),
             None => Identity::anonymous(),
-        };
-        grafeo_service::auth::cap_identity_read_only(base, server_read_only)
+        }
     }
 }
 
@@ -198,30 +198,16 @@ mod tests {
     #[test]
     fn identity_none_returns_anonymous_admin() {
         let ctx = AuthContext(None);
-        let id = ctx.identity(false);
+        let id = ctx.identity();
         assert!(id.can_admin());
     }
 
     #[test]
-    fn identity_none_read_only_server() {
-        let ctx = AuthContext(None);
-        let id = ctx.identity(true);
-        assert!(id.can_read());
-        assert!(!id.can_write());
-    }
-
-    #[test]
-    fn identity_admin_capped_by_server_read_only() {
-        let ctx = admin_ctx();
-        let id = ctx.identity(true);
-        assert!(id.can_read());
-        assert!(!id.can_write());
-    }
-
-    #[test]
-    fn identity_preserves_role_when_not_read_only() {
-        let ctx = readonly_ctx();
-        let id = ctx.identity(false);
+    fn identity_keeps_the_tokens_role() {
+        // The read-only cap of a read-only server is applied when the engine
+        // session opens (remote_session's tests), not here.
+        assert!(admin_ctx().identity().can_admin());
+        let id = readonly_ctx().identity();
         assert!(id.can_read());
         assert!(!id.can_write());
     }

@@ -73,7 +73,7 @@ pub async fn sparql_get(
 ) -> Result<Response, ApiError> {
     auth.check_db_access(&db_name)?;
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let result = QueryService::execute_with_audit(
         state.databases(),
@@ -122,10 +122,8 @@ pub async fn sparql_post(
         .next()
         .unwrap_or(content_type)
         .trim();
-
-    let read_only = state.service().is_query_read_only();
     let policy = state.service().remote_policy();
-    let identity = auth.identity(read_only);
+    let identity = auth.identity();
 
     let statement = match base_ct {
         CT_SPARQL_QUERY | CT_SPARQL_UPDATE => String::from_utf8(body.to_vec())

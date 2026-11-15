@@ -89,7 +89,7 @@ pub async fn graph_store_get(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let result = QueryService::execute_with_audit(
         state.databases(),
@@ -148,7 +148,7 @@ pub async fn graph_store_head(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     // If the query succeeds, the graph exists (or is the default graph).
     let result = QueryService::execute_with_audit(
@@ -218,9 +218,8 @@ pub async fn graph_store_put(
     };
 
     let timeout = state.effective_timeout(None);
-    let read_only = state.service().is_query_read_only();
     let policy = state.service().remote_policy();
-    let identity = auth.identity(read_only);
+    let identity = auth.identity();
 
     QueryService::execute_with_audit(
         state.databases(),
@@ -275,9 +274,8 @@ pub async fn graph_store_post(
 ) -> Result<Response, ApiError> {
     auth.check_db_access(&db_name)?;
     let parsed = parse_body_to_ntriples(&headers, &body)?;
-    let read_only = state.service().is_query_read_only();
     let policy = state.service().remote_policy();
-    let identity = auth.identity(read_only);
+    let identity = auth.identity();
 
     // No target params: create a new named graph.
     if params.default.is_none() && params.graph.is_none() {
@@ -370,7 +368,7 @@ pub async fn graph_store_delete(
     };
 
     let timeout = state.effective_timeout(None);
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let result = QueryService::execute_with_audit(
         state.databases(),

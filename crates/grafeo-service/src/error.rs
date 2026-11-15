@@ -82,8 +82,17 @@ impl ServiceError {
         use grafeo_common::Error;
         use grafeo_common::utils::error::{QueryErrorKind, TransactionError};
 
-        // The engine reports a permission error without a kind of its own
-        // (a semantic query error, or a read-only transaction), so its
+        // A statement reaching outside the database without external access
+        // (GRAFEO-Q008): the engine names its own Rust API, so say what the
+        // operator of this server can do instead.
+        if error.error_code() == grafeo_common::utils::error::ErrorCode::QueryExternalAccessDenied {
+            return Self::Forbidden(format!(
+                "{error}. On this server it needs --allow-external-access \
+                 (GRAFEO_ALLOW_EXTERNAL_ACCESS), and then an admin token"
+            ));
+        }
+        // The engine reports other permission errors without a kind of their
+        // own (a semantic query error, or a read-only transaction), so the
         // message is the only sign.
         if error.to_string().contains("permission denied") {
             return Self::Forbidden(error.to_string());

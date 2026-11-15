@@ -16,16 +16,21 @@ use crate::types::{BatchQueryRequest, BatchQueryResponse};
 /// Execute a batch of queries in a single transaction.
 ///
 /// All queries run sequentially within one transaction. If any query fails,
-/// the transaction is rolled back and an error is returned indicating which
-/// query failed. On success, all changes are committed atomically.
+/// the transaction is rolled back and the failing query's own error is
+/// returned (its status, with its index in the detail). On success, all
+/// changes are committed atomically.
 #[utoipa::path(
     post,
     path = "/batch",
     request_body = BatchQueryRequest,
     responses(
         (status = 200, description = "All queries executed successfully", body = BatchQueryResponse),
-        (status = 400, description = "Query failed", body = ErrorBody),
-        (status = 404, description = "Database not found", body = ErrorBody),
+        (status = 400, description = "A query is invalid", body = ErrorBody),
+        (status = 403, description = "A query was refused (role, scope or external access)", body = ErrorBody),
+        (status = 404, description = "Database not found, or a query names a missing resource", body = ErrorBody),
+        (status = 408, description = "The batch timed out", body = ErrorBody),
+        (status = 409, description = "A query conflicted with a concurrent transaction; retry the batch", body = ErrorBody),
+        (status = 503, description = "The database is unavailable (restoring or closing)", body = ErrorBody),
     ),
     tag = "Query"
 )]
@@ -67,7 +72,7 @@ pub async fn batch_query(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
-    let identity = auth.identity(state.service().is_query_read_only());
+    let identity = auth.identity();
 
     let results = QueryService::batch_execute_with_audit(
         state.databases(),

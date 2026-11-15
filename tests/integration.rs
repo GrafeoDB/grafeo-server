@@ -3884,6 +3884,99 @@ async fn create_schema_rejects_slash_in_name() {
     assert!(schemas.iter().all(|s| s.as_str() != Some("ana/lytics")));
 }
 
+/// A schema name is one name, never more statement text: the server runs the
+/// schema statements as the anonymous admin, so a crafted name must not add a
+/// statement of its own.
+#[tokio::test]
+async fn schema_names_are_never_part_of_the_statement() {
+    let base = spawn_server().await;
+    let client = Client::new();
+    let schemas = |client: &Client| {
+        let url = format!("{base}/db/default/schemas");
+        let client = client.clone();
+        async move {
+            let body: Value = client.get(url).send().await.unwrap().json().await.unwrap();
+            body["schemas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect::<Vec<String>>()
+        }
+    };
+
+    let resp = client
+        .post(format!("{base}/db/default/schemas"))
+        .json(&json!({ "name": "keep" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Created: exactly these names, as names (spaces, backticks and keywords
+    // included), and nothing else.
+    for name in ["two words", "tick`name", "x NEXT CREATE SCHEMA injected"] {
+        let resp = client
+            .post(format!("{base}/db/default/schemas"))
+            .json(&json!({ "name": name }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{name}: {}", resp.text().await.unwrap());
+    }
+    let listed = schemas(&client).await;
+    for name in [
+        "keep",
+        "two words",
+        "tick`name",
+        "x NEXT CREATE SCHEMA injected",
+    ] {
+        assert!(listed.iter().any(|s| s == name), "{name} in {listed:?}");
+    }
+    assert!(
+        !listed.iter().any(|s| s == "injected"),
+        "no statement ran from inside a name: {listed:?}"
+    );
+
+    // Dropped: only the named schema, never another one.
+    let crafted = "missing NEXT DROP SCHEMA keep";
+    let _ = client
+        .delete(format!(
+            "{base}/db/default/schemas/{}",
+            urlencoding_path(crafted)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        schemas(&client).await.iter().any(|s| s == "keep"),
+        "a crafted drop did not drop another schema"
+    );
+    let resp = client
+        .delete(format!(
+            "{base}/db/default/schemas/{}",
+            urlencoding_path("two words")
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(!schemas(&client).await.iter().any(|s| s == "two words"));
+}
+
+/// Percent-encodes a path segment (spaces and backticks).
+fn urlencoding_path(segment: &str) -> String {
+    segment
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Bulk import endpoints
 // ---------------------------------------------------------------------------
