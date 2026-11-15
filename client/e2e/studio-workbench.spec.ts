@@ -274,13 +274,20 @@ async function mark(page: Page, selector: string) {
 test("a page visit keeps the graph as it was", async ({ page }) => {
   await open(page);
   await seed(page);
-  await mark(page, ".gu-graph canvas");
+  // The graph view's own element: present with or without WebGL (a browser without it, such as headless Firefox on
+  // CI, shows the written note instead of a canvas). A remount would replace it, mark and all.
+  await mark(page, ".gu-shell-main .gu-graph");
+  const canvases = await page.locator(".gu-shell-main .gu-graph canvas").count();
+  if (canvases > 0) await mark(page, ".gu-shell-main .gu-graph canvas");
   const studio = page.getByRole("list", { name: "Studio" });
   await studio.getByRole("button", { name: "Databases", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Databases", level: 1 })).toBeVisible();
   await studio.getByRole("button", { name: "Query", exact: true }).click();
-  // The same canvas: the graph was hidden, not drawn and laid out again.
-  await expect(page.locator('.gu-graph canvas[data-e2e-mark="kept"]')).toHaveCount(1);
+  // The same graph view (and canvas, where there is one): hidden, not drawn and laid out again.
+  await expect(page.locator('.gu-shell-main .gu-graph[data-e2e-mark="kept"]')).toHaveCount(1);
+  if (canvases > 0) {
+    await expect(page.locator('.gu-shell-main .gu-graph canvas[data-e2e-mark="kept"]')).toHaveCount(1);
+  }
   await expect(page.getByText("2 nodes · 1 edge", { exact: false })).toBeVisible();
 });
 
