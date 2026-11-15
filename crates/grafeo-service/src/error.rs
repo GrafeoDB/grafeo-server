@@ -80,12 +80,12 @@ impl ServiceError {
     #[must_use]
     pub fn from_engine(error: grafeo_common::Error) -> Self {
         use grafeo_common::Error;
-        use grafeo_common::utils::error::{QueryErrorKind, TransactionError};
+        use grafeo_common::utils::error::{ErrorCode, QueryErrorKind, TransactionError};
 
         // A statement reaching outside the database without external access
         // (GRAFEO-Q008): the engine names its own Rust API, so say what the
         // operator of this server can do instead.
-        if error.error_code() == grafeo_common::utils::error::ErrorCode::QueryExternalAccessDenied {
+        if error.error_code() == ErrorCode::QueryExternalAccessDenied {
             return Self::Forbidden(format!(
                 "{error}. On this server it needs --allow-external-access \
                  (GRAFEO_ALLOW_EXTERNAL_ACCESS), and then an admin token"
@@ -97,17 +97,22 @@ impl ServiceError {
         if error.to_string().contains("permission denied") {
             return Self::Forbidden(error.to_string());
         }
+        // A conflict with a concurrent transaction is known by its code
+        // (GRAFEO-T001, T005 or the deadlock code), whichever variant carries
+        // it, so a conflict the engine starts reporting another way (such as
+        // concurrent MERGEs of one pattern) is still one the client retries.
+        if matches!(
+            error.error_code(),
+            ErrorCode::TransactionConflict
+                | ErrorCode::TransactionSerialization
+                | ErrorCode::TransactionDeadlock
+        ) {
+            return Self::TransactionConflict(error.to_string());
+        }
         match error {
             Error::Internal(_) | Error::Io(_) | Error::Serialization(_) | Error::Storage(_) => {
                 Self::Internal(error.to_string())
             }
-            Error::Transaction(
-                TransactionError::WriteConflict(_)
-                | TransactionError::Conflict
-                | TransactionError::Aborted
-                | TransactionError::SerializationFailure(_)
-                | TransactionError::Deadlock,
-            ) => Self::TransactionConflict(error.to_string()),
             Error::Transaction(
                 TransactionError::DatabaseClosed
                 | TransactionError::IncompleteCommit
@@ -158,6 +163,42 @@ impl ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_engine_conflict_is_a_retryable_conflict() {
+        use grafeo_common::Error;
+        use grafeo_common::utils::error::TransactionError;
+        for error in [
+            TransactionError::Conflict,
+            TransactionError::WriteConflict("node 1".into()),
+            TransactionError::Aborted,
+            TransactionError::SerializationFailure("read set changed".into()),
+            TransactionError::Deadlock,
+        ] {
+            let error = Error::Transaction(error);
+            let code = error.error_code();
+            assert!(
+                matches!(
+                    ServiceError::from_engine(error),
+                    ServiceError::TransactionConflict(_)
+                ),
+                "{code} is a conflict the client retries"
+            );
+        }
+        // The other transaction errors keep their own kinds.
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::Timeout)),
+            ServiceError::Timeout
+        ));
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::DatabaseClosed)),
+            ServiceError::Unavailable(_)
+        ));
+        assert!(matches!(
+            ServiceError::from_engine(Error::Transaction(TransactionError::ReadOnly)),
+            ServiceError::BadRequest(_)
+        ));
+    }
 
     #[test]
     fn a_batch_error_keeps_its_kind_and_names_the_statement() {
